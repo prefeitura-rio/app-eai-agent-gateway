@@ -18,14 +18,14 @@ from src.utils.serialize_letta_response import serialize_letta_response
     bind=True,
     serializer='json'
 )
-def send_agent_message(self, message_id: str, agent_id: str, message: str) -> None:
+def send_agent_message(self, message_id: str, agent_id: str, message: str, previous_message: str | None = None) -> None:
     """
     Envia mensagem para o agente Letta e guarda a resposta em Redis (TTL 60 s) sob a chave `message_id`.
     """
     try:
         logger.info(f"Processing message {message_id} for agent {agent_id}")
 
-        messages, usage = letta_service.send_message_sync(agent_id, message)
+        messages, usage = letta_service.send_message_sync(agent_id, message, previous_message)
         
         serialized_messages = serialize_letta_response(messages)
         serialized_usage = serialize_letta_response(usage)

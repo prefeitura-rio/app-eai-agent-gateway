@@ -1,7 +1,7 @@
 import json
 import uuid
 import asyncio
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 from loguru import logger
 
 from src.queue.tasks.message_tasks import send_agent_message
@@ -44,7 +44,7 @@ async def user_webhook(request: UserWebhookSchema):
         
         message_id = str(uuid.uuid4())
         
-        task_result = send_agent_message.delay(message_id, agent_id, request.message)
+        task_result = send_agent_message.delay(message_id, agent_id, request.message, request.previous_message)
         
         store_response_sync(f"{message_id}_task_id", task_result.id, ttl=300)
         
@@ -77,10 +77,14 @@ async def get_agent_message_from_queue(message_id: str):
                     "message": "Ocorreu um erro ao processar sua mensagem."
                 }
             elif data.get("status") == "retry":
-                return {
-                    "status": "processing",
-                    "message": f"Sua mensagem está sendo processada (tentativa {data.get('retry_count', 0)}/{data.get('max_retries', 3)}). Tente novamente em alguns segundos."
-                }
+                return Response(
+                    content=json.dumps({
+                        "status": "processing",
+                        "message": f"Sua mensagem está sendo processada (tentativa {data.get('retry_count', 0)}/{data.get('max_retries', 3)}). Tente novamente em alguns segundos."
+                    }),
+                    status_code=102,
+                    media_type="application/json"
+                )
             return {
                 "status": "completed",
                 "data": data
@@ -113,10 +117,14 @@ async def get_agent_message_from_queue(message_id: str):
                     "message": "Ocorreu um erro ao processar sua mensagem."
                 }
             elif task_state in ["PENDING", "RETRY", "STARTED"]:
-                return {
-                    "status": "processing",
-                    "message": "Sua mensagem está sendo processada. Tente novamente em alguns segundos."
-                }
+                return Response(
+                    content=json.dumps({
+                        "status": "processing",
+                        "message": "Sua mensagem está sendo processada. Tente novamente em alguns segundos."
+                    }),
+                    status_code=102,
+                    media_type="application/json"
+                )
         
 
         logger.warning(f"Message ID {message_id} not found in Redis - may have expired or never existed")

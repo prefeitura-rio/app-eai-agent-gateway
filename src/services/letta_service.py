@@ -25,16 +25,31 @@ class LettaService:
         
 ## SYNC METHODS
         
-    def send_message_sync(self, agent_id: str, message: str):
+    def send_message_sync(self, agent_id: str, message: str, previous_message: str | None = None):
       try:
-        response = self.client_sync.agents.messages.create(
-          agent_id=agent_id,
-          messages=[
+        
+        if previous_message is not None:
+          messages = [
+            MessageCreate(
+              role="system",
+              content=f"Previous message sent by system: {previous_message}"
+            ),
             MessageCreate(
               role="user",
               content=message
             )
-          ],
+          ]
+        else:
+          messages = [
+            MessageCreate(
+              role="user",
+              content=message
+            )
+          ]
+                  
+        response = self.client_sync.agents.messages.create(
+          agent_id=agent_id,
+          messages=messages,
         )
         
         return response.messages, response.usage
@@ -89,6 +104,19 @@ class LettaService:
       
       except Exception as e:
         logger.error(f"Error getting agent ID for user {user_number} on Letta: {e}")
+        raise e
+      
+    async def create_agent(self, user_number: str) -> str | None:
+      try:
+        response = await self.client.agents.create(
+          name=f"{user_number}",
+          tags=[user_number],
+          agent_type="memgpt_v2_agent",
+          
+        )
+        return response.id
+      except Exception as e:
+        logger.error(f"Error creating agent for user {user_number} on Letta: {e}")
         raise e
       
 letta_service = LettaService()
