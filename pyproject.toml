@@ -5,8 +5,12 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "aiolimiter>=1.2.1",
+    "celery[redis]>=5.5.3",
     "fastapi>=0.116.1",
+    "flower>=2.0.1",
     "granian[uvloop]>=2.4.2",
     "letta-client>=0.1.215",
     "loguru>=0.7.3",
+    "redis[hiredis]>=5.2.1",
 ]

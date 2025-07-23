@@ -1,0 +1,37 @@
+services:
+  # --- API HTTP ---
+  # api:
+  #   build: .
+  #   env_file: .env
+  #   ports: ["8000:8000"]
+  #   depends_on: [redis]
+
+  worker:
+    build: .
+    env_file: .env
+    command: >
+      uv run celery -A src.queue.celery_app.celery  worker
+      --concurrency=${CELERY_CONCURRENCY:-8}
+      --loglevel=${CELERY_LOG_LEVEL:-info}
+    depends_on: [redis]
+
+  flower:
+    build: .
+    env_file: .env
+    command: >
+      uv run celery -A src.queue.celery_app.celery flower
+      --port=${FLOWER_PORT:-5555}
+    ports: ["5555:${FLOWER_PORT:-5555}"]
+    depends_on: [redis]
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+volumes:
+  redis_data:
