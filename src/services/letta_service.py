@@ -47,24 +47,15 @@ class LettaService:
     def send_message_sync(self, agent_id: str, message: str, previous_message: str | None = None):
       try:
         
+        messages: list[MessageCreate] = []
         if previous_message is not None:
-          messages = [
+          messages.append(
             MessageCreate(
-              role="system",
+              role="user",
               content=f"Previous message sent by system: {previous_message}"
-            ),
-            MessageCreate(
-              role="user",
-              content=message
             )
-          ]
-        else:
-          messages = [
-            MessageCreate(
-              role="user",
-              content=message
-            )
-          ]
+          )
+        messages.append(MessageCreate(role="user", content=message))
                   
         response = self.client_sync.agents.messages.create(
           agent_id=agent_id,
@@ -74,18 +65,17 @@ class LettaService:
         return response.messages, response.usage
       
       except httpx.TimeoutException as e:
-        logger.error(f"Timeout sending message to agent {agent_id}: {e}")
-        raise LettaAPITimeoutError(f"Timeout communicating with Letta API: {str(e)}", agent_id=agent_id)
+        logger.exception(f"Timeout sending message to agent {agent_id}: {e}")
+        raise LettaAPITimeoutError(f"Timeout communicating with Letta API: {str(e)}", agent_id=agent_id) from e
       except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP status error sending message to agent {agent_id}: {e.response.status_code} - {e.response.text}")
-        raise LettaAPIError(f"Letta API error: {e.response.text}", status_code=e.response.status_code, agent_id=agent_id)
+        logger.exception(f"HTTP status error sending message to agent {agent_id}: {e.response.status_code} - {e.response.text}")
+        raise LettaAPIError(f"Letta API error: {e.response.text}", status_code=e.response.status_code, agent_id=agent_id) from e
       except httpx.HTTPError as e:
-        logger.error(f"HTTP error sending message to agent {agent_id}: {e}")
-        raise LettaAPIError(f"HTTP error: {str(e)}", agent_id=agent_id)
+        logger.exception(f"HTTP error sending message to agent {agent_id}: {e}")
+        raise LettaAPIError(f"HTTP error: {str(e)}", agent_id=agent_id) from e
       except Exception as e:
-        logger.error(f"Unexpected error sending message to agent {agent_id}: {e}")
-        logger.error(f"Exception type: {type(e).__name__}")
-        raise LettaAPIError(f"Unexpected error: {str(e)}", agent_id=agent_id)
+        logger.exception(f"Unexpected error sending message to agent {agent_id}: {e}")
+        raise LettaAPIError(f"Unexpected error: {str(e)}", agent_id=agent_id) from e
     
 ## ASYNC METHODS
         

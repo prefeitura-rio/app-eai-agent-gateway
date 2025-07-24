@@ -1,4 +1,3 @@
-import json
 import httpx
 from loguru import logger
 from celery.exceptions import SoftTimeLimitExceeded
@@ -33,8 +32,11 @@ class SerializableHTTPError(Exception):
 def send_agent_message(self, message_id: str, agent_id: str, message: str, previous_message: str | None = None) -> None:
     try:
         logger.info(f"[{self.request.id}] Processing message {message_id} for agent {agent_id}")
-
-        messages, usage = letta_service.send_message_sync(agent_id, message, previous_message)
+        
+        if previous_message is not None:
+            messages, usage = letta_service.send_message_sync(agent_id, message, previous_message)
+        else:
+            messages, usage = letta_service.send_message_sync(agent_id, message)
 
         data = {
             "messages": serialize_letta_response(messages),
@@ -43,40 +45,40 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
             "processed_at": self.request.id,
             "status": "done"
         }
-        store_response_sync(message_id, json.dumps(data), ttl=120)
+        store_response_sync(message_id, data, ttl=120)
 
         logger.info(f"[{self.request.id}] Successfully processed message {message_id} for agent {agent_id}")
 
     except SoftTimeLimitExceeded as exc:
         logger.warning(f"[{self.request.id}] Soft time limit exceeded for message {message_id}: {exc}")
-        store_response_sync(message_id, json.dumps({
+        store_response_sync(message_id, {
             "status": "retry",
             "error": "Soft time limit exceeded",
             "retry_count": self.request.retries,
             "max_retries": self.max_retries
-        }), ttl=60)
+        }, ttl=60)
         raise
 
     except LettaAPITimeoutError as exc:
         logger.warning(f"[{self.request.id}] Letta API timeout for message {message_id}: {exc}")
         if self.request.retries >= self.max_retries:
             logger.error(f"[{self.request.id}] Max retries exceeded for message {message_id}")
-            store_response_sync(message_id, json.dumps({
+            store_response_sync(message_id, {
                 "status": "error",
                 "error": f"Timeout da API Letta após {self.max_retries + 1} tentativas: {exc.message}",
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries,
                 "agent_id": agent_id,
                 "message_id": message_id
-            }), ttl=300)
+            }, ttl=300)
             raise exc
         else:
-            store_response_sync(message_id, json.dumps({
+            store_response_sync(message_id, {
                 "status": "retry",
                 "error": f"Timeout da API Letta: {exc.message}",
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries
-            }), ttl=60)
+            }, ttl=60)
             raise
 
     except LettaAPIError as exc:
@@ -88,44 +90,44 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 error_msg += f" (HTTP {exc.status_code})"
             error_msg += f": {exc.message}"
             
-            store_response_sync(message_id, json.dumps({
+            store_response_sync(message_id, {
                 "status": "error",
                 "error": error_msg,
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries,
                 "agent_id": agent_id,
                 "message_id": message_id
-            }), ttl=300)
+            }, ttl=300)
             raise exc
         else:
-            store_response_sync(message_id, json.dumps({
+            store_response_sync(message_id, {
                 "status": "retry",
                 "error": f"Erro da API Letta: {exc.message}",
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries
-            }), ttl=60)
+            }, ttl=60)
             raise
 
     except (httpx.HTTPError, httpx.TimeoutException) as exc:
         logger.warning(f"[{self.request.id}] Retryable HTTP error for message {message_id}: {exc}")
         if self.request.retries >= self.max_retries:
             logger.error(f"[{self.request.id}] Max retries exceeded for message {message_id}")
-            store_response_sync(message_id, json.dumps({
+            store_response_sync(message_id, {
                 "status": "error",
                 "error": f"Máximo de tentativas excedido: {str(exc)}",
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries,
                 "agent_id": agent_id,
                 "message_id": message_id
-            }), ttl=300)
+            }, ttl=300)
             raise exc
         else:
-            store_response_sync(message_id, json.dumps({
+            store_response_sync(message_id, {
                 "status": "retry",
                 "error": str(exc),
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries
-            }), ttl=60)
+            }, ttl=60)
             raise
 
     except Exception as exc:
@@ -133,19 +135,19 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
 
         if hasattr(exc, 'status_code') and hasattr(exc, 'detail'):
             error_detail = str(exc.detail) if exc.detail else "Unknown error"
-            store_response_sync(message_id, json.dumps({
+            store_response_sync(message_id, {
                 "status": "error",
                 "error": f"HTTP {exc.status_code}: {error_detail}",
                 "agent_id": agent_id,
                 "message_id": message_id
-            }), ttl=300)
+            }, ttl=300)
             # Lançar uma exceção serializável
             raise SerializableHTTPError(exc.status_code, error_detail)
         else:
-            store_response_sync(message_id, json.dumps({
+            store_response_sync(message_id, {
                 "status": "error",
                 "error": str(exc),
                 "agent_id": agent_id,
                 "message_id": message_id
-            }), ttl=300)
+            }, ttl=300)
             raise exc

@@ -18,7 +18,7 @@ async def agent_webhook(request: AgentWebhookSchema):
     try:
         message_id = str(uuid.uuid4())
         
-        task_result = send_agent_message.delay(message_id, request.agent_id, request.message)
+        task_result = send_agent_message.delay(message_id=message_id, agent_id=request.agent_id, message=request.message)
 
         await store_response_async(f"{message_id}_task_id", task_result.id, ttl=300)
 
@@ -53,9 +53,9 @@ async def user_webhook(request: UserWebhookSchema):
         message_id = str(uuid.uuid4())
         
         if request.previous_message is not None:
-            task_result = send_agent_message.delay(message_id, agent_id, request.message, request.previous_message)
+            task_result = send_agent_message.delay(message_id=message_id, agent_id=agent_id, message=request.message, previous_message=request.previous_message)
         else:
-            task_result = send_agent_message.delay(message_id, agent_id, request.message)
+            task_result = send_agent_message.delay(message_id=message_id, agent_id=agent_id, message=request.message)
         
         await store_response_async(f"{message_id}_task_id", task_result.id, ttl=300)
         
