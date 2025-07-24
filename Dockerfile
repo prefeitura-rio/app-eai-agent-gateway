@@ -13,4 +13,4 @@ ADD . /app
 
 RUN uv sync
 
-CMD ["uv", "run", "granian", "--interface", "asgi", "--workers", "4", "--runtime-mode", "mt", "--task-impl", "rust", "src.main:app"]
+CMD ["uv", "run", "granian", "--host", "0.0.0.0", "--interface", "asgi", "--workers", "4", "--runtime-mode", "mt", "--task-impl", "rust", "src.main:app"]
