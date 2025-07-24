@@ -1,0 +1,80 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eai-agent-gateway
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  selector:
+    matchLabels:
+      app: eai-agent-gateway
+  template:
+    metadata:
+      labels:
+        app: eai-agent-gateway
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: eai-agent-gateway
+          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+          envFrom:
+            - secretRef:
+                name: eai-agent-gateway-secrets
+          resources:
+            requests:
+              ephemeral-storage: 100Mi
+              cpu: 1000m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 1024Mi
+          # readinessProbe:
+          #   httpGet:
+          #     path: /v1/health
+          #     port: 8080
+          #   initialDelaySeconds: 5
+          #   periodSeconds: 10
+          #   timeoutSeconds: 3
+          # livenessProbe:
+          #   httpGet:
+          #     path: /v1/health
+          #     port: 8080
+          #   initialDelaySeconds: 15
+          #   periodSeconds: 20
+          #   timeoutSeconds: 3
+      restartPolicy: Always
+
+# ---
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata:
+#   name: eai-agent-gateway-scaled-object
+# spec:
+#   scaleTargetRef:
+#     name: eai-agent-gateway
+#   minReplicaCount: 1
+#   maxReplicaCount: 10
+#   cooldownPeriod: 10
+#   triggers:
+#     - type: prometheus
+#       metadata:
+#         serverAddress: http://prometheus.istio-system.svc.cluster.local:9090
+#         metricName: http_requests_total
+#         threshold: "4000"
+#         query: sum(rate(istio_requests_total{destination_workload="eai-agent-gateway"}[1m]))
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: eai-agent-gateway
+  name: eai-agent-gateway
+spec:
+  ports:
+    - name: "80"
+      port: 80
+      targetPort: 8000
+  selector:
+    app: eai-agent-gateway
