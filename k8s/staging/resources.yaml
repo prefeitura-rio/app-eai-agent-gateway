@@ -1,4 +1,5 @@
 ---
+# API
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -45,6 +46,78 @@ spec:
           #   timeoutSeconds: 3
       restartPolicy: Always
 
+---
+# Worker
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eai-agent-gateway-worker
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  selector:
+    matchLabels:
+      app: eai-agent-gateway-worker
+  template:
+    metadata:
+      labels:
+        app: eai-agent-gateway-worker
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: eai-agent-gateway-worker
+          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+          command: >
+            uv run celery -A src.queue.celery_app.celery worker
+            --concurrency=${CELERY_CONCURRENCY:-8}
+            --loglevel=${CELERY_LOG_LEVEL:-info}
+          envFrom:
+            - secretRef:
+                name: eai-agent-gateway-secrets
+          resources:
+            requests:
+              ephemeral-storage: 100Mi
+              cpu: 1000m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 1024Mi
+      restartPolicy: Always
+
+---
+# Flower
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eai-agent-gateway-flower
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  selector:
+    matchLabels:
+      app: eai-agent-gateway-flower
+  template:
+    metadata:
+      labels:
+        app: eai-agent-gateway-flower
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: eai-agent-gateway-flower
+          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+          envFrom:
+            - secretRef:
+                name: eai-agent-gateway-secrets
+          resources:
+            requests:
+              ephemeral-storage: 100Mi
+              cpu: 1000m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 1024Mi
+      restartPolicy: Always
+
 # ---
 # apiVersion: keda.sh/v1alpha1
 # kind: ScaledObject
@@ -78,3 +151,18 @@ spec:
       targetPort: 8000
   selector:
     app: eai-agent-gateway
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: eai-agent-gateway-flower
+  name: eai-agent-gateway-flower
+spec:
+  ports:
+    - name: "5555"
+      port: 5555
+      targetPort: 5555
+  selector:
+    app: eai-agent-gateway-flower
