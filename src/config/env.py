@@ -11,4 +11,15 @@ LETTA_RPS=int(getenv_or_action(env_name="LETTA_RPS", default="10"))
 # REDIS
 REDIS_DSN=getenv_or_action(env_name="REDIS_DSN")
 REDIS_BACKEND=getenv_or_action(env_name="REDIS_BACKEND")
-REDIS_TTL=int(getenv_or_action(env_name="REDIS_TTL", default="60"))
+REDIS_TTL=int(getenv_or_action(env_name="REDIS_TTL", default="120"))
+
+# AGENT CREATION
+LLM_MODEL=getenv_or_action(env_name="LLM_MODEL")
+EMBEDDING_MODEL=getenv_or_action(env_name="EMBEDDING_MODEL")
+
+# EAI AGENT
+EAI_AGENT_URL=getenv_or_action(env_name="EAI_AGENT_URL")
+EAI_AGENT_TOKEN=getenv_or_action(env_name="EAI_AGENT_TOKEN")
+
+# APP PREFIX
+APP_PREFIX=getenv_or_action(env_name="APP_PREFIX")
