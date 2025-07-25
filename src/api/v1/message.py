@@ -14,7 +14,7 @@ router = APIRouter(prefix="/message", tags=["Messages"])
 
 
 @router.post("/webhook/agent")
-async def agent_webhook(request: AgentWebhookSchema):
+async def agent_webhook(request: AgentWebhookSchema, response: Response):
     try:
         message_id = str(uuid.uuid4())
         
@@ -27,6 +27,7 @@ async def agent_webhook(request: AgentWebhookSchema):
         except asyncio.TimeoutError:
             logger.warning(f"Task {message_id} não foi aceita rapidamente, mas continua processando")
         
+        response.status_code = 201
         return {
             "message_id": message_id,
             "status": "processing",
@@ -44,7 +45,7 @@ async def agent_webhook(request: AgentWebhookSchema):
         raise HTTPException(status_code=500, detail=str(e))
     
 @router.post("/webhook/user")
-async def user_webhook(request: UserWebhookSchema):
+async def user_webhook(request: UserWebhookSchema, response: Response):
     try:
         agent_id = await letta_service.get_agent_id(user_number=request.user_number)
         if agent_id is None:
@@ -64,6 +65,7 @@ async def user_webhook(request: UserWebhookSchema):
         except asyncio.TimeoutError:
             logger.warning(f"Task {message_id} não foi aceita rapidamente, mas continua processando")
         
+        response.status_code = 201
         return {
             "message_id": message_id,
             "status": "processing", 
@@ -83,7 +85,7 @@ async def user_webhook(request: UserWebhookSchema):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/response")
-async def get_agent_message_from_queue(message_id: str = Query(..., description="ID da mensagem para consultar")):
+async def get_agent_message_from_queue(response: Response, message_id: str = Query(..., description="ID da mensagem para consultar")):
     # Validação do message_id como UUID
     try:
         uuid.UUID(message_id)
@@ -99,12 +101,14 @@ async def get_agent_message_from_queue(message_id: str = Query(..., description=
         if resp is not None:
             data = json.loads(resp)
             if data.get("status") == "error":
+                response.status_code = 500
                 return {
                     "status": "failed",
                     "error": data.get("error"),
                     "message": "Ocorreu um erro ao processar sua mensagem."
                 }
             elif data.get("status") == "retry":
+                response.status_code = 102
                 return {
                     "status": "processing",
                     "message": f"Sua mensagem está sendo processada (tentativa {data.get('retry_count', 0)}/{data.get('max_retries', 3)}). Tente novamente em alguns segundos."
@@ -141,6 +145,7 @@ async def get_agent_message_from_queue(message_id: str = Query(..., description=
                 }
                 await store_response_async(message_id, json.dumps(error_data))
                 
+                response.status_code = 500
                 return {
                     "status": "failed",
                     "error": error_info,
@@ -149,11 +154,13 @@ async def get_agent_message_from_queue(message_id: str = Query(..., description=
             elif task_state == "SUCCESS":
                 # Task concluída com sucesso, mas resposta ainda não apareceu no Redis
                 logger.info(f"Task {task_id_resp} succeeded for message {message_id}, but response not yet in Redis")
+                response.status_code = 102
                 return {
                     "status": "processing",
                     "message": "Sua mensagem foi processada com sucesso. Os dados estão sendo finalizados."
                 }
             elif task_state in ["PENDING", "RETRY", "STARTED"]:
+                response.status_code = 102
                 return {
                     "status": "processing",
                     "message": "Sua mensagem está sendo processada. Tente novamente em alguns segundos."
