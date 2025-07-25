@@ -20,7 +20,7 @@ async def agent_webhook(request: AgentWebhookSchema):
         
         task_result = send_agent_message.delay(message_id=message_id, agent_id=request.agent_id, message=request.message)
 
-        await store_response_async(f"{message_id}_task_id", task_result.id, ttl=300)
+        await store_response_async(f"{message_id}_task_id", task_result.id)
 
         try:
             await asyncio.wait_for(asyncio.to_thread(lambda: task_result.ready() or True), timeout=2.0)
@@ -57,7 +57,7 @@ async def user_webhook(request: UserWebhookSchema):
         else:
             task_result = send_agent_message.delay(message_id=message_id, agent_id=agent_id, message=request.message)
         
-        await store_response_async(f"{message_id}_task_id", task_result.id, ttl=300)
+        await store_response_async(f"{message_id}_task_id", task_result.id)
         
         try:
             await asyncio.wait_for(asyncio.to_thread(lambda: task_result.ready() or True), timeout=2.0)
@@ -139,7 +139,7 @@ async def get_agent_message_from_queue(message_id: str = Query(..., description=
                     "message_id": message_id,
                     "task_id": task_id_resp
                 }
-                await store_response_async(message_id, json.dumps(error_data), ttl=300)
+                await store_response_async(message_id, json.dumps(error_data))
                 
                 return {
                     "status": "failed",

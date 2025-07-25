@@ -45,7 +45,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
             "processed_at": self.request.id,
             "status": "done"
         }
-        store_response_sync(message_id, data, ttl=120)
+        store_response_sync(message_id, data)
 
         logger.info(f"[{self.request.id}] Successfully processed message {message_id} for agent {agent_id}")
 
@@ -56,7 +56,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
             "error": "Soft time limit exceeded",
             "retry_count": self.request.retries,
             "max_retries": self.max_retries
-        }, ttl=60)
+        })
         raise
 
     except LettaAPITimeoutError as exc:
@@ -70,7 +70,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "max_retries": self.max_retries,
                 "agent_id": agent_id,
                 "message_id": message_id
-            }, ttl=300)
+            })
             raise exc
         else:
             store_response_sync(message_id, {
@@ -78,7 +78,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "error": f"Timeout da API Letta: {exc.message}",
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries
-            }, ttl=60)
+            })
             raise
 
     except LettaAPIError as exc:
@@ -97,7 +97,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "max_retries": self.max_retries,
                 "agent_id": agent_id,
                 "message_id": message_id
-            }, ttl=300)
+            })
             raise exc
         else:
             store_response_sync(message_id, {
@@ -105,7 +105,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "error": f"Erro da API Letta: {exc.message}",
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries
-            }, ttl=60)
+            })
             raise
 
     except (httpx.HTTPError, httpx.TimeoutException) as exc:
@@ -119,7 +119,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "max_retries": self.max_retries,
                 "agent_id": agent_id,
                 "message_id": message_id
-            }, ttl=300)
+            })
             raise exc
         else:
             store_response_sync(message_id, {
@@ -127,7 +127,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "error": str(exc),
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries
-            }, ttl=60)
+            })
             raise
 
     except Exception as exc:
@@ -140,7 +140,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "error": f"HTTP {exc.status_code}: {error_detail}",
                 "agent_id": agent_id,
                 "message_id": message_id
-            }, ttl=300)
+            })
             # Lançar uma exceção serializável
             raise SerializableHTTPError(exc.status_code, error_detail)
         else:
@@ -149,5 +149,5 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "error": str(exc),
                 "agent_id": agent_id,
                 "message_id": message_id
-            }, ttl=300)
+            })
             raise exc
