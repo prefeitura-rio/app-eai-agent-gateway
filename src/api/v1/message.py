@@ -85,7 +85,7 @@ async def user_webhook(request: UserWebhookSchema, response: Response):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/response")
-async def get_agent_message_from_queue(message_id: str = Query(..., description="ID da mensagem para consultar")):
+async def get_agent_message_from_queue(response_obj: Response, message_id: str = Query(..., description="ID da mensagem para consultar")):
     # Validação do message_id como UUID
     try:
         uuid.UUID(message_id)
@@ -101,14 +101,14 @@ async def get_agent_message_from_queue(message_id: str = Query(..., description=
         if resp is not None:
             data = json.loads(resp)
             if data.get("status") == "error":
-                # response.status_code = 500
+                response_obj.status_code = 500
                 return {
                     "status": "failed",
                     "error": data.get("error"),
                     "message": "Ocorreu um erro ao processar sua mensagem."
                 }
             elif data.get("status") == "retry":
-                # response.status_code = 102
+                response_obj.status_code = 202
                 return {
                     "status": "processing",
                     "message": f"Sua mensagem está sendo processada (tentativa {data.get('retry_count', 0)}/{data.get('max_retries', 3)}). Tente novamente em alguns segundos."
@@ -144,8 +144,8 @@ async def get_agent_message_from_queue(message_id: str = Query(..., description=
                     "task_id": task_id_resp
                 }
                 await store_response_async(message_id, json.dumps(error_data))
-                
-                # response.status_code = 500
+
+                response_obj.status_code = 500
                 return {
                     "status": "failed",
                     "error": error_info,
@@ -154,13 +154,13 @@ async def get_agent_message_from_queue(message_id: str = Query(..., description=
             elif task_state == "SUCCESS":
                 # Task concluída com sucesso, mas resposta ainda não apareceu no Redis
                 logger.info(f"Task {task_id_resp} succeeded for message {message_id}, but response not yet in Redis")
-                # response.status_code = 102
+                response_obj.status_code = 202
                 return {
                     "status": "processing",
                     "message": "Sua mensagem foi processada com sucesso. Os dados estão sendo finalizados."
                 }
             elif task_state in ["PENDING", "RETRY", "STARTED"]:
-                # response.status_code = 102
+                response_obj.status_code = 202
                 return {
                     "status": "processing",
                     "message": "Sua mensagem está sendo processada. Tente novamente em alguns segundos."
