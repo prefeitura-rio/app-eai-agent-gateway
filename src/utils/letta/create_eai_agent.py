@@ -16,7 +16,6 @@ async def create_eai_agent(user_number: str, override_payload: dict | None = Non
     from src.services.letta_service import letta_service
     system_prompt = await get_system_prompt_from_api(agent_type="agentic_search")
     agent_config = await get_agent_config_from_api(agent_type="agentic_search")
-    tool_rules = await _build_tool_rules(agent_config.get("tools"))
     
     base_config = {
         "agent_type": "memgpt_v2_agent",
@@ -31,9 +30,12 @@ async def create_eai_agent(user_number: str, override_payload: dict | None = Non
         "include_base_tool_rules": True,
         "include_base_tools": True,
         "timezone": "America/Sao_Paulo",
-        "tool_rules": tool_rules,
+        # "tool_rules": tool_rules,
     }
     
     agent_variables = _merge_config(base_config, override_payload)
-    
+
+    tool_rules = await _build_tool_rules(agent_variables.get("tools"))
+    agent_variables["tool_rules"] = tool_rules
+
     return await letta_service.client.agents.create(**agent_variables)
