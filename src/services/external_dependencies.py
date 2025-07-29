@@ -77,24 +77,28 @@ async def get_agent_config_from_api(agent_type: str = "agentic_search") -> dict:
         return cached_result
     
     base_url = getattr(env, "EAI_AGENT_URL", "http://localhost:8000")
-    api_url = f"{base_url}agent-config?agent_type={agent_type}"
+    api_url = f"{base_url}unified-history"
     bearer_token = getattr(env, "EAI_AGENT_TOKEN", "")
 
     headers = {}
+    params = {
+        "agent_type": agent_type,
+        "limit": 1,  # Limite de 1 para obter a configuração mais recente
+    }
     if bearer_token:
         headers["Authorization"] = f"Bearer {bearer_token}"
 
     for attempt in range(3):
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(api_url, headers=headers)
+                response = await client.get(api_url, headers=headers, params=params)
                 
                 if 500 <= response.status_code <= 599 and attempt < 2:
                     logger.warning(f"Server error {response.status_code} on attempt {attempt + 1}/3")
                     continue
                 
                 response.raise_for_status()
-                data = response.json()
+                data = response.json()["items"][0]["config"]
 
                 await store_json_cache_async(cache_key, data, CACHE_TTL_SECONDS)
 
