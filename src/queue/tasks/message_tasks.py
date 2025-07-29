@@ -33,7 +33,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
     try:
         logger.info(f"[{self.request.id}] Processing message {message_id} for agent {agent_id}")
         
-        if previous_message is not None:
+        if previous_message is not None or previous_message != "":
             logger.info(f"[{self.request.id}] Previous message found for agent {agent_id}, including in request. The previous message is: {previous_message}")
             messages, usage = letta_service.send_message_sync(agent_id, message, previous_message)
         else:
