@@ -11,7 +11,7 @@ from src.services.redis_service import (
     get_json_cache_async
 )
 
-CACHE_TTL_SECONDS = 420  # 7 minutos
+CACHE_TTL_SECONDS = env.CACHE_TTL_SECONDS  # 7 minutos
 
 async def get_system_prompt_from_api(agent_type: str = "agentic_search") -> str:
     """Obtém o system prompt via API"""

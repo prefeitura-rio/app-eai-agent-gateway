@@ -23,3 +23,6 @@ EAI_AGENT_TOKEN=getenv_or_action(env_name="EAI_AGENT_TOKEN")
 
 # APP PREFIX
 APP_PREFIX=getenv_or_action(env_name="APP_PREFIX")
+
+# CACHE
+CACHE_TTL_SECONDS=int(getenv_or_action(env_name="CACHE_TTL_SECONDS", default="720")) 
