@@ -97,6 +97,9 @@ async def get_agent_config_from_api(agent_type: str = "agentic_search") -> dict:
                 data = response.json()
 
                 await store_json_cache_async(cache_key, data, CACHE_TTL_SECONDS)
+
+                logger.info(f"Agent config retrieved successfully for agent type {agent_type}")
+                logger.info(f"Config: {json.dumps(data, indent=2)[0:100]}...")
                 
                 return data
 
