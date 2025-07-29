@@ -46,6 +46,9 @@ async def get_system_prompt_from_api(agent_type: str = "agentic_search") -> str:
                 if prompt:
                     await store_string_cache_async(cache_key, prompt, CACHE_TTL_SECONDS)
                 
+                logger.info(f"System prompt retrieved successfully for agent type {agent_type}")
+                logger.info(f"Prompt: {prompt[0:100]}...")  # Log first 100 characters for brevity
+
                 return prompt
 
         except httpx.HTTPStatusError as e:
