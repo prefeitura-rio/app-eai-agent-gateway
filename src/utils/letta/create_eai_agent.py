@@ -26,7 +26,7 @@ async def create_eai_agent(user_number: str, override_payload: dict | None = Non
         "tools": agent_config.get("tools"),
         "model": agent_config.get("model_name"),
         "embedding": agent_config.get("embedding_name"),
-        "context_window_limit": 30000,
+        "context_window_limit": 100000,
         "include_base_tool_rules": True,
         "include_base_tools": True,
         "timezone": "America/Sao_Paulo",
