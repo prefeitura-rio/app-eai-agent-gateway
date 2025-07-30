@@ -1,9 +1,14 @@
+from json import tool
 from src.services.external_dependencies import get_system_prompt_from_api, get_agent_config_from_api
-from letta_client import ContinueToolRule
+from src.config import env
+from letta_client import ContinueToolRule, ParentToolRule
 
 async def _build_tool_rules(tools: list[str]):
     """Builds the tool rules for the agent."""
-    return [ContinueToolRule(tool_name=tool) for tool in tools]
+    tool_list = [ContinueToolRule(tool_name=tool) for tool in tools]
+    if "equipments_instructions" in tools and "equipments_by_address" in tools:
+        tool_list.append(ParentToolRule(tool_name="equipments_instructions", children=["equipments_by_address"]))
+    return tool_list
 
 def _merge_config(base_config: dict, override_payload: dict | None) -> dict:
     """Faz merge das configurações base com os overrides fornecidos."""
@@ -26,7 +31,7 @@ async def create_eai_agent(user_number: str, override_payload: dict | None = Non
         "tools": agent_config.get("tools"),
         "model": agent_config.get("model_name"),
         "embedding": agent_config.get("embedding_name"),
-        "context_window_limit": 100000,
+        "context_window_limit": env.EAI_AGENT_CONTEXT_WINDOW_LIMIT,
         "include_base_tool_rules": True,
         "include_base_tools": True,
         "timezone": "America/Sao_Paulo",
