@@ -14,7 +14,6 @@ celery = Celery(
 celery.autodiscover_tasks(["src.queue.tasks"])
 
 celery.conf.update(
-    worker_concurrency=env.MAX_PARALLEL,
     worker_prefetch_multiplier=1,
     task_acks_late=True,
     task_serializer="json",
@@ -23,7 +22,7 @@ celery.conf.update(
     result_expires=3600,
     # Pool configuration - can be 'prefork', 'eventlet', 'gevent', or 'solo'
     worker_pool=env.CELERY_WORKER_POOL,
-    # For eventlet/gevent pools, this controls the number of greenlets
+    # For prefork pools, set concurrency in config
     worker_concurrency=env.MAX_PARALLEL if env.CELERY_WORKER_POOL == 'prefork' else None,
 )
 
