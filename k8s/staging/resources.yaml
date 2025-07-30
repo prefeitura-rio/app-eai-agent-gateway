@@ -78,10 +78,10 @@ spec:
             requests:
               ephemeral-storage: 100Mi
               cpu: 1000m
-              memory: 2048Mi
+              memory: 4096Mi
             limits:
               cpu: 2000m
-              memory: 2048Mi
+              memory: 4096Mi
       restartPolicy: Always
 
 ---
