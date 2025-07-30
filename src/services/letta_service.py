@@ -4,9 +4,11 @@ import httpx
 from fastapi import HTTPException
 
 from src.config import env
-from src.utils.letta.eai_agent import create_eai_agent, delete_eai_agent
+from src.config.telemetry import get_tracer
+from src.utils.letta.create_eai_agent import create_eai_agent
 
 logger = logging.getLogger(__name__)
+tracer = get_tracer("letta-service")
 
 
 class LettaAPITimeoutError(Exception):
@@ -45,101 +47,143 @@ class LettaService:
 ## SYNC METHODS
         
     def send_message_sync(self, agent_id: str, message: str, previous_message: str | None = None):
-      try:
+      with tracer.start_as_current_span("letta.send_message_sync") as span:
+        span.set_attribute("letta.agent_id", agent_id)
+        span.set_attribute("letta.message_length", len(message))
+        span.set_attribute("letta.has_previous_message", previous_message is not None)
         
-        messages: list[MessageCreate] = []
-        if previous_message is not None:
-          messages.append(
-            MessageCreate(
-              role="user",
-              content=f"Previous message sent by system: {previous_message}"
+        try:
+        
+          messages: list[MessageCreate] = []
+          if previous_message is not None:
+            messages.append(
+              MessageCreate(
+                role="user",
+                content=f"Previous message sent by system: {previous_message}"
+              )
             )
+          messages.append(MessageCreate(role="user", content=message))
+                    
+          response = self.client_sync.agents.messages.create(
+            agent_id=agent_id,
+            messages=messages,
           )
-        messages.append(MessageCreate(role="user", content=message))
-                  
-        response = self.client_sync.agents.messages.create(
-          agent_id=agent_id,
-          messages=messages,
-        )
+          
+          span.set_attribute("letta.response_messages_count", len(response.messages))
+          if response.usage:
+            span.set_attribute("letta.usage_tokens", response.usage.total_tokens)
+          
+          return response.messages, response.usage
         
-        return response.messages, response.usage
-      
-      except httpx.TimeoutException as e:
-        logger.exception(f"Timeout sending message to agent {agent_id}: {e}")
-        raise LettaAPITimeoutError(f"Timeout communicating with Letta API: {str(e)}", agent_id=agent_id) from e
-      except httpx.HTTPStatusError as e:
-        logger.exception(f"HTTP status error sending message to agent {agent_id}: {e.response.status_code} - {e.response.text}")
-        raise LettaAPIError(f"Letta API error: {e.response.text}", status_code=e.response.status_code, agent_id=agent_id) from e
-      except httpx.HTTPError as e:
-        logger.exception(f"HTTP error sending message to agent {agent_id}: {e}")
-        raise LettaAPIError(f"HTTP error: {str(e)}", agent_id=agent_id) from e
-      except Exception as e:
-        logger.exception(f"Unexpected error sending message to agent {agent_id}: {e}")
-        raise LettaAPIError(f"Unexpected error: {str(e)}", agent_id=agent_id) from e
+        except httpx.TimeoutException as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.exception(f"Timeout sending message to agent {agent_id}: {e}")
+          raise LettaAPITimeoutError(f"Timeout communicating with Letta API: {str(e)}", agent_id=agent_id) from e
+        except httpx.HTTPStatusError as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          span.set_attribute("http.status_code", e.response.status_code)
+          logger.exception(f"HTTP status error sending message to agent {agent_id}: {e.response.status_code} - {e.response.text}")
+          raise LettaAPIError(f"Letta API error: {e.response.text}", status_code=e.response.status_code, agent_id=agent_id) from e
+        except httpx.HTTPError as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.exception(f"HTTP error sending message to agent {agent_id}: {e}")
+          raise LettaAPIError(f"HTTP error: {str(e)}", agent_id=agent_id) from e
+        except Exception as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.exception(f"Unexpected error sending message to agent {agent_id}: {e}")
+          raise LettaAPIError(f"Unexpected error: {str(e)}", agent_id=agent_id) from e
     
 ## ASYNC METHODS
         
     async def send_message(self, agent_id: str, message: str):
-      try:
-        response = await self.client.agents.messages.create(
-          agent_id=agent_id,
-          messages=[
-            MessageCreate(
-              role="user",
-              content=message
-            )
-          ],
-        )
+      with tracer.start_as_current_span("letta.send_message_async") as span:
+        span.set_attribute("letta.agent_id", agent_id)
+        span.set_attribute("letta.message_length", len(message))
         
-        return response.messages, response.usage
-      
-      except httpx.TimeoutException as e:
-        logger.error(f"Timeout sending async message to agent {agent_id}: {e}")
-        raise HTTPException(status_code=408, detail=f"Timeout communicating with Letta API: {str(e)}")
-      except httpx.HTTPStatusError as e:
-        logger.error(f"HTTP status error sending async message to agent {agent_id}: {e.response.status_code} - {e.response.text}")
-        raise HTTPException(status_code=e.response.status_code, detail=f"Letta API error: {e.response.text}")
-      except httpx.HTTPError as e:
-        logger.error(f"HTTP error sending async message to agent {agent_id}: {e}")
-        raise HTTPException(status_code=500, detail=f"HTTP error: {str(e)}")
-      except Exception as e:
-        logger.error(f"Unexpected error sending async message to agent {agent_id}: {e}")
-        logger.error(f"Exception type: {type(e).__name__}")
-        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
+        try:
+          response = await self.client.agents.messages.create(
+            agent_id=agent_id,
+            messages=[
+              MessageCreate(
+                role="user",
+                content=message
+              )
+            ],
+          )
+          
+          span.set_attribute("letta.response_messages_count", len(response.messages))
+          if response.usage:
+            span.set_attribute("letta.usage_tokens", response.usage.total_tokens)
+          
+          return response.messages, response.usage
+        
+        except httpx.TimeoutException as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.error(f"Timeout sending async message to agent {agent_id}: {e}")
+          raise HTTPException(status_code=408, detail=f"Timeout communicating with Letta API: {str(e)}")
+        except httpx.HTTPStatusError as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          span.set_attribute("http.status_code", e.response.status_code)
+          logger.error(f"HTTP status error sending async message to agent {agent_id}: {e.response.status_code} - {e.response.text}")
+          raise HTTPException(status_code=e.response.status_code, detail=f"Letta API error: {e.response.text}")
+        except httpx.HTTPError as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.error(f"HTTP error sending async message to agent {agent_id}: {e}")
+          raise HTTPException(status_code=500, detail=f"HTTP error: {str(e)}")
+        except Exception as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.error(f"Unexpected error sending async message to agent {agent_id}: {e}")
+          logger.error(f"Exception type: {type(e).__name__}")
+          raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
       
     async def get_agent_id(self, user_number: str) -> str | None:
-      try:
-        response = await self.client.agents.list(
-          tags=[user_number],
-          limit=1, 
-          match_all_tags=False,
-        )
+      with tracer.start_as_current_span("letta.get_agent_id") as span:
+        span.set_attribute("letta.user_number", user_number)
         
-        if response:
-          return response[0].id
-        return None
-      
-      except Exception as e:
-        logger.error(f"Error getting agent ID for user {user_number} on Letta: {e}")
-        raise e
+        try:
+          response = await self.client.agents.list(
+            tags=[user_number],
+            limit=1, 
+            match_all_tags=False,
+          )
+          
+          if response:
+            agent_id = response[0].id
+            span.set_attribute("letta.agent_id", agent_id)
+            return agent_id
+          return None
+        
+        except Exception as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.error(f"Error getting agent ID for user {user_number} on Letta: {e}")
+          raise e
       
     async def create_agent(self, user_number: str, override_payload: dict | None = None) -> str | None:
-      try:
-        if override_payload is None:
-          agent = await create_eai_agent(user_number=user_number)
-        else:
-          agent = await create_eai_agent(user_number=user_number, override_payload=override_payload)
-        return agent.id
-      except Exception as e:
-        logger.error(f"Error creating agent for user {user_number} on Letta: {e}")
-        raise e
-    
-    async def delete_agent(self, agent_id: str) -> dict:
-      try:
-        await delete_eai_agent(agent_id=agent_id)
-        return {"message": f"Agent {agent_id} deleted successfully."}
-      except Exception as e:
-        logger.error(f"Error deleting agent {agent_id} on Letta: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+      with tracer.start_as_current_span("letta.create_agent") as span:
+        span.set_attribute("letta.user_number", user_number)
+        span.set_attribute("letta.has_override_payload", override_payload is not None)
+        
+        try:
+          if override_payload is None:
+            agent = await create_eai_agent(user_number=user_number)
+          else:
+            agent = await create_eai_agent(user_number=user_number, override_payload=override_payload)
+          
+          span.set_attribute("letta.agent_id", agent.id)
+          return agent.id
+        except Exception as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.error(f"Error creating agent for user {user_number} on Letta: {e}")
+          raise e
       
 letta_service = LettaService()

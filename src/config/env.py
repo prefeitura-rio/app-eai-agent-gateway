@@ -25,5 +25,12 @@ EAI_AGENT_CONTEXT_WINDOW_LIMIT=int(getenv_or_action(env_name="EAI_AGENT_CONTEXT_
 # APP PREFIX
 APP_PREFIX=getenv_or_action(env_name="APP_PREFIX")
 
+# OPEN TELEMETRY
+OTEL_ENABLED = getenv_or_action(env_name="OTEL_ENABLED", default="false").lower() == "true"
+OTEL_COLLECTOR_URL = getenv_or_action(env_name="OTEL_COLLECTOR_URL", default="http://localhost:4317")
+OTEL_SERVICE_NAME = getenv_or_action(env_name="OTEL_SERVICE_NAME", default="eai-gateway")
+OTEL_SERVICE_VERSION = getenv_or_action(env_name="OTEL_SERVICE_VERSION", default="0.1.0")
+OTEL_ENVIRONMENT = getenv_or_action(env_name="OTEL_ENVIRONMENT", default="development")
+
 # CACHE
 CACHE_TTL_SECONDS=int(getenv_or_action(env_name="CACHE_TTL_SECONDS", default="720")) 

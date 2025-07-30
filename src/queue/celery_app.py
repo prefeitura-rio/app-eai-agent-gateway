@@ -1,5 +1,9 @@
 from celery import Celery
 from src.config import env
+from src.config.telemetry import setup_telemetry, instrument_celery
+
+# Setup OpenTelemetry before creating Celery app
+setup_telemetry()
 
 celery = Celery(
     "gateway",
@@ -18,3 +22,6 @@ celery.conf.update(
     accept_content=["json"],
     result_expires=3600,
 )
+
+# Instrument Celery with OpenTelemetry
+instrument_celery()
