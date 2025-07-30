@@ -70,7 +70,7 @@ spec:
       containers:
         - name: eai-agent-gateway-worker
           image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
-          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery worker --concurrency=${CELERY_CONCURRENCY:-8} --loglevel=${CELERY_LOG_LEVEL:-info}"]
+          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery worker --concurrency=${MAX_PARALLEL:-8} --loglevel=${CELERY_LOG_LEVEL:-info}"]
           envFrom:
             - secretRef:
                 name: eai-agent-gateway-secrets
