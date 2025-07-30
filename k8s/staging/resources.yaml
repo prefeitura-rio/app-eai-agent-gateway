@@ -70,19 +70,34 @@ spec:
       containers:
         - name: eai-agent-gateway-worker
           image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
-          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery worker --concurrency=${MAX_PARALLEL:-8} --loglevel=${CELERY_LOG_LEVEL:-info}"]
+          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery worker --pool=${CELERY_WORKER_POOL:-eventlet} --concurrency=${MAX_PARALLEL:-500} --loglevel=${CELERY_LOG_LEVEL:-info}"]
           envFrom:
             - secretRef:
                 name: eai-agent-gateway-secrets
+          env:
+            - name: CELERY_WORKER_POOL
+              value: "eventlet"
           resources:
             requests:
               ephemeral-storage: 100Mi
-              cpu: 1000m
-              memory: 4096Mi
+              cpu: 500m
+              memory: 1024Mi
             limits:
               cpu: 2000m
-              memory: 4096Mi
+              memory: 2048Mi
       restartPolicy: Always
+
+---
+# Pod Disruption Budget for Worker
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eai-agent-gateway-worker-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: eai-agent-gateway-worker
 
 ---
 # Flower
@@ -118,25 +133,6 @@ spec:
               cpu: 2000m
               memory: 1024Mi
       restartPolicy: Always
-
-# ---
-# apiVersion: keda.sh/v1alpha1
-# kind: ScaledObject
-# metadata:
-#   name: eai-agent-gateway-scaled-object
-# spec:
-#   scaleTargetRef:
-#     name: eai-agent-gateway
-#   minReplicaCount: 1
-#   maxReplicaCount: 10
-#   cooldownPeriod: 10
-#   triggers:
-#     - type: prometheus
-#       metadata:
-#         serverAddress: http://prometheus.istio-system.svc.cluster.local:9090
-#         metricName: http_requests_total
-#         threshold: "4000"
-#         query: sum(rate(istio_requests_total{destination_workload="eai-agent-gateway"}[1m]))
 
 ---
 apiVersion: v1

@@ -21,6 +21,10 @@ celery.conf.update(
     result_serializer="json",
     accept_content=["json"],
     result_expires=3600,
+    # Pool configuration - can be 'prefork', 'eventlet', 'gevent', or 'solo'
+    worker_pool=env.CELERY_WORKER_POOL,
+    # For eventlet/gevent pools, this controls the number of greenlets
+    worker_concurrency=env.MAX_PARALLEL if env.CELERY_WORKER_POOL == 'prefork' else None,
 )
 
 # Instrument Celery with OpenTelemetry

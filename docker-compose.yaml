@@ -11,7 +11,8 @@ services:
     env_file: .env
     command: >
       uv run celery -A src.queue.celery_app.celery  worker
-      --concurrency=${CELERY_CONCURRENCY:-8}
+      --pool=${CELERY_WORKER_POOL:-eventlet}
+      --concurrency=${CELERY_CONCURRENCY:-1000}
       --loglevel=${CELERY_LOG_LEVEL:-info}
     depends_on: [redis]
 
