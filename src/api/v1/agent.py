@@ -20,3 +20,14 @@ async def create_agent_endpoint(request: CreateAgentRequestAndOverridePayload):
   except Exception as e:
     logger.error(f"Error creating agent: {e}")
     raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/{agent_id}")
+async def delete_agent_endpoint(agent_id: str):
+  try:
+    await letta_service.delete_agent(agent_id=agent_id)
+    return {
+      "message": f"Agent {agent_id} deleted successfully",
+    }
+  except Exception as e:
+    logger.error(f"Error deleting agent: {e}")
+    raise HTTPException(status_code=500, detail=str(e))

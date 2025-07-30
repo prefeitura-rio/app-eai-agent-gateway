@@ -44,3 +44,12 @@ async def create_eai_agent(user_number: str, override_payload: dict | None = Non
     agent_variables["tool_rules"] = tool_rules
 
     return await letta_service.client.agents.create(**agent_variables)
+
+async def delete_eai_agent(agent_id: str):
+    """Deletes an EAI agent by its ID."""
+    from src.services.letta_service import letta_service
+    try:
+        await letta_service.client.agents.delete(agent_id)
+    except Exception as e:
+        raise Exception(f"Error deleting agent {agent_id}: {str(e)}")
+    return {"message": f"Agent {agent_id} deleted successfully."}
