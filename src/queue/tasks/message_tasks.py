@@ -1,5 +1,6 @@
 import httpx
 import eventlet
+import time
 from loguru import logger
 from celery.exceptions import SoftTimeLimitExceeded
 from src.queue.celery_app import celery
@@ -8,6 +9,7 @@ from src.config.telemetry import get_tracer
 from src.services.redis_service import store_response_sync
 from src.services.letta_service import letta_service, LettaAPIError, LettaAPITimeoutError
 from src.utils.serialize_letta_response import serialize_letta_response
+from src.services.prometheus_metrics import celery_tasks_total, celery_task_errors, celery_task_duration
 
 # Note: eventlet monkey patching removed to avoid breaking Flower
 
@@ -34,6 +36,9 @@ class SerializableHTTPError(Exception):
     reject_on_worker_lost=True,
 )
 def send_agent_message(self, message_id: str, agent_id: str, message: str, previous_message: str | None = None) -> None:
+    start_time = time.time()
+    task_name = "send_agent_message"
+    
     with tracer.start_as_current_span("celery.send_agent_message") as span:
         span.set_attribute("celery.task_id", self.request.id)
         span.set_attribute("celery.message_id", message_id)
@@ -67,6 +72,11 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 span.set_attribute("celery.usage_tokens", usage.total_tokens)
 
             logger.info(f"[{self.request.id}] Successfully processed message {message_id} for agent {agent_id}")
+            
+            # Record success metrics
+            duration = time.time() - start_time
+            celery_task_duration.labels(task_name=task_name).observe(duration)
+            celery_tasks_total.labels(task_name=task_name, status="success").inc()
 
         except SoftTimeLimitExceeded as exc:
             span.record_exception(exc)
@@ -79,6 +89,11 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries
             })
+            # Record timeout error metrics
+            duration = time.time() - start_time
+            celery_task_duration.labels(task_name=task_name).observe(duration)
+            celery_tasks_total.labels(task_name=task_name, status="timeout").inc()
+            celery_task_errors.labels(task_name=task_name, error_type="timeout").inc()
             raise
 
         except LettaAPITimeoutError as exc:
@@ -97,6 +112,11 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                     "agent_id": agent_id,
                     "message_id": message_id
                 })
+                # Record API timeout error metrics
+                duration = time.time() - start_time
+                celery_task_duration.labels(task_name=task_name).observe(duration)
+                celery_tasks_total.labels(task_name=task_name, status="api_timeout").inc()
+                celery_task_errors.labels(task_name=task_name, error_type="api_timeout").inc()
                 raise exc
             else:
                 store_response_sync(message_id, {
@@ -105,6 +125,10 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                     "retry_count": self.request.retries,
                     "max_retries": self.max_retries
                 })
+                # Record retry metrics
+                duration = time.time() - start_time
+                celery_task_duration.labels(task_name=task_name).observe(duration)
+                celery_tasks_total.labels(task_name=task_name, status="retry").inc()
                 raise
 
         except LettaAPIError as exc:

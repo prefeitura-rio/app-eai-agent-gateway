@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: eai-agent-gateway-monitor
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: eai-agent-gateway
+  endpoints:
+    - port: "80"
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s 
