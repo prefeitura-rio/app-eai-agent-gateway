@@ -10,6 +10,10 @@ LETTA_RPS=int(getenv_or_action(env_name="LETTA_RPS", default="10"))
 CELERY_WORKER_POOL=getenv_or_action(env_name="CELERY_WORKER_POOL", default="prefork")
 ENABLE_EVENTLET_PATCH=getenv_or_action(env_name="ENABLE_EVENTLET_PATCH", default="false")
 
+# CELERY TASK LIMITS
+CELERY_SOFT_TIME_LIMIT=int(getenv_or_action(env_name="CELERY_SOFT_TIME_LIMIT", default="90"))
+CELERY_TIME_LIMIT=int(getenv_or_action(env_name="CELERY_TIME_LIMIT", default="120"))
+
 # REDIS
 REDIS_DSN=getenv_or_action(env_name="REDIS_DSN")
 REDIS_BACKEND=getenv_or_action(env_name="REDIS_BACKEND")

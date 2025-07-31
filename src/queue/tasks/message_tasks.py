@@ -4,6 +4,7 @@ from loguru import logger
 from celery.exceptions import SoftTimeLimitExceeded
 from src.queue.celery_app import celery
 from src.config.telemetry import get_tracer
+from src.config import env
 from src.services.redis_service import store_response_sync
 from src.services.letta_service import letta_service, LettaAPIError, LettaAPITimeoutError
 from src.utils.serialize_letta_response import serialize_letta_response
@@ -24,8 +25,8 @@ class SerializableHTTPError(Exception):
     autoretry_for=(httpx.HTTPError, httpx.TimeoutException, SoftTimeLimitExceeded, SerializableHTTPError, LettaAPIError, LettaAPITimeoutError),
     retry_backoff=True,
     retry_kwargs={"max_retries": 3},
-    soft_time_limit=90,
-    time_limit=120,
+    soft_time_limit=env.CELERY_SOFT_TIME_LIMIT,
+    time_limit=env.CELERY_TIME_LIMIT,
     bind=True,
     serializer='json',
     acks_late=True,
