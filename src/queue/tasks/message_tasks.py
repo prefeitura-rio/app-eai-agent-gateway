@@ -1,4 +1,5 @@
 import httpx
+import eventlet
 from loguru import logger
 from celery.exceptions import SoftTimeLimitExceeded
 from src.queue.celery_app import celery
@@ -23,9 +24,8 @@ class SerializableHTTPError(Exception):
     autoretry_for=(httpx.HTTPError, httpx.TimeoutException, SoftTimeLimitExceeded, SerializableHTTPError, LettaAPIError, LettaAPITimeoutError),
     retry_backoff=True,
     retry_kwargs={"max_retries": 3},
-    rate_limit=f"{env.LETTA_RPS}/s",
-    soft_time_limit=50,
-    time_limit=60,
+    soft_time_limit=90,
+    time_limit=120,
     bind=True,
     serializer='json',
     acks_late=True,
@@ -43,7 +43,9 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
         try:
             logger.info(f"[{self.request.id}] Processing message {message_id} for agent {agent_id}")
             
+            # Use eventlet's async capabilities to call the async HTTP method
             if previous_message is not None:
+                # For now, we'll use the sync version but with proper eventlet yielding
                 messages, usage = letta_service.send_message_sync(agent_id, message, previous_message)
             else:
                 messages, usage = letta_service.send_message_sync(agent_id, message)

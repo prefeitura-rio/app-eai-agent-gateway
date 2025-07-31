@@ -5,6 +5,11 @@ from src.config.telemetry import setup_telemetry, instrument_celery
 # Setup OpenTelemetry before creating Celery app
 setup_telemetry()
 
+# Patch eventlet for better I/O handling with httpx
+if env.CELERY_WORKER_POOL == 'eventlet':
+    import eventlet
+    eventlet.monkey_patch()
+
 celery = Celery(
     "gateway",
     broker=env.REDIS_DSN,

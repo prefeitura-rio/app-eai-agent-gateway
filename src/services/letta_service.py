@@ -32,17 +32,24 @@ class LettaService:
     def __init__(self):
       
         timeout_config = httpx.Timeout(
-            connect=120.0,
+            connect=30.0,
             read=120.0,
-            write=120.0,
+            write=30.0,
             pool=120.0, 
         )
         
-        httpx_async_client = httpx.AsyncClient(timeout=timeout_config, follow_redirects=True)
-        httpx_client = httpx.Client(timeout=timeout_config, follow_redirects=True)
+        httpx_async_client = httpx.AsyncClient(timeout=timeout_config, follow_redirects=True, limits=httpx.Limits(max_connections=50, max_keepalive_connections=20))
+        httpx_client = httpx.Client(timeout=timeout_config, follow_redirects=True, limits=httpx.Limits(max_connections=50, max_keepalive_connections=20))
         
         self.client = AsyncLetta(base_url=env.LETTA_API_URL, token=env.LETTA_API_TOKEN, httpx_client=httpx_async_client)
         self.client_sync = Letta(base_url=env.LETTA_API_URL, token=env.LETTA_API_TOKEN, httpx_client=httpx_client)
+        
+        # Import eventlet for async operations
+        try:
+            import eventlet
+            self._has_eventlet = True
+        except ImportError:
+            self._has_eventlet = False
         
 ## SYNC METHODS
         
@@ -53,6 +60,10 @@ class LettaService:
         span.set_attribute("letta.has_previous_message", previous_message is not None)
         
         try:
+          # Yield control to other greenlets before making HTTP call
+          if self._has_eventlet:
+            import eventlet
+            eventlet.sleep(0)
         
           messages: list[MessageCreate] = []
           if previous_message is not None:
