@@ -44,13 +44,6 @@ class LettaService:
         self.client = AsyncLetta(base_url=env.LETTA_API_URL, token=env.LETTA_API_TOKEN, httpx_client=httpx_async_client)
         self.client_sync = Letta(base_url=env.LETTA_API_URL, token=env.LETTA_API_TOKEN, httpx_client=httpx_client)
         
-        # Import eventlet for async operations
-        try:
-            import eventlet
-            self._has_eventlet = True
-        except ImportError:
-            self._has_eventlet = False
-        
 ## SYNC METHODS
         
     def send_message_sync(self, agent_id: str, message: str, previous_message: str | None = None):
@@ -61,9 +54,8 @@ class LettaService:
         
         try:
           # Yield control to other greenlets before making HTTP call
-          if self._has_eventlet:
-            import eventlet
-            eventlet.sleep(0)
+          import eventlet
+          eventlet.sleep(0)
         
           messages: list[MessageCreate] = []
           if previous_message is not None:

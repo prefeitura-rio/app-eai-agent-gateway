@@ -8,6 +8,7 @@ LETTA_API_TOKEN = getenv_or_action(env_name="LETTA_API_TOKEN")
 MAX_PARALLEL=int(getenv_or_action(env_name="MAX_PARALLEL", default="8"))
 LETTA_RPS=int(getenv_or_action(env_name="LETTA_RPS", default="10"))
 CELERY_WORKER_POOL=getenv_or_action(env_name="CELERY_WORKER_POOL", default="prefork")
+ENABLE_EVENTLET_PATCH=getenv_or_action(env_name="ENABLE_EVENTLET_PATCH", default="false")
 
 # REDIS
 REDIS_DSN=getenv_or_action(env_name="REDIS_DSN")

@@ -77,6 +77,8 @@ spec:
           env:
             - name: CELERY_WORKER_POOL
               value: "eventlet"
+            - name: ENABLE_EVENTLET_PATCH
+              value: "true"
           resources:
             requests:
               ephemeral-storage: 100Mi

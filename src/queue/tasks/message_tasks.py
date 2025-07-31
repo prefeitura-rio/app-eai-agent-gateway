@@ -9,6 +9,8 @@ from src.services.redis_service import store_response_sync
 from src.services.letta_service import letta_service, LettaAPIError, LettaAPITimeoutError
 from src.utils.serialize_letta_response import serialize_letta_response
 
+# Note: eventlet monkey patching removed to avoid breaking Flower
+
 tracer = get_tracer("message-tasks")
 
 class SerializableHTTPError(Exception):

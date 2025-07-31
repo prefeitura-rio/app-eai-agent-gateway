@@ -9,6 +9,8 @@ services:
   worker:
     build: .
     env_file: .env
+    environment:
+      - ENABLE_EVENTLET_PATCH=true
     command: >
       uv run celery -A src.queue.celery_app.celery  worker
       --pool=${CELERY_WORKER_POOL:-eventlet}

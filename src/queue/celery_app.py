@@ -6,7 +6,8 @@ from src.config.telemetry import setup_telemetry, instrument_celery
 setup_telemetry()
 
 # Patch eventlet for better I/O handling with httpx
-if env.CELERY_WORKER_POOL == 'eventlet':
+# Only patch when explicitly enabled via environment variable
+if env.CELERY_WORKER_POOL == 'eventlet' and getattr(env, 'ENABLE_EVENTLET_PATCH', 'false').lower() == 'true':
     import eventlet
     eventlet.monkey_patch()
 
