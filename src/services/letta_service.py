@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from letta_client import Letta, AsyncLetta, MessageCreate
 import httpx
 from fastapi import HTTPException
@@ -46,17 +47,14 @@ class LettaService:
         
 ## SYNC METHODS
         
-    def send_message_sync(self, agent_id: str, message: str, previous_message: str | None = None):
-      with tracer.start_as_current_span("letta.send_message_sync") as span:
+    async def send_message_async(self, agent_id: str, message: str, previous_message: str | None = None):
+      with tracer.start_as_current_span("letta.send_message_async") as span:
         span.set_attribute("letta.agent_id", agent_id)
         span.set_attribute("letta.message_length", len(message))
         span.set_attribute("letta.has_previous_message", previous_message is not None)
         
         try:
-          # Yield control to other greenlets before making HTTP call
-          import eventlet
-          eventlet.sleep(0)
-        
+          # Create messages
           messages: list[MessageCreate] = []
           if previous_message is not None:
             messages.append(
@@ -67,7 +65,8 @@ class LettaService:
             )
           messages.append(MessageCreate(role="user", content=message))
                     
-          response = self.client_sync.agents.messages.create(
+          # Use async client for non-blocking I/O
+          response = await self.client.agents.messages.create(
             agent_id=agent_id,
             messages=messages,
           )
@@ -83,22 +82,23 @@ class LettaService:
           span.set_attribute("error", True)
           logger.exception(f"Timeout sending message to agent {agent_id}: {e}")
           raise LettaAPITimeoutError(f"Timeout communicating with Letta API: {str(e)}", agent_id=agent_id) from e
-        except httpx.HTTPStatusError as e:
-          span.record_exception(e)
-          span.set_attribute("error", True)
-          span.set_attribute("http.status_code", e.response.status_code)
-          logger.exception(f"HTTP status error sending message to agent {agent_id}: {e.response.status_code} - {e.response.text}")
-          raise LettaAPIError(f"Letta API error: {e.response.text}", status_code=e.response.status_code, agent_id=agent_id) from e
-        except httpx.HTTPError as e:
-          span.record_exception(e)
-          span.set_attribute("error", True)
-          logger.exception(f"HTTP error sending message to agent {agent_id}: {e}")
-          raise LettaAPIError(f"HTTP error: {str(e)}", agent_id=agent_id) from e
-        except Exception as e:
-          span.record_exception(e)
-          span.set_attribute("error", True)
-          logger.exception(f"Unexpected error sending message to agent {agent_id}: {e}")
-          raise LettaAPIError(f"Unexpected error: {str(e)}", agent_id=agent_id) from e
+    
+    def send_message_sync(self, agent_id: str, message: str, previous_message: str | None = None):
+      """Sync wrapper for async send_message_async that works with eventlet"""
+      import eventlet
+      import asyncio
+      
+      # Create a new event loop for this greenlet
+      loop = asyncio.new_event_loop()
+      asyncio.set_event_loop(loop)
+      
+      try:
+        # Run the async call in eventlet
+        return eventlet.spawn(loop.run_until_complete, 
+          self.send_message_async(agent_id, message, previous_message)
+        ).wait()
+      finally:
+        loop.close()
     
 ## ASYNC METHODS
         

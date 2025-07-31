@@ -27,6 +27,8 @@
             packages = [
               python313
               uv
+              k6
+              just
             ];
 
             LD_LIBRARY_PATH = lib.makeLibraryPath [
