@@ -7,7 +7,7 @@ health:
 
 # Inicia worker Celery para desenvolvimento
 worker:
-    ENABLE_EVENTLET_PATCH=true uv run celery -A src.queue.celery_app.celery worker --pool=eventlet --loglevel=info --concurrency=1000
+    ENABLE_EVENTLET_PATCH=true uv run celery -A src.queue.celery_app.celery worker --pool=gevent --loglevel=info --concurrency=1000
 
 # Monitor Celery Flower
 flower:

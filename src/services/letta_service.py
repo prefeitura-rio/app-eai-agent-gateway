@@ -53,10 +53,6 @@ class LettaService:
         span.set_attribute("letta.has_previous_message", previous_message is not None)
         
         try:
-          # Yield control to other greenlets before making HTTP call
-          import eventlet
-          eventlet.sleep(0)
-        
           messages: list[MessageCreate] = []
           if previous_message is not None:
             messages.append(

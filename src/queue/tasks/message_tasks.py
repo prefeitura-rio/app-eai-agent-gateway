@@ -1,24 +1,13 @@
-import eventlet
-from src.config import env
-
-# Patch eventlet for better I/O handling
-# Only patch when explicitly enabled via environment variable
-if env.CELERY_WORKER_POOL == 'eventlet' and getattr(env, 'ENABLE_EVENTLET_PATCH', 'false').lower() == 'true':
-    eventlet.monkey_patch()
-
 import httpx
 import time
 from loguru import logger
 from celery.exceptions import SoftTimeLimitExceeded
 from src.queue.celery_app import celery
-from src.config import env
 from src.config.telemetry import get_tracer
 from src.services.redis_service import store_response_sync
 from src.services.letta_service import letta_service, LettaAPIError, LettaAPITimeoutError
 from src.utils.serialize_letta_response import serialize_letta_response
 from src.services.prometheus_metrics import celery_tasks_total, celery_task_errors, celery_task_duration
-
-# Note: eventlet monkey patching removed to avoid breaking Flower
 
 tracer = get_tracer("message-tasks")
 
@@ -57,9 +46,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
         try:
             logger.info(f"[{self.request.id}] Processing message {message_id} for agent {agent_id}")
             
-            # Use eventlet's async capabilities to call the async HTTP method
             if previous_message is not None:
-                # For now, we'll use the sync version but with proper eventlet yielding
                 messages, usage = letta_service.send_message_sync(agent_id, message, previous_message)
             else:
                 messages, usage = letta_service.send_message_sync(agent_id, message)
