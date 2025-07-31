@@ -1,30 +1,17 @@
 import httpx
 import eventlet
-import asyncio
 import time
 from loguru import logger
 from celery.exceptions import SoftTimeLimitExceeded
 from src.queue.celery_app import celery
 from src.config import env
 from src.config.telemetry import get_tracer
-from src.services.redis_service import store_response_sync, store_response_async
+from src.services.redis_service import store_response_sync
 from src.services.letta_service import letta_service, LettaAPIError, LettaAPITimeoutError
 from src.utils.serialize_letta_response import serialize_letta_response
 from src.services.prometheus_metrics import celery_tasks_total, celery_task_errors, celery_task_duration
 
 # Note: eventlet monkey patching removed to avoid breaking Flower
-
-def run_async_with_eventlet(coro):
-    """Helper function to run async coroutines with eventlet"""
-    import eventlet
-    import asyncio
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return eventlet.spawn(loop.run_until_complete, coro).wait()
-    finally:
-        loop.close()
 
 tracer = get_tracer("message-tasks")
 
@@ -63,15 +50,12 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
         try:
             logger.info(f"[{self.request.id}] Processing message {message_id} for agent {agent_id}")
             
-            # Use async HTTP calls with eventlet for proper non-blocking I/O
+            # Use eventlet's async capabilities to call the async HTTP method
             if previous_message is not None:
-                messages, usage = run_async_with_eventlet(
-                    letta_service.send_message_async(agent_id, message, previous_message)
-                )
+                # For now, we'll use the sync version but with proper eventlet yielding
+                messages, usage = letta_service.send_message_sync(agent_id, message, previous_message)
             else:
-                messages, usage = run_async_with_eventlet(
-                    letta_service.send_message_async(agent_id, message)
-                )
+                messages, usage = letta_service.send_message_sync(agent_id, message)
 
             data = {
                 "messages": serialize_letta_response(messages),
@@ -80,8 +64,7 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 "processed_at": self.request.id,
                 "status": "done"
             }
-            # Use async Redis operation with eventlet
-            run_async_with_eventlet(store_response_async(message_id, data))
+            store_response_sync(message_id, data)
 
             span.set_attribute("celery.success", True)
             span.set_attribute("celery.response_messages_count", len(messages))
@@ -100,12 +83,12 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
             span.set_attribute("error", True)
             span.set_attribute("celery.soft_timeout", True)
             logger.warning(f"[{self.request.id}] Soft time limit exceeded for message {message_id}: {exc}")
-            run_async_with_eventlet(store_response_async(message_id, {
+            store_response_sync(message_id, {
                 "status": "retry",
                 "error": "Soft time limit exceeded",
                 "retry_count": self.request.retries,
                 "max_retries": self.max_retries
-            }))
+            })
             # Record timeout error metrics
             duration = time.time() - start_time
             celery_task_duration.labels(task_name=task_name).observe(duration)
@@ -121,14 +104,14 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
             if self.request.retries >= self.max_retries:
                 span.set_attribute("celery.max_retries_exceeded", True)
                 logger.error(f"[{self.request.id}] Max retries exceeded for message {message_id}")
-                run_async_with_eventlet(store_response_async(message_id, {
+                store_response_sync(message_id, {
                     "status": "error",
                     "error": f"Timeout da API Letta após {self.max_retries + 1} tentativas: {exc.message}",
                     "retry_count": self.request.retries,
                     "max_retries": self.max_retries,
                     "agent_id": agent_id,
                     "message_id": message_id
-                }))
+                })
                 # Record API timeout error metrics
                 duration = time.time() - start_time
                 celery_task_duration.labels(task_name=task_name).observe(duration)
@@ -136,12 +119,12 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                 celery_task_errors.labels(task_name=task_name, error_type="api_timeout").inc()
                 raise exc
             else:
-                run_async_with_eventlet(store_response_async(message_id, {
+                store_response_sync(message_id, {
                     "status": "retry",
                     "error": f"Timeout da API Letta: {exc.message}",
                     "retry_count": self.request.retries,
                     "max_retries": self.max_retries
-                }))
+                })
                 # Record retry metrics
                 duration = time.time() - start_time
                 celery_task_duration.labels(task_name=task_name).observe(duration)
@@ -163,22 +146,22 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
                     error_msg += f" (HTTP {exc.status_code})"
                 error_msg += f": {exc.message}"
                 
-                run_async_with_eventlet(store_response_async(message_id, {
+                store_response_sync(message_id, {
                     "status": "error",
                     "error": error_msg,
                     "retry_count": self.request.retries,
                     "max_retries": self.max_retries,
                     "agent_id": agent_id,
                     "message_id": message_id
-                }))
+                })
                 raise exc
             else:
-                run_async_with_eventlet(store_response_async(message_id, {
+                store_response_sync(message_id, {
                     "status": "retry",
                     "error": f"Erro da API Letta: {exc.message}",
                     "retry_count": self.request.retries,
                     "max_retries": self.max_retries
-                }))
+                })
                 raise
 
         except (httpx.HTTPError, httpx.TimeoutException) as exc:
@@ -189,22 +172,22 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
             if self.request.retries >= self.max_retries:
                 span.set_attribute("celery.max_retries_exceeded", True)
                 logger.error(f"[{self.request.id}] Max retries exceeded for message {message_id}")
-                run_async_with_eventlet(store_response_async(message_id, {
+                store_response_sync(message_id, {
                     "status": "error",
                     "error": f"Máximo de tentativas excedido: {str(exc)}",
                     "retry_count": self.request.retries,
                     "max_retries": self.max_retries,
                     "agent_id": agent_id,
                     "message_id": message_id
-                }))
+                })
                 raise exc
             else:
-                run_async_with_eventlet(store_response_async(message_id, {
+                store_response_sync(message_id, {
                     "status": "retry",
                     "error": str(exc),
                     "retry_count": self.request.retries,
                     "max_retries": self.max_retries
-                }))
+                })
                 raise
 
         except Exception as exc:
@@ -216,19 +199,19 @@ def send_agent_message(self, message_id: str, agent_id: str, message: str, previ
             if hasattr(exc, 'status_code') and hasattr(exc, 'detail'):
                 error_detail = str(exc.detail) if exc.detail else "Unknown error"
                 span.set_attribute("celery.http_status_code", exc.status_code)
-                run_async_with_eventlet(store_response_async(message_id, {
+                store_response_sync(message_id, {
                     "status": "error",
                     "error": f"HTTP {exc.status_code}: {error_detail}",
                     "agent_id": agent_id,
                     "message_id": message_id
-                }))
+                })
                 # Lançar uma exceção serializável
                 raise SerializableHTTPError(exc.status_code, error_detail)
             else:
-                run_async_with_eventlet(store_response_async(message_id, {
+                store_response_sync(message_id, {
                     "status": "error",
                     "error": str(exc),
                     "agent_id": agent_id,
                     "message_id": message_id
-                }))
+                })
                 raise exc
