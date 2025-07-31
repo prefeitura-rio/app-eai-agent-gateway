@@ -13,7 +13,10 @@ ENABLE_EVENTLET_PATCH=getenv_or_action(env_name="ENABLE_EVENTLET_PATCH", default
 # REDIS
 REDIS_DSN=getenv_or_action(env_name="REDIS_DSN")
 REDIS_BACKEND=getenv_or_action(env_name="REDIS_BACKEND")
-REDIS_TTL=int(getenv_or_action(env_name="REDIS_TTL", default="120"))
+# Task result TTL (for storing final responses) - 2 minutes
+REDIS_TASK_RESULT_TTL=int(getenv_or_action(env_name="REDIS_TASK_RESULT_TTL", default="120"))
+# Task status TTL (for storing task IDs) - 10 minutes
+REDIS_TASK_STATUS_TTL=int(getenv_or_action(env_name="REDIS_TASK_STATUS_TTL", default="600"))
 
 # AGENT CREATION
 LLM_MODEL=getenv_or_action(env_name="LLM_MODEL")

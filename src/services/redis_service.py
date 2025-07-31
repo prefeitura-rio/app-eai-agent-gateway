@@ -17,7 +17,10 @@ def _msg_key(message_id: str) -> str:
 def _cache_key(key: str) -> str:
     return f"{env.APP_PREFIX}:cache:{key}"
 
-TTL_SECONDS: int = int(env.REDIS_TTL or 60)
+# Task result TTL (for storing final responses) - 2 minutes
+TASK_RESULT_TTL: int = env.REDIS_TASK_RESULT_TTL
+# Task status TTL (for storing task IDs) - 10 minutes  
+TASK_STATUS_TTL: int = env.REDIS_TASK_STATUS_TTL
 
 async_client: aioredis.Redis = aioredis.from_url(
     env.REDIS_BACKEND, decode_responses=True
@@ -29,7 +32,7 @@ sync_client: sync_redis.Redis = sync_redis.from_url(
 
 
 # ---------- Sync API (Celery workers) ----------
-def store_response_sync(message_id: str, data: Any, ttl: int = TTL_SECONDS) -> None:
+def store_response_sync(message_id: str, data: Any, ttl: int = TASK_RESULT_TTL) -> None:
     """
     Usado pelos workers Celery (contexto síncrono).
     Aceita dict e faz json.dumps internamente.
@@ -66,7 +69,7 @@ def get_response_sync(message_id: str) -> Optional[str]:
 
 
 # ---------- Async API ----------
-async def store_response_async(message_id: str, data: Any, ttl: int = TTL_SECONDS) -> None:
+async def store_response_async(message_id: str, data: Any, ttl: int = TASK_RESULT_TTL) -> None:
     with tracer.start_as_current_span("redis.store_response_async") as span:
         span.set_attribute("redis.message_id", message_id)
         span.set_attribute("redis.ttl", ttl)
@@ -98,7 +101,44 @@ async def get_response_async(message_id: str) -> Optional[str]:
             return None
 
 
-async def store_string_cache_async(cache_key: str, data: str, ttl: int = TTL_SECONDS) -> None:
+# ---------- Task Status API (for storing task IDs) ----------
+async def store_task_status_async(message_id: str, task_id: str) -> None:
+    """
+    Store task ID with longer TTL for status tracking.
+    """
+    with tracer.start_as_current_span("redis.store_task_status") as span:
+        span.set_attribute("redis.message_id", message_id)
+        span.set_attribute("redis.task_id", task_id)
+        span.set_attribute("redis.ttl", TASK_STATUS_TTL)
+        
+        try:
+            await async_client.setex(_msg_key(f"{message_id}_task_id"), TASK_STATUS_TTL, task_id)
+            span.set_attribute("redis.success", True)
+        except Exception as e:
+            span.record_exception(e)
+            span.set_attribute("error", True)
+            logger.error(f"Error storing task status for {message_id}: {e}")
+            raise
+
+async def get_task_status_async(message_id: str) -> Optional[str]:
+    """
+    Get task ID for status tracking.
+    """
+    with tracer.start_as_current_span("redis.get_task_status") as span:
+        span.set_attribute("redis.message_id", message_id)
+        
+        try:
+            result = await async_client.get(_msg_key(f"{message_id}_task_id"))
+            span.set_attribute("redis.found", result is not None)
+            return result
+        except Exception as e:
+            span.record_exception(e)
+            span.set_attribute("error", True)
+            logger.error(f"Error getting task status for {message_id}: {e}")
+            return None
+
+
+async def store_string_cache_async(cache_key: str, data: str, ttl: int = env.CACHE_TTL_SECONDS) -> None:
     with tracer.start_as_current_span("redis.store_string_cache") as span:
         span.set_attribute("redis.cache_key", cache_key)
         span.set_attribute("redis.ttl", ttl)
@@ -131,7 +171,7 @@ async def get_string_cache_async(cache_key: str) -> Optional[str]:
             logger.error(f"Error getting string cache for key {cache_key}: {e}")
             return None
 
-async def store_json_cache_async(cache_key: str, data: dict, ttl: int = TTL_SECONDS) -> None:
+async def store_json_cache_async(cache_key: str, data: dict, ttl: int = env.CACHE_TTL_SECONDS) -> None:
     with tracer.start_as_current_span("redis.store_json_cache") as span:
         span.set_attribute("redis.cache_key", cache_key)
         span.set_attribute("redis.ttl", ttl)

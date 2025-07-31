@@ -8,7 +8,7 @@ from src.queue.tasks.message_tasks import send_agent_message
 from src.queue.celery_app import celery
 from src.schemas.webhook_schema import AgentWebhookSchema, UserWebhookSchema
 from src.services.letta_service import letta_service, LettaAPIError, LettaAPITimeoutError
-from src.services.redis_service import get_response_async, store_response_async
+from src.services.redis_service import get_response_async, store_response_async, store_task_status_async, get_task_status_async
 from src.config.telemetry import get_tracer
 
 router = APIRouter(prefix="/message", tags=["Messages"])
@@ -28,7 +28,7 @@ async def agent_webhook(request: AgentWebhookSchema, response: Response):
             task_result = send_agent_message.delay(message_id=message_id, agent_id=request.agent_id, message=request.message)
             span.set_attribute("api.celery_task_id", task_result.id)
 
-            await store_response_async(f"{message_id}_task_id", task_result.id)
+            await store_task_status_async(message_id, task_result.id)
 
             try:
                 await asyncio.wait_for(asyncio.to_thread(lambda: task_result.ready() or True), timeout=2.0)
@@ -95,7 +95,7 @@ async def user_webhook(request: UserWebhookSchema, response: Response):
             
             span.set_attribute("api.celery_task_id", task_result.id)
             
-            await store_response_async(f"{message_id}_task_id", task_result.id)
+            await store_task_status_async(message_id, task_result.id)
             
             try:
                 await asyncio.wait_for(asyncio.to_thread(lambda: task_result.ready() or True), timeout=2.0)
@@ -198,7 +198,7 @@ async def get_agent_message_from_queue(response_obj: Response, message_id: str =
             span.set_attribute("api.redis_response_found", False)
             
             # Se não tem resposta direta, verifica o status da task
-            task_id_resp = await get_response_async(f"{message_id}_task_id")
+            task_id_resp = await get_task_status_async(message_id)
             if task_id_resp:
                 span.set_attribute("api.task_id_found", True)
                 span.set_attribute("api.task_id", task_id_resp)
