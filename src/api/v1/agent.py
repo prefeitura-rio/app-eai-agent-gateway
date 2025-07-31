@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from loguru import logger
 
 from src.schemas.create_agent_schema import CreateAgentRequestAndOverridePayload
+from src.schemas.delete_agent_schema import DeleteAgentRequest
 from src.services.letta_service import letta_service
 from src.config.telemetry import get_tracer
 
@@ -34,13 +35,47 @@ async def create_agent_endpoint(request: CreateAgentRequestAndOverridePayload):
       logger.error(f"Error creating agent: {e}")
       raise HTTPException(status_code=500, detail=str(e))
 
+@router.delete("/")
+async def delete_agent_endpoint(request: DeleteAgentRequest):
+  with tracer.start_as_current_span("api.delete_agent") as span:
+    span.set_attribute("api.has_agent_id", bool(request.agent_id))
+    span.set_attribute("api.has_tag_list", bool(request.tag_list))
+    
+    try:
+      if request.agent_id:
+        span.set_attribute("api.agent_id", request.agent_id)
+        result = await letta_service.delete_agent(agent_id=request.agent_id)
+      else:
+        span.set_attribute("api.tag_list", request.tag_list)
+        result = await letta_service.delete_agent(agent_id="", tag_list=request.tag_list)
+      
+      span.set_attribute("api.success", True)
+      return result
+    except Exception as e:
+      span.record_exception(e)
+      span.set_attribute("error", True)
+      span.set_attribute("api.success", False)
+      
+      if request.agent_id:
+        logger.error(f"Error deleting agent {request.agent_id}: {e}")
+      else:
+        logger.error(f"Error deleting agents with tags {request.tag_list}: {e}")
+      
+      raise HTTPException(status_code=500, detail=str(e))
+
 @router.delete("/{agent_id}")
-async def delete_agent_endpoint(agent_id: str):
-  try:
-    await letta_service.delete_agent(agent_id=agent_id)
-    return {
-      "message": f"Agent {agent_id} deleted successfully",
-    }
-  except Exception as e:
-    logger.error(f"Error deleting agent: {e}")
-    raise HTTPException(status_code=500, detail=str(e))
+async def delete_agent_by_id_endpoint(agent_id: str):
+  """Backwards compatibility endpoint for deleting an agent by ID"""
+  with tracer.start_as_current_span("api.delete_agent_by_id") as span:
+    span.set_attribute("api.agent_id", agent_id)
+    
+    try:
+      result = await letta_service.delete_agent(agent_id=agent_id)
+      span.set_attribute("api.success", True)
+      return result
+    except Exception as e:
+      span.record_exception(e)
+      span.set_attribute("error", True)
+      span.set_attribute("api.success", False)
+      logger.error(f"Error deleting agent {agent_id}: {e}")
+      raise HTTPException(status_code=500, detail=str(e))

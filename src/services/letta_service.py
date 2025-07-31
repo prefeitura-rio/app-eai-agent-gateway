@@ -6,7 +6,7 @@ from fastapi import HTTPException
 
 from src.config import env
 from src.config.telemetry import get_tracer
-from src.utils.letta.create_eai_agent import create_eai_agent
+from src.utils.letta.eai_agent import create_eai_agent, delete_eai_agent
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer("letta-service")
@@ -188,5 +188,13 @@ class LettaService:
           span.set_attribute("error", True)
           logger.error(f"Error creating agent for user {user_number} on Letta: {e}")
           raise e
+
+    async def delete_agent(self, agent_id: str, tag_list: list[str] | None = None) -> dict:
+      try:
+        await delete_eai_agent(agent_id=agent_id, tag_list=tag_list)
+        return {"message": f"Agents with tags {tag_list} deleted successfully."} if tag_list else {"message": f"Agent {agent_id} deleted successfully."}
+      except Exception as e:
+        logger.error(f"Error deleting agents with tags {tag_list} on Letta: {e}" if tag_list else f"Error deleting agent {agent_id} on Letta: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
       
 letta_service = LettaService()
