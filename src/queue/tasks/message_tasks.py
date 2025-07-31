@@ -1,5 +1,12 @@
-import httpx
 import eventlet
+from src.config import env
+
+# Patch eventlet for better I/O handling
+# Only patch when explicitly enabled via environment variable
+if env.CELERY_WORKER_POOL == 'eventlet' and getattr(env, 'ENABLE_EVENTLET_PATCH', 'false').lower() == 'true':
+    eventlet.monkey_patch()
+
+import httpx
 import time
 from loguru import logger
 from celery.exceptions import SoftTimeLimitExceeded
