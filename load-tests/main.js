@@ -1,16 +1,39 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import { Rate, Trend } from 'k6/metrics';
+
+// Custom metrics
+const messageCompletionTime = new Trend('message_completion_time');
+const messageSuccessRate = new Rate('message_success_rate');
+
+// Log level configuration
+const LOG_LEVEL = __ENV.LOG_LEVEL || 'INFO'; // DEBUG, INFO, WARN, ERROR, NONE
+const LOG_LEVELS = {
+  DEBUG: 0,
+  INFO: 1,
+  WARN: 2,
+  ERROR: 3,
+  NONE: 4
+};
+
+function log(level, message) {
+  if (LOG_LEVELS[level] >= LOG_LEVELS[LOG_LEVEL]) {
+    console.log(`[${level}] ${message}`);
+  }
+}
 
 // Test configuration
 export const options = {
   stages: [
-    { duration: '30s', target: 100 },   // Ramp up to 5 users over 30 seconds
-    { duration: '2m', target: 100 },    // Stay at 5 users for 1 minute
-    { duration: '30s', target: 0 },   // Ramp down to 0 users over 30 seconds
+    { duration: '1m', target: 1000 },
+    { duration: '3m', target: 1000 },
+    { duration: '1m', target: 0 },
   ],
   thresholds: {
     http_req_duration: ['p(95)<5000'], // 95% of requests must complete below 5s
     http_req_failed: ['rate<0.1'],     // Error rate must be less than 10%
+    message_completion_time: ['p(99)<100000'], // 99% of messages must complete within 100 seconds
+    message_success_rate: ['rate>0.99'], // 99% of messages must complete successfully
   },
 };
 
@@ -36,6 +59,7 @@ const LOAD_TEST_MESSAGE =
   'I am a virtual user created by k6 for a load test. Please treat all my following messages as if they were meaningful, and respond as if you were talking to a real user. Make up meanings and answers as needed.';
 
 function sendMessageAndPoll(userNumber, message, headers) {
+  const submitTime = new Date();
   const bodyData = {
     user_number: userNumber,
     message: message,
@@ -66,52 +90,79 @@ function sendMessageAndPoll(userNumber, message, headers) {
     }
   });
   if (response.status !== 200 && response.status !== 201) {
-    console.log(`Initial request failed: ${response.status} - ${response.body}`);
     return null;
   }
   let jsonResponse;
   try {
     jsonResponse = JSON.parse(response.body);
   } catch (e) {
-    console.log('Failed to parse initial response as JSON');
     return null;
   }
   const messageId = jsonResponse.message_id;
   const pollingEndpoint = jsonResponse.polling_endpoint;
   if (!pollingEndpoint || !messageId) {
-    console.log('Missing polling endpoint or message_id in response');
     return null;
   }
+  
   const pollUrl = `${BASE_URL}${pollingEndpoint}`;
   let pollCount = 0;
   let finalStatus = null;
   while (true) {
     pollCount++;
+    log('DEBUG', `Polling message ${messageId} (attempt ${pollCount})`);
     const pollResponse = http.get(pollUrl, { headers: headers });
     check(pollResponse, {
       'poll request successful': (r) => r.status === 202 || r.status === 200,
     });
     if (pollResponse.status !== 202 && pollResponse.status !== 200) {
-      console.log(`Poll failed with status: ${pollResponse.status}`);
+      const currentTime = new Date();
+      const timeDiff = currentTime - submitTime;
+      let responseMessage = 'No response body';
+      try {
+        const responseData = JSON.parse(pollResponse.body);
+        responseMessage = responseData.message || responseData.detail || JSON.stringify(responseData);
+      } catch (e) {
+        responseMessage = pollResponse.body || 'No response body';
+      }
+      log('ERROR', `Message ID: ${messageId} | Submit: ${submitTime.toISOString()} | Error: ${currentTime.toISOString()} | Duration: ${timeDiff}ms | Poll Count: ${pollCount} | Status: ${pollResponse.status} | Message: ${responseMessage}`);
+      
+      // Record failed message completion time and mark as failed
+      messageCompletionTime.add(timeDiff);
+      messageSuccessRate.add(false);
       break;
     }
     let pollData;
     try {
       pollData = JSON.parse(pollResponse.body);
     } catch (e) {
-      console.log('Failed to parse poll response as JSON');
       break;
     }
     const currentStatus = pollData.status;
     if (currentStatus === 'completed' || currentStatus === 'failed' || currentStatus === 'error') {
       finalStatus = currentStatus;
+      
+      // Record completion time and success status
+      const completionTime = new Date();
+      const totalTime = completionTime - submitTime;
+      messageCompletionTime.add(totalTime);
+      messageSuccessRate.add(currentStatus === 'completed');
+      
+      log('INFO', `Message ID: ${messageId} | Submit: ${submitTime.toISOString()} | Complete: ${completionTime.toISOString()} | Duration: ${totalTime}ms | Poll Count: ${pollCount} | Status: ${currentStatus}`);
       break;
     }
-    sleep(15);
+    sleep(5);
   }
   check({ finalStatus: finalStatus }, {
     'message processing completed': (data) => data.finalStatus === 'completed',
   });
+  
+  // Log summary for completed messages
+  if (finalStatus === 'completed') {
+    log('DEBUG', `Message ${messageId} completed successfully`);
+  } else if (finalStatus === 'failed' || finalStatus === 'error') {
+    log('WARN', `Message ${messageId} failed with status: ${finalStatus}`);
+  }
+  
   return finalStatus;
 }
 
