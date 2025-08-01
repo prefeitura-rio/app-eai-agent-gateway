@@ -40,9 +40,12 @@ async def delete_agent_endpoint(request: DeleteAgentRequest):
   with tracer.start_as_current_span("api.delete_agent") as span:
     span.set_attribute("api.has_agent_id", bool(request.agent_id))
     span.set_attribute("api.has_tag_list", bool(request.tag_list))
+    span.set_attribute("api.delete_all_agents", request.delete_all_agents)
     
     try:
-      if request.agent_id:
+      if request.delete_all_agents:
+        result = await letta_service.delete_agent(delete_all_agents=True)
+      elif request.agent_id:
         span.set_attribute("api.agent_id", request.agent_id)
         result = await letta_service.delete_agent(agent_id=request.agent_id)
       else:
@@ -56,7 +59,9 @@ async def delete_agent_endpoint(request: DeleteAgentRequest):
       span.set_attribute("error", True)
       span.set_attribute("api.success", False)
       
-      if request.agent_id:
+      if request.delete_all_agents:
+        logger.error(f"Error deleting all agents: {e}")
+      elif request.agent_id:
         logger.error(f"Error deleting agent {request.agent_id}: {e}")
       else:
         logger.error(f"Error deleting agents with tags {request.tag_list}: {e}")

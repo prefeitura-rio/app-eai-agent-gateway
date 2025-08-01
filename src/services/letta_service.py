@@ -185,12 +185,19 @@ class LettaService:
           logger.error(f"Error creating agent for user {user_number} on Letta: {e}")
           raise e
 
-    async def delete_agent(self, agent_id: str, tag_list: list[str] | None = None) -> dict:
+    async def delete_agent(self, agent_id: str = "", tag_list: list[str] | None = None, delete_all_agents: bool = False) -> dict:
       try:
-        await delete_eai_agent(agent_id=agent_id, tag_list=tag_list)
+        await delete_eai_agent(agent_id=agent_id, tag_list=tag_list, delete_all_agents=delete_all_agents)
+        if delete_all_agents:
+          return {"message": "All agents deleted successfully."}
         return {"message": f"Agents with tags {tag_list} deleted successfully."} if tag_list else {"message": f"Agent {agent_id} deleted successfully."}
       except Exception as e:
-        logger.error(f"Error deleting agents with tags {tag_list} on Letta: {e}" if tag_list else f"Error deleting agent {agent_id} on Letta: {e}")
+        if delete_all_agents:
+          logger.error(f"Error deleting all agents on Letta: {e}")
+        elif tag_list:
+          logger.error(f"Error deleting agents with tags {tag_list} on Letta: {e}")
+        else:
+          logger.error(f"Error deleting agent {agent_id} on Letta: {e}")
         raise HTTPException(status_code=500, detail=str(e))
       
 letta_service = LettaService()
