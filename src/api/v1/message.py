@@ -4,7 +4,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Response, Query
 from loguru import logger
 
-from src.queue.tasks.message_tasks import send_agent_message
+from src.queue.tasks.message_tasks import send_agent_message, process_user_message
 from src.queue.celery_app import celery
 from src.schemas.webhook_schema import AgentWebhookSchema, UserWebhookSchema
 from src.services.letta_service import letta_service, LettaAPIError, LettaAPITimeoutError
@@ -76,33 +76,35 @@ async def user_webhook(request: UserWebhookSchema, response: Response):
         span.set_attribute("api.has_previous_message", request.previous_message is not None)
         
         try:
-            agent_id = await letta_service.get_agent_id(user_number=request.user_number)
-            if agent_id is None:
-                span.set_attribute("api.agent_created", True)
-                agent_id = await letta_service.create_agent(user_number=request.user_number)
-            else:
-                span.set_attribute("api.agent_found", True)
-            
-            span.set_attribute("api.agent_id", agent_id)
-            
+            # Generate message ID immediately
             message_id = str(uuid.uuid4())
             span.set_attribute("api.message_id", message_id)
             
+            # Store initial status to handle immediate polling
+            await store_response_async(message_id, {
+                "status": "processing",
+                "message": "Sua mensagem está sendo processada. Tente novamente em alguns segundos."
+            }, ttl=120)  # 2 minutes TTL for initial status
+            
+            # Submit background task for agent creation and message processing
             if request.previous_message is not None:
-                task_result = send_agent_message.delay(message_id=message_id, agent_id=agent_id, message=request.message, previous_message=request.previous_message)
+                task_result = process_user_message.delay(
+                    message_id=message_id, 
+                    user_number=request.user_number, 
+                    message=request.message, 
+                    previous_message=request.previous_message
+                )
             else:
-                task_result = send_agent_message.delay(message_id=message_id, agent_id=agent_id, message=request.message)
+                task_result = process_user_message.delay(
+                    message_id=message_id, 
+                    user_number=request.user_number, 
+                    message=request.message
+                )
             
             span.set_attribute("api.celery_task_id", task_result.id)
             
+            # Store task ID for status tracking
             await store_task_status_async(message_id, task_result.id)
-            
-            try:
-                await asyncio.wait_for(asyncio.to_thread(lambda: task_result.ready() or True), timeout=2.0)
-                span.set_attribute("api.task_ready_check", True)
-            except asyncio.TimeoutError:
-                span.set_attribute("api.task_ready_timeout", True)
-                logger.warning(f"Task {message_id} não foi aceita rapidamente, mas continua processando")
             
             response.status_code = 201
             span.set_attribute("api.success", True)
@@ -119,26 +121,11 @@ async def user_webhook(request: UserWebhookSchema, response: Response):
             span.set_attribute("api.http_exception", True)
             span.set_attribute("api.http_status_code", e.status_code)
             raise e
-        except LettaAPITimeoutError as e:
-            span.record_exception(e)
-            span.set_attribute("error", True)
-            span.set_attribute("api.letta_timeout", True)
-            logger.error(f"Letta API timeout for user agent at {request.user_number}: {e}")
-            raise HTTPException(status_code=408, detail=f"Timeout da API Letta: {e.message}")
-        except LettaAPIError as e:
-            span.record_exception(e)
-            span.set_attribute("error", True)
-            span.set_attribute("api.letta_api_error", True)
-            if e.status_code:
-                span.set_attribute("api.letta_status_code", e.status_code)
-            logger.error(f"Letta API error for user agent at {request.user_number}: {e}")
-            status_code = e.status_code if e.status_code else 500
-            raise HTTPException(status_code=status_code, detail=f"Erro da API Letta: {e.message}")
         except Exception as e:
             span.record_exception(e)
             span.set_attribute("error", True)
             span.set_attribute("api.unexpected_error", True)
-            logger.error(f"Error sending message to user agent at {request.user_number} on Letta: {e}")
+            logger.error(f"Error submitting user message {message_id} for processing: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/response")
@@ -180,6 +167,13 @@ async def get_agent_message_from_queue(response_obj: Response, message_id: str =
                     return {
                         "status": "processing",
                         "message": f"Sua mensagem está sendo processada (tentativa {data.get('retry_count', 0)}/{data.get('max_retries', 3)}). Tente novamente em alguns segundos."
+                    }
+                elif data.get("status") == "processing":
+                    span.set_attribute("api.response_processing", True)
+                    response_obj.status_code = 202
+                    return {
+                        "status": "processing",
+                        "message": data.get("message", "Sua mensagem está sendo processada. Tente novamente em alguns segundos.")
                     }
                 elif data.get("status") == "done":
                     span.set_attribute("api.response_done", True)

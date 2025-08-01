@@ -95,6 +95,51 @@ class LettaService:
           span.set_attribute("error", True)
           logger.exception(f"Unexpected error sending message to agent {agent_id}: {e}")
           raise LettaAPIError(f"Unexpected error: {str(e)}", agent_id=agent_id) from e
+
+    def get_agent_id_sync(self, user_number: str) -> str | None:
+      with tracer.start_as_current_span("letta.get_agent_id_sync") as span:
+        span.set_attribute("letta.user_number", user_number)
+        
+        try:
+          response = self.client_sync.agents.list(
+            tags=[user_number],
+            limit=1, 
+            match_all_tags=False,
+          )
+          
+          if response:
+            agent_id = response[0].id
+            span.set_attribute("letta.agent_id", agent_id)
+            return agent_id
+          return None
+        
+        except Exception as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.error(f"Error getting agent ID for user {user_number} on Letta: {e}")
+          raise e
+
+    def create_agent_sync(self, user_number: str, override_payload: dict | None = None) -> str | None:
+      with tracer.start_as_current_span("letta.create_agent_sync") as span:
+        span.set_attribute("letta.user_number", user_number)
+        span.set_attribute("letta.has_override_payload", override_payload is not None)
+        
+        try:
+          # Import here to avoid circular imports
+          from src.utils.letta.create_eai_agent import create_eai_agent_sync
+          
+          if override_payload is None:
+            agent = create_eai_agent_sync(user_number=user_number)
+          else:
+            agent = create_eai_agent_sync(user_number=user_number, override_payload=override_payload)
+          
+          span.set_attribute("letta.agent_id", agent.id)
+          return agent.id
+        except Exception as e:
+          span.record_exception(e)
+          span.set_attribute("error", True)
+          logger.error(f"Error creating agent for user {user_number} on Letta: {e}")
+          raise e
     
 ## ASYNC METHODS
         
