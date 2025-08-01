@@ -1,14 +1,12 @@
-# -*- coding: utf-8 -*-
 from os import getenv
-from typing import List, Dict
 from pathlib import Path
+
 from loguru import logger
 
+_env_cache: dict[str, str] = {}
 
-_env_cache: Dict[str, str] = {}
 
-
-def _load_dotenv() -> Dict[str, str]:
+def _load_dotenv() -> dict[str, str]:
     """Carrega variáveis do arquivo .env na raiz do projeto.
 
     Returns:
@@ -24,7 +22,7 @@ def _load_dotenv() -> Dict[str, str]:
         return {}
 
     env_vars = {}
-    with open(env_path, "r") as f:
+    with open(env_path) as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
@@ -48,7 +46,10 @@ def _load_dotenv() -> Dict[str, str]:
 
 
 def getenv_or_action(
-    env_name: str, *, action: str = "raise", default: str = None
+    env_name: str,
+    *,
+    action: str = "raise",
+    default: str = None,
 ) -> str:
     """Get an environment variable or raise an exception.
 
@@ -80,15 +81,18 @@ def getenv_or_action(
     # Se ainda não encontrou, aplica a ação especificada
     if value is None:
         if action == "raise":
-            raise EnvironmentError(f"Environment variable {env_name} is not set.")
-        elif action == "warn":
+            raise OSError(f"Environment variable {env_name} is not set.")
+        if action == "warn":
             logger.warning(f"Warning: Environment variable {env_name} is not set.")
     return value
 
 
 def getenv_list_or_action(
-    env_name: str, *, action: str = "raise", default: str = None
-) -> List[str]:
+    env_name: str,
+    *,
+    action: str = "raise",
+    default: str = None,
+) -> list[str]:
     """Get an environment variable or raise an exception.
 
     Args:
@@ -109,10 +113,9 @@ def getenv_list_or_action(
     if value is not None:
         if isinstance(value, str):
             return value.split(",")
-        elif isinstance(value, list):
+        if isinstance(value, list):
             return value
-        else:
-            raise TypeError("value must be a string or a list")
+        raise TypeError("value must be a string or a list")
     return []
 
 
@@ -138,4 +141,4 @@ def mask_string(string: str, *, mask: str = "*") -> str:
         number_of_ending_characters_to_show = number_of_starting_characters_to_show + 1
     first_characters = string[:number_of_starting_characters_to_show]
     last_characters = string[-number_of_ending_characters_to_show:]
-    return f"{first_characters}{mask * (length - number_of_characters_to_show * 2)}{last_characters}"  # noqa
+    return f"{first_characters}{mask * (length - number_of_characters_to_show * 2)}{last_characters}"

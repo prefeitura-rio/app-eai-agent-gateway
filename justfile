@@ -1,6 +1,16 @@
 dev:
     granian --interface asgi --workers 4 --runtime-mode mt --task-impl rust src.main:app
 
+# Executa linting com ruff
+lint:
+    uv run ruff check src/
+    uv run ruff format src/
+
+# Executa linting com ruff e corrige automaticamente
+lint-fix:
+    uv run ruff check src/ --fix
+    uv run ruff format src/
+
 # Executa diagnóstico de saúde dos serviços
 health:
     uv run -m src.scripts.health_check

@@ -22,3 +22,8 @@ dependencies = [
     "opentelemetry-instrumentation-redis>=0.45b0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.24.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.7",
+]
