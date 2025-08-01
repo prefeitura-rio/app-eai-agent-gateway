@@ -30,6 +30,7 @@ EMBEDDING_MODEL=getenv_or_action(env_name="EMBEDDING_MODEL")
 EAI_AGENT_URL=getenv_or_action(env_name="EAI_AGENT_URL")
 EAI_AGENT_TOKEN=getenv_or_action(env_name="EAI_AGENT_TOKEN")
 EAI_AGENT_CONTEXT_WINDOW_LIMIT=int(getenv_or_action(env_name="EAI_AGENT_CONTEXT_WINDOW_LIMIT", default="1000000"))
+EAI_AGENT_MAX_GOOGLE_SEARCH_PER_STEP=int(getenv_or_action(env_name="EAI_AGENT_MAX_GOOGLE_SEARCH_PER_STEP", default="1"))
 
 # APP PREFIX
 APP_PREFIX=getenv_or_action(env_name="APP_PREFIX")

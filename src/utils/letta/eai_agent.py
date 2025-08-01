@@ -3,7 +3,7 @@ import asyncio
 from src.services.external_dependencies import get_system_prompt_from_api, get_agent_config_from_api
 from src.config import env
 from src.config.telemetry import get_tracer
-from letta_client import ContinueToolRule, ParentToolRule
+from letta_client import ContinueToolRule, ParentToolRule, MaxCountPerStepToolRule
 
 tracer = get_tracer("eai-agent")
 
@@ -16,6 +16,8 @@ async def _build_tool_rules(tools: list[str]):
         tool_rules = [ContinueToolRule(tool_name=tool) for tool in tools]
         if "equipments_instructions" in tools and "equipments_by_address" in tools:
             tool_rules.append(ParentToolRule(tool_name="equipments_instructions", children=["equipments_by_address"]))
+        if "google_search" in tools:
+            tool_rules.append(MaxCountPerStepToolRule(tool_name="google_search", max_count_limit=env.EAI_AGENT_MAX_GOOGLE_SEARCH_PER_STEP))
         span.set_attribute("eai_agent.tool_rules_count", len(tool_rules))
         
         return tool_rules    
@@ -63,11 +65,21 @@ async def create_eai_agent(user_number: str, override_payload: dict | None = Non
 
     return await letta_service.client.agents.create(**agent_variables)
 
-async def delete_eai_agent(agent_id: str, tag_list: list[str] | None = None):
-    """Deletes an EAI agent by its ID or tag."""
+async def delete_eai_agent(agent_id: str = "", tag_list: list[str] | None = None, delete_all_agents: bool = False):
+    """Deletes an EAI agent by its ID, tag, or all agents."""
     from src.services.letta_service import letta_service
     try:
-        if tag_list:
+        if delete_all_agents:
+            # Get all agents and delete them
+            agent_list = await letta_service.client.agents.list()
+            # Use asyncio.gather to delete all agents concurrently
+            deletion_tasks = [
+                letta_service.client.agents.delete(agent_id=agent.id) 
+                for agent in agent_list
+            ]
+            await asyncio.gather(*deletion_tasks)
+            return {"message": f"All {len(agent_list)} agents deleted successfully."}
+        elif tag_list:
             agent_list = await letta_service.client.agents.list(tags=tag_list, match_all_tags=False)
             # Use asyncio.gather to delete all agents concurrently
             deletion_tasks = [
@@ -79,7 +91,9 @@ async def delete_eai_agent(agent_id: str, tag_list: list[str] | None = None):
         else:
             await letta_service.client.agents.delete(agent_id=agent_id)
     except Exception as e:
-        if tag_list:
+        if delete_all_agents:
+            raise Exception(f"Error deleting all agents: {str(e)}")
+        elif tag_list:
             raise Exception(f"Error deleting agent with tags {tag_list}: {str(e)}")
         else:
             raise Exception(f"Error deleting agent {agent_id}: {str(e)}")
