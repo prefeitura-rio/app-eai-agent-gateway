@@ -17,7 +17,7 @@ async def _build_tool_rules(tools: list[str]):
         if "equipments_instructions" in tools and "equipments_by_address" in tools:
             tool_rules.append(ParentToolRule(tool_name="equipments_instructions", children=["equipments_by_address"]))
         if "google_search" in tools:
-            tool_rules.append(MaxCountPerStepToolRule(tool_name="google_search", max_count=env.EAI_AGENT_MAX_GOOGLE_SEARCH_PER_STEP))
+            tool_rules.append(MaxCountPerStepToolRule(tool_name="google_search", max_count_limit=env.EAI_AGENT_MAX_GOOGLE_SEARCH_PER_STEP))
         span.set_attribute("eai_agent.tool_rules_count", len(tool_rules))
         
         return tool_rules    
