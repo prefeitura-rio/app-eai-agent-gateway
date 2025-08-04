@@ -25,7 +25,12 @@
           with pkgs;
           mkShell {
             packages = [
-              python313
+              (python313.withPackages (ps: with ps; [
+                matplotlib
+                numpy
+                pandas
+                seaborn
+              ]))
               uv
               k6
               just

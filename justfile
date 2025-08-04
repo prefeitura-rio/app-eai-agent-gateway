@@ -34,13 +34,13 @@ test-services:
     @echo "Testando Letta..."
     @uv run python -c "import httpx; from src.config import env; print('Letta OK' if httpx.get(f'{env.LETTA_API_URL}/health', headers={'Authorization': f'Bearer {env.LETTA_API_TOKEN}'}, timeout=5).status_code == 200 else 'Letta ERRO')"
 
-# Executa testes de carga com k6
-load-test:
-    k6 run load-tests/main.js
+# Executa testes de carga com k6 e token, exportando resultados
+load-test token:
+    BEARER_TOKEN={{token}} k6 run --out json=load-tests/results.json load-tests/main.js
 
-# Executa testes de carga com k6 e token personalizado
-load-test-with-token token:
-    BEARER_TOKEN={{token}} k6 run load-tests/main.js
+# Gera gráficos dos resultados dos testes de carga
+plot-results:
+    cd load-tests && python generate-charts.py results.json
 
 # Inicia todos os serviços em desenvolvimento
 dev-full:

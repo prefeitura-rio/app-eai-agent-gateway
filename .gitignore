@@ -11,3 +11,7 @@ wheels/
 
 .env
 .direnv/
+
+# Load test results and charts
+load-tests/results.json
+load-tests/charts/

@@ -4,7 +4,14 @@ import { Rate, Trend } from 'k6/metrics';
 
 // Custom metrics
 const messageCompletionTime = new Trend('message_completion_time');
+const successfulMessageCompletionTime = new Trend('successful_message_completion_time');
+const failedMessageCompletionTime = new Trend('failed_message_completion_time');
 const messageSuccessRate = new Rate('message_success_rate');
+
+// Distribution tracking
+let successfulTimes = [];
+let failedTimes = [];
+let allTimes = [];
 
 // Log level configuration
 const LOG_LEVEL = __ENV.LOG_LEVEL || 'INFO'; // DEBUG, INFO, WARN, ERROR, NONE
@@ -22,19 +29,72 @@ function log(level, message) {
   }
 }
 
+function calculateDistributionStats(times, label) {
+  if (times.length === 0) {
+    log('INFO', `${label}: No data available`);
+    return;
+  }
+  
+  const sorted = times.sort((a, b) => a - b);
+  const count = sorted.length;
+  const min = sorted[0];
+  const max = sorted[count - 1];
+  const sum = sorted.reduce((acc, val) => acc + val, 0);
+  const mean = sum / count;
+  const median = count % 2 === 0 
+    ? (sorted[count/2 - 1] + sorted[count/2]) / 2 
+    : sorted[Math.floor(count/2)];
+  
+  // Percentiles
+  const p50 = sorted[Math.floor(count * 0.5)];
+  const p75 = sorted[Math.floor(count * 0.75)];
+  const p90 = sorted[Math.floor(count * 0.9)];
+  const p95 = sorted[Math.floor(count * 0.95)];
+  const p99 = sorted[Math.floor(count * 0.99)];
+  
+  log('INFO', `=== ${label} Distribution ===`);
+  log('INFO', `Count: ${count}`);
+  log('INFO', `Min: ${min}ms, Max: ${max}ms`);
+  log('INFO', `Mean: ${mean.toFixed(2)}ms, Median: ${median}ms`);
+  log('INFO', `P50: ${p50}ms, P75: ${p75}ms, P90: ${p90}ms, P95: ${p95}ms, P99: ${p99}ms`);
+  
+  // Histogram buckets (0-5s, 5-10s, 10-30s, 30-60s, 60s+)
+  const buckets = [0, 5000, 10000, 30000, 60000, Infinity];
+  const bucketLabels = ['0-5s', '5-10s', '10-30s', '30-60s', '60s+'];
+  const histogram = new Array(buckets.length - 1).fill(0);
+  
+  for (const time of times) {
+    for (let i = 0; i < buckets.length - 1; i++) {
+      if (time >= buckets[i] && time < buckets[i + 1]) {
+        histogram[i]++;
+        break;
+      }
+    }
+  }
+  
+  log('INFO', `Histogram:`);
+  for (let i = 0; i < histogram.length; i++) {
+    const percentage = ((histogram[i] / count) * 100).toFixed(1);
+    log('INFO', `  ${bucketLabels[i]}: ${histogram[i]} (${percentage}%)`);
+  }
+  log('INFO', `=======================`);
+}
+
 // Test configuration
 export const options = {
   stages: [
-    { duration: '1m', target: 1000 },
-    { duration: '3m', target: 1000 },
-    { duration: '1m', target: 0 },
+    { duration: '3m', target: 5000 },
+    { duration: '10m', target: 5000 },
+    { duration: '2m', target: 0 },
   ],
   thresholds: {
     http_req_duration: ['p(95)<5000'], // 95% of requests must complete below 5s
     http_req_failed: ['rate<0.1'],     // Error rate must be less than 10%
-    message_completion_time: ['p(99)<100000'], // 99% of messages must complete within 100 seconds
+    message_completion_time: ['p(99)<100000'], // 99% of all messages must complete within 100 seconds
+    successful_message_completion_time: ['p(99)<100000'], // 99% of successful messages must complete within 100 seconds
     message_success_rate: ['rate>0.99'], // 99% of messages must complete successfully
   },
+
 };
 
 const BASE_URL = __ENV.BASE_URL || 'https://eai-agent-gateway-superapp-staging.squirrel-regulus.ts.net';
@@ -128,7 +188,12 @@ function sendMessageAndPoll(userNumber, message, headers) {
       
       // Record failed message completion time and mark as failed
       messageCompletionTime.add(timeDiff);
+      failedMessageCompletionTime.add(timeDiff);
       messageSuccessRate.add(false);
+      
+      // Track for distribution analysis
+      failedTimes.push(timeDiff);
+      allTimes.push(timeDiff);
       break;
     }
     let pollData;
@@ -145,7 +210,22 @@ function sendMessageAndPoll(userNumber, message, headers) {
       const completionTime = new Date();
       const totalTime = completionTime - submitTime;
       messageCompletionTime.add(totalTime);
-      messageSuccessRate.add(currentStatus === 'completed');
+      
+      if (currentStatus === 'completed') {
+        successfulMessageCompletionTime.add(totalTime);
+        messageSuccessRate.add(true);
+        
+        // Track for distribution analysis
+        successfulTimes.push(totalTime);
+        allTimes.push(totalTime);
+      } else {
+        failedMessageCompletionTime.add(totalTime);
+        messageSuccessRate.add(false);
+        
+        // Track for distribution analysis
+        failedTimes.push(totalTime);
+        allTimes.push(totalTime);
+      }
       
       log('INFO', `Message ID: ${messageId} | Submit: ${submitTime.toISOString()} | Complete: ${completionTime.toISOString()} | Duration: ${totalTime}ms | Poll Count: ${pollCount} | Status: ${currentStatus}`);
       break;
@@ -184,4 +264,22 @@ export default function () {
     const randomMsg = generateRandomString(32);
     sendMessageAndPoll(userNumber, randomMsg, headers);
   }
+}
+
+// Teardown function to log distribution statistics
+export function teardown() {
+  log('INFO', '');
+  log('INFO', '=== LOAD TEST COMPLETED ===');
+  log('INFO', '');
+  
+  calculateDistributionStats(successfulTimes, 'Successful Messages');
+  calculateDistributionStats(failedTimes, 'Failed Messages');
+  calculateDistributionStats(allTimes, 'All Messages');
+  
+  log('INFO', '');
+  log('INFO', '=== SUMMARY ===');
+  log('INFO', `Total Messages: ${allTimes.length}`);
+  log('INFO', `Successful: ${successfulTimes.length} (${((successfulTimes.length / allTimes.length) * 100).toFixed(1)}%)`);
+  log('INFO', `Failed: ${failedTimes.length} (${((failedTimes.length / allTimes.length) * 100).toFixed(1)}%)`);
+  log('INFO', '================');
 } 
