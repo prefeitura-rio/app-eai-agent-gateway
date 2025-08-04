@@ -148,9 +148,7 @@ class LettaService:
 
             try:
                 response = self.client_sync.agents.list(
-                    tags=[user_number],
-                    limit=1,
-                    match_all_tags=False,
+                    name=user_number,
                 )
 
                 if response:
@@ -270,9 +268,7 @@ class LettaService:
 
             try:
                 response = await self.client.agents.list(
-                    tags=[user_number],
-                    limit=1,
-                    match_all_tags=False,
+                    name=user_number,
                 )
 
                 if response:
