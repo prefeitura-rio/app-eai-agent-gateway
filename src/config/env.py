@@ -68,3 +68,7 @@ OTEL_ENVIRONMENT = getenv_or_action(env_name="OTEL_ENVIRONMENT", default="develo
 
 # CACHE
 CACHE_TTL_SECONDS = int(getenv_or_action(env_name="CACHE_TTL_SECONDS", default="720"))
+# Agent ID cache TTL (for storing agent IDs) - 24 hours
+AGENT_ID_CACHE_TTL = int(
+    getenv_or_action(env_name="AGENT_ID_CACHE_TTL", default="86400")
+)

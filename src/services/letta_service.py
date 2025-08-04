@@ -6,6 +6,12 @@ from letta_client import AsyncLetta, Letta, MessageCreate
 
 from src.config import env
 from src.config.telemetry import get_tracer
+from src.services.redis_service import (
+    get_string_cache_async,
+    get_string_cache_sync,
+    store_string_cache_async,
+    store_string_cache_sync,
+)
 from src.utils.letta.eai_agent import create_eai_agent, delete_eai_agent
 
 logger = logging.getLogger(__name__)
@@ -61,6 +67,36 @@ class LettaService:
             token=env.LETTA_API_TOKEN,
             httpx_client=httpx_client,
         )
+
+    def _get_agent_cache_key(self, user_number: str) -> str:
+        """Generate cache key for agent ID lookup."""
+        return f"agent_id:{user_number}"
+
+    def _get_agent_cache_ttl(self) -> int:
+        """Get TTL for agent ID cache (24 hours by default)."""
+        return env.AGENT_ID_CACHE_TTL
+
+    def _invalidate_agent_cache_sync(self, user_number: str) -> None:
+        """Invalidate agent cache for a specific user (sync)."""
+        try:
+            from src.services.redis_service import sync_client
+
+            cache_key = self._get_agent_cache_key(user_number)
+            sync_client.delete(f"{env.APP_PREFIX}:cache:{cache_key}")
+            logger.debug(f"Invalidated agent cache for user: {user_number}")
+        except Exception as e:
+            logger.warning(f"Failed to invalidate agent cache for {user_number}: {e}")
+
+    async def _invalidate_agent_cache_async(self, user_number: str) -> None:
+        """Invalidate agent cache for a specific user (async)."""
+        try:
+            from src.services.redis_service import async_client
+
+            cache_key = self._get_agent_cache_key(user_number)
+            await async_client.delete(f"{env.APP_PREFIX}:cache:{cache_key}")
+            logger.debug(f"Invalidated agent cache for user: {user_number}")
+        except Exception as e:
+            logger.warning(f"Failed to invalidate agent cache for {user_number}: {e}")
 
     ## SYNC METHODS
 
@@ -146,6 +182,24 @@ class LettaService:
         with tracer.start_as_current_span("letta.get_agent_id_sync") as span:
             span.set_attribute("letta.user_number", user_number)
 
+            cache_key = self._get_agent_cache_key(user_number)
+            cache_ttl = self._get_agent_cache_ttl()
+
+            # Try to get from cache first
+            try:
+                agent_id = get_string_cache_sync(cache_key)
+                if agent_id:
+                    span.set_attribute("letta.cache_hit", True)
+                    span.set_attribute("letta.agent_id", agent_id)
+                    logger.debug(f"Cache hit for agent ID: {user_number} -> {agent_id}")
+                    return agent_id
+            except Exception as e:
+                span.record_exception(e)
+                span.set_attribute("error", True)
+                logger.warning(f"Cache error for user {user_number}: {e}")
+
+            # Cache miss or error, fetch from Letta API
+            span.set_attribute("letta.cache_hit", False)
             try:
                 response = self.client_sync.agents.list(
                     name=user_number,
@@ -154,6 +208,17 @@ class LettaService:
                 if response:
                     agent_id = response[0].id
                     span.set_attribute("letta.agent_id", agent_id)
+
+                    # Cache the result
+                    try:
+                        store_string_cache_sync(cache_key, agent_id, cache_ttl)
+                        logger.debug(f"Cached agent ID: {user_number} -> {agent_id}")
+                    except Exception as cache_error:
+                        span.record_exception(cache_error)
+                        logger.warning(
+                            f"Failed to cache agent ID for {user_number}: {cache_error}"
+                        )
+
                     return agent_id
                 return None
 
@@ -190,6 +255,10 @@ class LettaService:
                     )
 
                 span.set_attribute("letta.agent_id", agent.id)
+
+                # Invalidate cache since we created a new agent
+                self._invalidate_agent_cache_sync(user_number)
+
                 return agent.id
             except Exception as e:
                 span.record_exception(e)
@@ -266,6 +335,24 @@ class LettaService:
         with tracer.start_as_current_span("letta.get_agent_id") as span:
             span.set_attribute("letta.user_number", user_number)
 
+            cache_key = self._get_agent_cache_key(user_number)
+            cache_ttl = self._get_agent_cache_ttl()
+
+            # Try to get from cache first
+            try:
+                agent_id = await get_string_cache_async(cache_key)
+                if agent_id:
+                    span.set_attribute("letta.cache_hit", True)
+                    span.set_attribute("letta.agent_id", agent_id)
+                    logger.debug(f"Cache hit for agent ID: {user_number} -> {agent_id}")
+                    return agent_id
+            except Exception as e:
+                span.record_exception(e)
+                span.set_attribute("error", True)
+                logger.warning(f"Cache error for user {user_number}: {e}")
+
+            # Cache miss or error, fetch from Letta API
+            span.set_attribute("letta.cache_hit", False)
             try:
                 response = await self.client.agents.list(
                     name=user_number,
@@ -274,6 +361,17 @@ class LettaService:
                 if response:
                     agent_id = response[0].id
                     span.set_attribute("letta.agent_id", agent_id)
+
+                    # Cache the result
+                    try:
+                        await store_string_cache_async(cache_key, agent_id, cache_ttl)
+                        logger.debug(f"Cached agent ID: {user_number} -> {agent_id}")
+                    except Exception as cache_error:
+                        span.record_exception(cache_error)
+                        logger.warning(
+                            f"Failed to cache agent ID for {user_number}: {cache_error}"
+                        )
+
                     return agent_id
                 return None
 
@@ -307,6 +405,10 @@ class LettaService:
                     )
 
                 span.set_attribute("letta.agent_id", agent.id)
+
+                # Invalidate cache since we created a new agent
+                await self._invalidate_agent_cache_async(user_number)
+
                 return agent.id
             except Exception as e:
                 span.record_exception(e)

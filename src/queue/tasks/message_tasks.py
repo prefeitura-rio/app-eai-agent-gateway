@@ -203,6 +203,20 @@ def process_user_message(
             span.set_attribute("celery.letta_api_error", True)
             if exc.status_code:
                 span.set_attribute("celery.letta_status_code", exc.status_code)
+
+            # Handle agent not found (404) by invalidating cache
+            if exc.status_code == 404 and exc.agent_id:
+                span.set_attribute("celery.agent_not_found", True)
+                logger.warning(
+                    f"[{self.request.id}] Agent {exc.agent_id} not found for user {user_number}, invalidating cache",
+                )
+                # Invalidate cache for this user
+                try:
+                    letta_service._invalidate_agent_cache_sync(user_number)
+                except Exception as cache_error:
+                    logger.warning(
+                        f"Failed to invalidate cache for user {user_number}: {cache_error}"
+                    )
             logger.warning(
                 f"[{self.request.id}] Letta API error for user message {message_id}: {exc}",
             )
