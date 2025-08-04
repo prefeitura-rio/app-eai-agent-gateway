@@ -127,6 +127,7 @@ def process_user_message(
         except SoftTimeLimitExceeded as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.soft_timeout", True)
             logger.warning(
                 f"[{self.request.id}] Soft time limit exceeded for user message {message_id}: {exc}",
@@ -150,6 +151,7 @@ def process_user_message(
         except LettaAPITimeoutError as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.letta_timeout", True)
             logger.warning(
                 f"[{self.request.id}] Letta API timeout for user message {message_id}: {exc}",
@@ -200,6 +202,7 @@ def process_user_message(
         except LettaAPIError as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.letta_api_error", True)
             if exc.status_code:
                 span.set_attribute("celery.letta_status_code", exc.status_code)
@@ -256,6 +259,7 @@ def process_user_message(
         except (httpx.HTTPError, httpx.TimeoutException) as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.http_error", True)
             logger.warning(
                 f"[{self.request.id}] Retryable HTTP error for user message {message_id}: {exc}",
@@ -291,6 +295,7 @@ def process_user_message(
         except Exception as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.fatal_error", True)
             logger.error(
                 f"[{self.request.id}] Fatal error processing user message {message_id}: {exc}",
@@ -399,6 +404,7 @@ def send_agent_message(
         except SoftTimeLimitExceeded as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.soft_timeout", True)
             logger.warning(
                 f"[{self.request.id}] Soft time limit exceeded for message {message_id}: {exc}",
@@ -422,6 +428,7 @@ def send_agent_message(
         except LettaAPITimeoutError as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.letta_timeout", True)
             logger.warning(
                 f"[{self.request.id}] Letta API timeout for message {message_id}: {exc}",
@@ -472,6 +479,7 @@ def send_agent_message(
         except LettaAPIError as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.letta_api_error", True)
             if exc.status_code:
                 span.set_attribute("celery.letta_status_code", exc.status_code)
@@ -514,6 +522,7 @@ def send_agent_message(
         except (httpx.HTTPError, httpx.TimeoutException) as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.http_error", True)
             logger.warning(
                 f"[{self.request.id}] Retryable HTTP error for message {message_id}: {exc}",
@@ -549,6 +558,7 @@ def send_agent_message(
         except Exception as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
             span.set_attribute("celery.fatal_error", True)
             logger.error(
                 f"[{self.request.id}] Fatal error processing message {message_id}: {exc}",
