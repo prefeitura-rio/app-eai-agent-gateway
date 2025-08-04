@@ -46,6 +46,14 @@ class LettaService:
             pool=120.0,
         )
 
+        # Fast timeout for agent ID lookups - fail fast and let Celery retry
+        fast_timeout_config = httpx.Timeout(
+            connect=5.0,
+            read=15.0,  # 15 seconds max for agent ID lookup
+            write=5.0,
+            pool=15.0,
+        )
+
         httpx_async_client = httpx.AsyncClient(
             timeout=timeout_config,
             follow_redirects=True,
@@ -57,6 +65,18 @@ class LettaService:
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
         )
 
+        # Fast clients for agent ID lookups with short timeouts
+        httpx_async_client_fast = httpx.AsyncClient(
+            timeout=fast_timeout_config,
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+        httpx_client_fast = httpx.Client(
+            timeout=fast_timeout_config,
+            follow_redirects=True,
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
+
         self.client = AsyncLetta(
             base_url=env.LETTA_API_URL,
             token=env.LETTA_API_TOKEN,
@@ -66,6 +86,18 @@ class LettaService:
             base_url=env.LETTA_API_URL,
             token=env.LETTA_API_TOKEN,
             httpx_client=httpx_client,
+        )
+
+        # Fast clients for agent ID lookups
+        self.client_fast = AsyncLetta(
+            base_url=env.LETTA_API_URL,
+            token=env.LETTA_API_TOKEN,
+            httpx_client=httpx_async_client_fast,
+        )
+        self.client_sync_fast = Letta(
+            base_url=env.LETTA_API_URL,
+            token=env.LETTA_API_TOKEN,
+            httpx_client=httpx_client_fast,
         )
 
     def _get_agent_cache_key(self, user_number: str) -> str:
@@ -198,10 +230,10 @@ class LettaService:
                 span.set_attribute("error", True)
                 logger.warning(f"Cache error for user {user_number}: {e}")
 
-            # Cache miss or error, fetch from Letta API
+            # Cache miss or error, fetch from Letta API with fast timeout
             span.set_attribute("letta.cache_hit", False)
             try:
-                response = self.client_sync.agents.list(
+                response = self.client_sync_fast.agents.list(
                     name=user_number,
                 )
 
@@ -222,6 +254,18 @@ class LettaService:
                     return agent_id
                 return None
 
+            except httpx.TimeoutException as e:
+                span.record_exception(e)
+                span.set_attribute("error", True)
+                span.set_attribute("letta.timeout", True)
+                logger.warning(
+                    f"Fast timeout getting agent ID for user {user_number} on Letta: {e}",
+                )
+                # Let Celery retry the entire task
+                raise LettaAPITimeoutError(
+                    f"Fast timeout getting agent ID: {e!s}",
+                    agent_id=None,
+                ) from e
             except Exception as e:
                 span.record_exception(e)
                 span.set_attribute("error", True)
@@ -351,10 +395,10 @@ class LettaService:
                 span.set_attribute("error", True)
                 logger.warning(f"Cache error for user {user_number}: {e}")
 
-            # Cache miss or error, fetch from Letta API
+            # Cache miss or error, fetch from Letta API with fast timeout
             span.set_attribute("letta.cache_hit", False)
             try:
-                response = await self.client.agents.list(
+                response = await self.client_fast.agents.list(
                     name=user_number,
                 )
 
@@ -375,6 +419,18 @@ class LettaService:
                     return agent_id
                 return None
 
+            except httpx.TimeoutException as e:
+                span.record_exception(e)
+                span.set_attribute("error", True)
+                span.set_attribute("letta.timeout", True)
+                logger.warning(
+                    f"Fast timeout getting agent ID for user {user_number} on Letta: {e}",
+                )
+                # Let Celery retry the entire task
+                raise LettaAPITimeoutError(
+                    f"Fast timeout getting agent ID: {e!s}",
+                    agent_id=None,
+                ) from e
             except Exception as e:
                 span.record_exception(e)
                 span.set_attribute("error", True)
