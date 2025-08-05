@@ -234,7 +234,9 @@ class LettaService:
             span.set_attribute("letta.cache_hit", False)
             try:
                 response = self.client_sync_fast.agents.list(
-                    name=user_number,
+                    tags=[user_number],
+                    limit=1,
+                    match_all_tags=False,
                 )
 
                 if response:
@@ -399,7 +401,9 @@ class LettaService:
             span.set_attribute("letta.cache_hit", False)
             try:
                 response = await self.client_fast.agents.list(
-                    name=user_number,
+                    tags=[user_number],
+                    limit=1,
+                    match_all_tags=False,
                 )
 
                 if response:
