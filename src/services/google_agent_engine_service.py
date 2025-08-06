@@ -1,13 +1,10 @@
-import asyncio
 import logging
 import json
-import httpx
 import vertexai
-import threading
-import concurrent.futures
 from vertexai import agent_engines
 from fastapi import HTTPException
 from typing import Any, Optional
+from asgiref.sync import async_to_sync
 
 from src.config import env
 from src.config.telemetry import get_tracer
@@ -188,9 +185,38 @@ class GoogleAgentEngineService:
             )
 
             try:
-                # Usar asyncio.run() diretamente - é a forma mais eficiente
-                # para workers síncronos do Celery
-                return asyncio.run(self.send_message(thread_id, message))
+                data = {
+                    "messages": [{"role": "human", "content": message}],
+                }
+
+                config = {"configurable": {"thread_id": thread_id}}
+                response = async_to_sync(self.remote_agent.async_query)(input=data, config=config)
+
+                span.set_attribute(
+                    "google_agent_engine.response_messages_count",
+                    len(response.get("messages", [])),
+                )
+
+                # Return response in a format similar to Letta
+                messages = response.get("messages", [])
+                usage = self._extract_usage_from_messages(messages)
+
+                # Log usage information
+                if usage.total_tokens > 0:
+                    span.set_attribute("google_agent_engine.usage_tokens", usage.total_tokens)
+                    span.set_attribute("google_agent_engine.input_tokens", usage.input_tokens)
+                    span.set_attribute("google_agent_engine.output_tokens", usage.output_tokens)
+                    logger.debug(f"Google Agent Engine usage - Input: {usage.input_tokens}, Output: {usage.output_tokens}, Total: {usage.total_tokens}")
+
+                # Serializa para o formato padrão do Letta
+                serialized_response = serialize_google_agent_response(
+                    messages=messages,
+                    usage=usage.to_dict(),
+                    agent_id=thread_id,
+                    processed_at=thread_id  # Usar thread_id como processed_at por compatibilidade
+                )
+                
+                return serialized_response.get("data", {}).get("messages", []), usage
 
             except Exception as e:
                 span.record_exception(e)

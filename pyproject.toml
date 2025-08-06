@@ -22,6 +22,7 @@ dependencies = [
     "opentelemetry-instrumentation-httpx>=0.45b0",
     "opentelemetry-instrumentation-redis>=0.45b0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.24.0",
+    "asgiref>=3.9.1",
 ]
 
 [dependency-groups]
