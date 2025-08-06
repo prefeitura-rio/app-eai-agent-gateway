@@ -19,6 +19,28 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install UV
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies and generate docs
+        run: |
+          uv sync
+          uv run python generate_docs.py
+
+      - name: Upload documentation artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: swagger-docs-${{ github.sha }}
+          path: docs/
+          retention-days: 30
+
       # - if: ${{ github.ref == 'refs/heads/staging' }}
       #   uses: SonarSource/sonarqube-scan-action@v4
       #   env:

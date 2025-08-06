@@ -13,4 +13,6 @@ ADD . /app
 
 RUN uv sync
 
+RUN uv run python generate_docs.py
+
 CMD ["uv", "run", "granian", "--host", "0.0.0.0", "--interface", "asgi", "--workers", "4", "--runtime-mode", "mt", "--task-impl", "rust", "src.main:app"]

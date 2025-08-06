@@ -8,7 +8,14 @@ from src.services.prometheus_metrics import get_metrics, start_metrics_collector
 # Setup OpenTelemetry before creating the FastAPI app
 setup_telemetry()
 
-app = FastAPI(title="EAí Gateway", version="0.1.0")
+app = FastAPI(
+    title="EAí Gateway", 
+    version="0.1.0",
+    description="API Gateway para agentes de IA integrados com diversos provedores",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
 
 # Instrument FastAPI with OpenTelemetry
 instrument_fastapi(app)
