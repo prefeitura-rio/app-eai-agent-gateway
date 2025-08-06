@@ -72,3 +72,12 @@ CACHE_TTL_SECONDS = int(getenv_or_action(env_name="CACHE_TTL_SECONDS", default="
 AGENT_ID_CACHE_TTL = int(
     getenv_or_action(env_name="AGENT_ID_CACHE_TTL", default="86400")
 )
+
+# GOOGLE AGENT ENGINE CONFIG
+REASONING_ENGINE_ID=getenv_or_action(env_name="REASONING_ENGINE_ID")
+PROJECT_ID=getenv_or_action(env_name="PROJECT_ID")
+LOCATION=getenv_or_action(env_name="LOCATION")
+INSTANCE=getenv_or_action(env_name="INSTANCE")
+DATABASE=getenv_or_action(env_name="DATABASE")
+DATABASE_USER=getenv_or_action(env_name="DATABASE_USER")
+DATABASE_PASSWORD=getenv_or_action(env_name="DATABASE_PASSWORD")
