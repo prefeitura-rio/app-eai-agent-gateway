@@ -1,0 +1,163 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "EAí Gateway",
+    "description": "API Gateway para agentes de IA - EAí",
+    "version": "0.1.0",
+    "contact": {
+      "name": "EAí Team",
+      "url": "https://github.com/your-org/app-eai-agent-gateway"
+    },
+    "license": {
+      "name": "MIT"
+    }
+  },
+  "paths": {
+    "/metrics": {
+      "get": {
+        "tags": [
+          "Monitoring"
+        ],
+        "summary": "Metrics",
+        "description": "Endpoint de métricas do Prometheus.",
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/message/webhook/agent": {
+      "post": {
+        "tags": [
+          "Messages"
+        ],
+        "summary": "Agent Webhook",
+        "description": "Webhook para receber mensagens de agentes de IA.",
+        "operationId": "agent_webhook_api_v1_message_webhook_agent_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/message/webhook/user": {
+      "post": {
+        "tags": [
+          "Messages"
+        ],
+        "summary": "User Webhook",
+        "description": "Webhook para receber mensagens de usuários.",
+        "operationId": "user_webhook_api_v1_message_webhook_user_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/message/status/{task_id}": {
+      "get": {
+        "tags": [
+          "Messages"
+        ],
+        "summary": "Get Task Status",
+        "description": "Consultar status de uma tarefa de processamento.",
+        "operationId": "get_task_status_api_v1_message_status__task_id__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/message/response/{task_id}": {
+      "get": {
+        "tags": [
+          "Messages"
+        ],
+        "summary": "Get Task Response",
+        "description": "Obter resposta de uma tarefa processada.",
+        "operationId": "get_task_response_api_v1_message_response__task_id__get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/create": {
+      "post": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Create Agent",
+        "description": "Criar um novo agente de IA.",
+        "operationId": "create_agent_api_v1_agent_create_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/delete": {
+      "delete": {
+        "tags": [
+          "Agents"
+        ],
+        "summary": "Delete Agent",
+        "description": "Remover um agente existente.",
+        "operationId": "delete_agent_api_v1_agent_delete_delete",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Servidor Principal"
+    }
+  ]
+}

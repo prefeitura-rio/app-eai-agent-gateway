@@ -10,7 +10,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       packages: write
 
     steps:
@@ -33,6 +33,18 @@ jobs:
         run: |
           uv sync
           uv run python generate_docs.py
+
+      - name: Commit and push documentation
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add docs/
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "docs: update API documentation [skip ci]"
+            git push
+          fi
 
       - name: Upload documentation artifacts
         uses: actions/upload-artifact@v4

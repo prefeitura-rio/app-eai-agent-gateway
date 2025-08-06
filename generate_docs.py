@@ -1,16 +1,87 @@
 #!/usr/bin/env python3
 """
 Script para gerar documentação Swagger/OpenAPI automaticamente.
+Este script cria uma aplicação FastAPI standalone para evitar dependências de ambiente.
 """
 
 import json
 import os
 from pathlib import Path
 
+from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 
-# Importa a aplicação FastAPI
-from src.main import app
+# Importa apenas os routers sem dependências de ambiente
+def create_standalone_app():
+    """Cria uma aplicação FastAPI standalone para gerar documentação."""
+    app = FastAPI(
+        title="EAí Gateway", 
+        version="0.1.0",
+        description="API Gateway para agentes de IA integrados com diversos provedores",
+        docs_url="/docs",
+        redoc_url="/redoc",
+        openapi_url="/openapi.json"
+    )
+    
+    # Simula as rotas principais sem importar os módulos que dependem de env
+    from fastapi import APIRouter
+    
+    # Router principal da API
+    api_router = APIRouter(prefix="/api")
+    v1_router = APIRouter(prefix="/v1")
+    
+    # Routers de mensagens
+    message_router = APIRouter(prefix="/message", tags=["Messages"])
+    
+    @message_router.post("/webhook/agent")
+    async def agent_webhook():
+        """Webhook para receber mensagens de agentes de IA."""
+        pass
+    
+    @message_router.post("/webhook/user")
+    async def user_webhook():
+        """Webhook para receber mensagens de usuários."""
+        pass
+    
+    @message_router.get("/status/{task_id}")
+    async def get_task_status():
+        """Consultar status de uma tarefa de processamento."""
+        pass
+    
+    @message_router.get("/response/{task_id}")
+    async def get_task_response():
+        """Obter resposta de uma tarefa processada."""
+        pass
+    
+    # Router de agentes
+    agent_router = APIRouter(prefix="/agent", tags=["Agents"])
+    
+    @agent_router.post("/create")
+    async def create_agent():
+        """Criar um novo agente de IA."""
+        pass
+    
+    @agent_router.delete("/delete")
+    async def delete_agent():
+        """Remover um agente existente."""
+        pass
+    
+    # Endpoint de métricas
+    @app.get("/metrics", tags=["Monitoring"])
+    async def metrics():
+        """Endpoint de métricas do Prometheus."""
+        pass
+    
+    # Monta os routers
+    v1_router.include_router(message_router)
+    v1_router.include_router(agent_router)
+    api_router.include_router(v1_router)
+    app.include_router(api_router)
+    
+    return app
+
+# Cria app standalone
+app = create_standalone_app()
 
 
 def generate_openapi_spec():
