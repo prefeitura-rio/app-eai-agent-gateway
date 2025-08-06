@@ -1,137 +1,127 @@
 #!/usr/bin/env python3
 """
 Script para gerar documentação Swagger/OpenAPI automaticamente.
-Este script cria uma aplicação FastAPI standalone para evitar dependências de ambiente.
+Este script importa a aplicação real e faz mock das dependências de ambiente.
 """
 
 import json
 import os
+import sys
 from pathlib import Path
+from unittest.mock import patch, MagicMock
 
-from fastapi import FastAPI
-from fastapi.openapi.utils import get_openapi
+# Mock das variáveis de ambiente antes de importar qualquer coisa
+os.environ.setdefault("LETTA_API_URL", "http://localhost:8000")
+os.environ.setdefault("REDIS_URL", "redis://localhost:6379")
+os.environ.setdefault("CELERY_BROKER_URL", "redis://localhost:6379")
+os.environ.setdefault("CELERY_RESULT_BACKEND", "redis://localhost:6379")
+os.environ.setdefault("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+os.environ.setdefault("GOOGLE_PROJECT_ID", "test-project")
+os.environ.setdefault("GOOGLE_REGION", "us-central1")
 
-# Importa apenas os routers sem dependências de ambiente
-def create_standalone_app():
-    """Cria uma aplicação FastAPI standalone para gerar documentação."""
-    app = FastAPI(
-        title="EAí Gateway", 
-        version="0.1.0",
-        description="API Gateway para agentes de IA integrados com diversos provedores",
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json"
-    )
-    
-    # Simula as rotas principais sem importar os módulos que dependem de env
-    from fastapi import APIRouter
-    
-    # Router principal da API
-    api_router = APIRouter(prefix="/api")
-    v1_router = APIRouter(prefix="/v1")
-    
-    # Routers de mensagens
-    message_router = APIRouter(prefix="/message", tags=["Messages"])
-    
-    @message_router.post("/webhook/agent")
-    async def agent_webhook():
-        """Webhook para receber mensagens de agentes de IA."""
-        pass
-    
-    @message_router.post("/webhook/user")
-    async def user_webhook():
-        """Webhook para receber mensagens de usuários."""
-        pass
-    
-    @message_router.get("/status/{task_id}")
-    async def get_task_status():
-        """Consultar status de uma tarefa de processamento."""
-        pass
-    
-    @message_router.get("/response/{task_id}")
-    async def get_task_response():
-        """Obter resposta de uma tarefa processada."""
-        pass
-    
-    # Router de agentes
-    agent_router = APIRouter(prefix="/agent", tags=["Agents"])
-    
-    @agent_router.post("/create")
-    async def create_agent():
-        """Criar um novo agente de IA."""
-        pass
-    
-    @agent_router.delete("/delete")
-    async def delete_agent():
-        """Remover um agente existente."""
-        pass
-    
-    # Endpoint de métricas
-    @app.get("/metrics", tags=["Monitoring"])
-    async def metrics():
-        """Endpoint de métricas do Prometheus."""
-        pass
-    
-    # Monta os routers
-    v1_router.include_router(message_router)
-    v1_router.include_router(agent_router)
-    api_router.include_router(v1_router)
-    app.include_router(api_router)
-    
-    return app
+def mock_infisical_function(env_name):
+    """Mock da função getenv_or_action do infisical para não falhar."""
+    return os.environ.get(env_name, f"mocked-{env_name}")
 
-# Cria app standalone
-app = create_standalone_app()
+def mock_setup_telemetry():
+    """Mock da função setup_telemetry para não inicializar telemetria."""
+    pass
+
+def mock_start_metrics_collector():
+    """Mock da função start_metrics_collector para não inicializar métricas."""
+    pass
+
+def mock_get_tracer(name):
+    """Mock da função get_tracer para retornar um tracer mock."""
+    tracer = MagicMock()
+    tracer.start_as_current_span.return_value.__enter__ = MagicMock()
+    tracer.start_as_current_span.return_value.__exit__ = MagicMock()
+    return tracer
+
+# Aplica os mocks antes de importar os módulos
+with patch('src.utils.infisical.getenv_or_action', side_effect=mock_infisical_function), \
+     patch('src.config.telemetry.setup_telemetry', side_effect=mock_setup_telemetry), \
+     patch('src.services.prometheus_metrics.start_metrics_collector', side_effect=mock_start_metrics_collector), \
+     patch('src.config.telemetry.get_tracer', side_effect=mock_get_tracer), \
+     patch('src.config.telemetry.instrument_fastapi', side_effect=lambda x: None):
+    
+    from fastapi.openapi.utils import get_openapi
+    
+    # Agora pode importar a aplicação real
+    try:
+        from src.main import app
+        print("✅ Aplicação real importada com sucesso!")
+    except Exception as e:
+        print(f"❌ Erro ao importar aplicação: {e}")
+        sys.exit(1)
 
 
-def generate_openapi_spec():
-    """Gera a especificação OpenAPI/Swagger da aplicação."""
-    openapi_schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description="API Gateway para agentes de IA - EAí",
-        routes=app.routes,
-    )
-    
-    # Adiciona informações extras ao schema
-    openapi_schema["info"]["contact"] = {
-        "name": "EAí Team",
-        "url": "https://github.com/your-org/app-eai-agent-gateway"
-    }
-    
-    openapi_schema["info"]["license"] = {
-        "name": "MIT"
-    }
-    
-    # Adiciona servidores
-    openapi_schema["servers"] = [
-        {
-            "url": "/",
-            "description": "Servidor Principal"
+    def generate_openapi_spec():
+        """Gera a especificação OpenAPI/Swagger da aplicação REAL."""
+        openapi_schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        
+        # Adiciona informações extras ao schema
+        openapi_schema["info"]["contact"] = {
+            "name": "EAí Team",
+            "url": "https://github.com/your-org/app-eai-agent-gateway"
         }
-    ]
-    
-    return openapi_schema
+        
+        openapi_schema["info"]["license"] = {
+            "name": "MIT"
+        }
+        
+        # Adiciona servidores
+        openapi_schema["servers"] = [
+            {
+                "url": "/",
+                "description": "Servidor Principal"
+            },
+            {
+                "url": "https://api.eai.com",
+                "description": "Servidor de Produção"
+            },
+            {
+                "url": "https://staging.api.eai.com",
+                "description": "Servidor de Staging"
+            }
+        ]
+        
+        return openapi_schema
 
 
-def save_docs():
-    """Salva a documentação em formato JSON."""
-    # Cria diretório docs se não existir
-    docs_dir = Path("docs")
-    docs_dir.mkdir(exist_ok=True)
-    
-    # Gera a especificação OpenAPI
-    openapi_spec = generate_openapi_spec()
-    
-    # Salva o JSON do Swagger
-    swagger_file = docs_dir / "swagger.json"
-    with open(swagger_file, "w", encoding="utf-8") as f:
-        json.dump(openapi_spec, f, indent=2, ensure_ascii=False)
-    
-    print(f"✅ Documentação Swagger gerada em: {swagger_file}")
-    
-    # Cria um arquivo HTML simples para visualizar o Swagger
-    html_content = f"""<!DOCTYPE html>
+    def save_docs():
+        """Salva a documentação em formato JSON."""
+        # Cria diretório docs se não existir
+        docs_dir = Path("docs")
+        docs_dir.mkdir(exist_ok=True)
+        
+        # Gera a especificação OpenAPI
+        openapi_spec = generate_openapi_spec()
+        
+        # Salva o JSON do Swagger
+        swagger_file = docs_dir / "swagger.json"
+        with open(swagger_file, "w", encoding="utf-8") as f:
+            json.dump(openapi_spec, f, indent=2, ensure_ascii=False)
+        
+        print(f"✅ Documentação Swagger REAL gerada em: {swagger_file}")
+        print(f"📊 Total de endpoints documentados: {len(openapi_spec.get('paths', {}))}")
+        
+        # Lista os endpoints encontrados
+        paths = openapi_spec.get('paths', {})
+        if paths:
+            print("🔗 Endpoints documentados:")
+            for path, methods in paths.items():
+                for method in methods.keys():
+                    if method != 'parameters':  # Ignora parâmetros globais
+                        print(f"   {method.upper()} {path}")
+        
+        # Cria um arquivo HTML simples para visualizar o Swagger
+        html_content = f"""<!DOCTYPE html>
 <html>
 <head>
     <title>EAí Gateway - API Documentation</title>
@@ -174,15 +164,15 @@ def save_docs():
     </script>
 </body>
 </html>"""
-    
-    html_file = docs_dir / "index.html"
-    with open(html_file, "w", encoding="utf-8") as f:
-        f.write(html_content)
-    
-    print(f"✅ Interface HTML do Swagger gerada em: {html_file}")
-    
-    return docs_dir
+        
+        html_file = docs_dir / "index.html"
+        with open(html_file, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        
+        print(f"✅ Interface HTML do Swagger gerada em: {html_file}")
+        
+        return docs_dir
 
-
-if __name__ == "__main__":
-    save_docs()
+    # Executa a geração se o script for executado diretamente
+    if __name__ == "__main__":
+        save_docs()
