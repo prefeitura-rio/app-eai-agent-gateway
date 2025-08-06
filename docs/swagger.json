@@ -605,8 +605,21 @@
         ],
         "title": "ValidationError"
       }
+    },
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Insira o token Bearer para autenticação. Exemplo: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+      }
     }
   },
+  "security": [
+    {
+      "BearerAuth": []
+    }
+  ],
   "servers": [
     {
       "url": "https://services.staging.app.dados.rio/eai-agent-gateway/",

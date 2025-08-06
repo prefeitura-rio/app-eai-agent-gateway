@@ -111,6 +111,24 @@ def generate_openapi_spec():
         "name": "MIT"
     }
     
+    # Adiciona configuração de segurança Bearer token
+    openapi_schema["components"] = openapi_schema.get("components", {})
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
+            "description": "Insira o token Bearer para autenticação. Exemplo: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        }
+    }
+    
+    # Adiciona segurança global para todos os endpoints
+    openapi_schema["security"] = [
+        {
+            "BearerAuth": []
+        }
+    ]
+    
     # Adiciona servidores
     openapi_schema["servers"] = [
         {
