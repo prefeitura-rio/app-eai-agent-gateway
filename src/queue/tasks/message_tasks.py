@@ -12,6 +12,11 @@ from src.services.letta_service import (
     LettaAPITimeoutError,
     letta_service,
 )
+from src.services.google_agent_engine_service import (
+    GoogleAgentEngineAPIError,
+    GoogleAgentEngineAPITimeoutError,
+)
+from src.services.agent_provider_factory import agent_provider_factory
 from src.services.prometheus_metrics import (
     celery_task_duration,
     celery_task_errors,
@@ -41,6 +46,8 @@ class SerializableHTTPError(Exception):
         SerializableHTTPError,
         LettaAPIError,
         LettaAPITimeoutError,
+        GoogleAgentEngineAPIError,
+        GoogleAgentEngineAPITimeoutError,
     ),
     retry_backoff=True,
     retry_kwargs={"max_retries": 3},
@@ -57,6 +64,7 @@ def process_user_message(
     user_number: str,
     message: str,
     previous_message: str | None = None,
+    provider: str = "google_agent_engine",
 ) -> None:
     start_time = time.time()
     task_name = "process_user_message"
@@ -68,37 +76,41 @@ def process_user_message(
         span.set_attribute("celery.message_length", len(message))
         span.set_attribute("celery.has_previous_message", previous_message is not None)
         span.set_attribute("celery.retry_count", self.request.retries)
+        span.set_attribute("celery.provider", provider)
 
         try:
             logger.info(
-                f"[{self.request.id}] Processing user message {message_id} for user {user_number}",
+                f"[{self.request.id}] Processing user message {message_id} for user {user_number} using provider {provider}",
             )
 
+            # Get the appropriate provider
+            agent_provider = agent_provider_factory.get_provider(provider)
+
             # First, try to get existing agent ID
-            agent_id = letta_service.get_agent_id_sync(user_number=user_number)
+            agent_id = agent_provider.get_agent_id_sync(user_number=user_number)
             if agent_id is None:
                 span.set_attribute("celery.agent_created", True)
                 logger.info(
-                    f"[{self.request.id}] Creating new agent for user {user_number}",
+                    f"[{self.request.id}] Creating new agent for user {user_number} using {provider}",
                 )
-                agent_id = letta_service.create_agent_sync(user_number=user_number)
+                agent_id = agent_provider.create_agent_sync(user_number=user_number)
             else:
                 span.set_attribute("celery.agent_found", True)
                 logger.info(
-                    f"[{self.request.id}] Found existing agent {agent_id} for user {user_number}",
+                    f"[{self.request.id}] Found existing agent {agent_id} for user {user_number} using {provider}",
                 )
 
             span.set_attribute("celery.agent_id", agent_id)
 
-            # Now send the message using the existing send_agent_message logic
+            # Now send the message using the provider
             if previous_message is not None:
-                messages, usage = letta_service.send_message_sync(
+                messages, usage = agent_provider.send_message_sync(
                     agent_id,
                     message,
                     previous_message,
                 )
             else:
-                messages, usage = letta_service.send_message_sync(agent_id, message)
+                messages, usage = agent_provider.send_message_sync(agent_id, message)
 
             data = {
                 "messages": serialize_letta_response(messages),

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,3 +23,7 @@ class UserWebhookSchema(BaseModel):
     )
     message: str = Field(..., description="The message to be sent to the user")
     metadata: dict | None = Field(None, description="The metadata of the message")
+    provider: Literal["letta", "google_agent_engine"] = Field(
+        "google_agent_engine",
+        description="The agent provider to use (default: google_agent_engine)",
+    )

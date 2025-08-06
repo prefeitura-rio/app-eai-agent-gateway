@@ -76,8 +76,8 @@ AGENT_ID_CACHE_TTL = int(
 # GOOGLE AGENT ENGINE CONFIG
 REASONING_ENGINE_ID=getenv_or_action(env_name="REASONING_ENGINE_ID")
 PROJECT_ID=getenv_or_action(env_name="PROJECT_ID")
+PROJECT_NUMBER = getenv_or_action(env_name="PROJECT_NUMBER")
+SERVICE_ACCOUNT = getenv_or_action(env_name="SERVICE_ACCOUNT")
 LOCATION=getenv_or_action(env_name="LOCATION")
-INSTANCE=getenv_or_action(env_name="INSTANCE")
-DATABASE=getenv_or_action(env_name="DATABASE")
-DATABASE_USER=getenv_or_action(env_name="DATABASE_USER")
-DATABASE_PASSWORD=getenv_or_action(env_name="DATABASE_PASSWORD")
+GCS_BUCKET = getenv_or_action(env_name="GCS_BUCKET")
+GCS_BUCKET_STAGING = getenv_or_action(env_name="GCS_BUCKET_STAGING")

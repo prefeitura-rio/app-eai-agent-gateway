@@ -13,7 +13,7 @@ services:
       - ENABLE_EVENTLET_PATCH=true
     command: >
       uv run celery -A src.queue.celery_app.celery  worker
-      --pool=${CELERY_WORKER_POOL:-gevent}
+      --pool=${CELERY_WORKER_POOL:-solo}
       --concurrency=${CELERY_CONCURRENCY:-1000}
       --loglevel=${CELERY_LOG_LEVEL:-info}
     depends_on: [redis]
