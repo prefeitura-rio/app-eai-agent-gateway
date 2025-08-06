@@ -609,16 +609,8 @@
   },
   "servers": [
     {
-      "url": "/",
-      "description": "Servidor Principal"
-    },
-    {
-      "url": "https://api.eai.com",
+      "url": "https://services.staging.app.dados.rio/eai-agent-gateway/",
       "description": "Servidor de Produção"
-    },
-    {
-      "url": "https://staging.api.eai.com",
-      "description": "Servidor de Staging"
     }
   ]
 }
