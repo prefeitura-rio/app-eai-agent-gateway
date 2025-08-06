@@ -11,9 +11,11 @@ services:
     env_file: .env
     environment:
       - ENABLE_EVENTLET_PATCH=true
+      - REDIS_DSN=redis://redis:6379
+      - REDIS_BACKEND=redis://redis:6379
     command: >
       uv run celery -A src.queue.celery_app.celery  worker
-      --pool=${CELERY_WORKER_POOL:-solo}
+      --pool=${CELERY_WORKER_POOL:-gevent}
       --concurrency=${CELERY_CONCURRENCY:-1000}
       --loglevel=${CELERY_LOG_LEVEL:-info}
     depends_on: [redis]
@@ -21,6 +23,9 @@ services:
   flower:
     build: .
     env_file: .env
+    environment:
+      - REDIS_DSN=redis://redis:6379
+      - REDIS_BACKEND=redis://redis:6379
     command: >
       uv run celery -A src.queue.celery_app.celery flower
       --port=${FLOWER_PORT:-5555}

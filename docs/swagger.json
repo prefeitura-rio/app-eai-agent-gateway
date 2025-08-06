@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "EAí Gateway",
-    "description": "API Gateway para agentes de IA - EAí",
+    "description": "API Gateway para agentes de IA integrados com diversos provedores",
     "version": "0.1.0",
     "contact": {
       "name": "EAí Team",
@@ -15,11 +15,8 @@
   "paths": {
     "/metrics": {
       "get": {
-        "tags": [
-          "Monitoring"
-        ],
         "summary": "Metrics",
-        "description": "Endpoint de métricas do Prometheus.",
+        "description": "Prometheus metrics endpoint",
         "operationId": "metrics_metrics_get",
         "responses": {
           "200": {
@@ -39,14 +36,33 @@
           "Messages"
         ],
         "summary": "Agent Webhook",
-        "description": "Webhook para receber mensagens de agentes de IA.",
         "operationId": "agent_webhook_api_v1_message_webhook_agent_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentWebhookSchema"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -59,8 +75,17 @@
           "Messages"
         ],
         "summary": "User Webhook",
-        "description": "Webhook para receber mensagens de usuários.",
         "operationId": "user_webhook_api_v1_message_webhook_user_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserWebhookSchema"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -69,18 +94,40 @@
                 "schema": {}
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
     },
-    "/api/v1/message/status/{task_id}": {
+    "/api/v1/message/response": {
       "get": {
         "tags": [
           "Messages"
         ],
-        "summary": "Get Task Status",
-        "description": "Consultar status de uma tarefa de processamento.",
-        "operationId": "get_task_status_api_v1_message_status__task_id__get",
+        "summary": "Get Agent Message From Queue",
+        "operationId": "get_agent_message_from_queue_api_v1_message_response_get",
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "ID da mensagem para consultar",
+              "title": "Message Id"
+            },
+            "description": "ID da mensagem para consultar"
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -89,24 +136,55 @@
                 "schema": {}
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
     },
-    "/api/v1/message/response/{task_id}": {
+    "/api/v1/message/debug/task-status": {
       "get": {
         "tags": [
           "Messages"
         ],
-        "summary": "Get Task Response",
-        "description": "Obter resposta de uma tarefa processada.",
-        "operationId": "get_task_response_api_v1_message_response__task_id__get",
+        "summary": "Get Task Status Debug",
+        "description": "Endpoint para debug - mostra informações detalhadas sobre o status da task",
+        "operationId": "get_task_status_debug_api_v1_message_debug_task_status_get",
+        "parameters": [
+          {
+            "name": "message_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -116,11 +194,20 @@
     "/api/v1/agent/create": {
       "post": {
         "tags": [
-          "Agents"
+          "Agent"
         ],
-        "summary": "Create Agent",
-        "description": "Criar um novo agente de IA.",
-        "operationId": "create_agent_api_v1_agent_create_post",
+        "summary": "Create Agent Endpoint",
+        "operationId": "create_agent_endpoint_api_v1_agent_create_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgentRequestAndOverridePayload"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -129,24 +216,94 @@
                 "schema": {}
               }
             }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
     },
-    "/api/v1/agent/delete": {
+    "/api/v1/agent/": {
       "delete": {
         "tags": [
-          "Agents"
+          "Agent"
         ],
-        "summary": "Delete Agent",
-        "description": "Remover um agente existente.",
-        "operationId": "delete_agent_api_v1_agent_delete_delete",
+        "summary": "Delete Agent Endpoint",
+        "operationId": "delete_agent_endpoint_api_v1_agent__delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeleteAgentRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/{agent_id}": {
+      "delete": {
+        "tags": [
+          "Agent"
+        ],
+        "summary": "Delete Agent By Id Endpoint",
+        "description": "Backwards compatibility endpoint for deleting an agent by ID",
+        "operationId": "delete_agent_by_id_endpoint_api_v1_agent__agent_id__delete",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
               }
             }
           }
@@ -154,10 +311,314 @@
       }
     }
   },
+  "components": {
+    "schemas": {
+      "AgentWebhookSchema": {
+        "properties": {
+          "agent_id": {
+            "type": "string",
+            "title": "Agent Id",
+            "description": "The ID of the agent that will receive the message"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "The message to be sent to the agent"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata",
+            "description": "The metadata of the message"
+          }
+        },
+        "type": "object",
+        "required": [
+          "agent_id",
+          "message"
+        ],
+        "title": "AgentWebhookSchema"
+      },
+      "CreateAgentRequestAndOverridePayload": {
+        "properties": {
+          "user_number": {
+            "type": "string",
+            "title": "User Number",
+            "description": "The user number/identifier for the agent"
+          },
+          "agent_type": {
+            "type": "string",
+            "title": "Agent Type",
+            "description": "The type of agent to create",
+            "default": "memgpt_v2_agent"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "The name of the agent",
+            "default": ""
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags",
+            "description": "The tags of the agent",
+            "default": [
+              "agentic_search"
+            ]
+          },
+          "system": {
+            "type": "string",
+            "title": "System",
+            "description": "The system prompt of the agent",
+            "default": "You are an AI assistant..."
+          },
+          "memory_blocks": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Memory Blocks",
+            "description": "The memory blocks of the agent",
+            "default": [
+              {
+                "label": "human",
+                "limit": 10000,
+                "value": ""
+              },
+              {
+                "label": "persona",
+                "limit": 5000,
+                "value": ""
+              }
+            ]
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tools",
+            "description": "The tools of the agent",
+            "default": [
+              "google_search",
+              "web_search_surkai"
+            ]
+          },
+          "model": {
+            "type": "string",
+            "title": "Model",
+            "description": "The model of the agent",
+            "default": "google_ai/gemini-2.5-flash-lite"
+          },
+          "embedding": {
+            "type": "string",
+            "title": "Embedding",
+            "description": "The embedding of the agent",
+            "default": "google_ai/text-embedding-004"
+          },
+          "context_window_limit": {
+            "type": "integer",
+            "title": "Context Window Limit",
+            "description": "The context window limit of the agent",
+            "default": 30000
+          },
+          "include_base_tool_rules": {
+            "type": "boolean",
+            "title": "Include Base Tool Rules",
+            "description": "Whether to include base tool rules",
+            "default": true
+          },
+          "include_base_tools": {
+            "type": "boolean",
+            "title": "Include Base Tools",
+            "description": "Whether to include base tools",
+            "default": true
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone",
+            "description": "The timezone of the agent",
+            "default": "America/Sao_Paulo"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_number"
+        ],
+        "title": "CreateAgentRequestAndOverridePayload"
+      },
+      "DeleteAgentRequest": {
+        "properties": {
+          "agent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Id",
+            "description": "The ID of the agent to delete"
+          },
+          "tag_list": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tag List",
+            "description": "List of tags to match agents for deletion"
+          },
+          "delete_all_agents": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delete All Agents",
+            "description": "Delete all agents in the system",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "DeleteAgentRequest"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "UserWebhookSchema": {
+        "properties": {
+          "user_number": {
+            "type": "string",
+            "title": "User Number",
+            "description": "The number of the user that will receive the message"
+          },
+          "previous_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Message",
+            "description": "The previous message of the HSM"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message",
+            "description": "The message to be sent to the user"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata",
+            "description": "The metadata of the message"
+          },
+          "provider": {
+            "type": "string",
+            "enum": [
+              "letta",
+              "google_agent_engine"
+            ],
+            "title": "Provider",
+            "description": "The agent provider to use (default: google_agent_engine)",
+            "default": "google_agent_engine"
+          }
+        },
+        "type": "object",
+        "required": [
+          "user_number",
+          "message"
+        ],
+        "title": "UserWebhookSchema"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    }
+  },
   "servers": [
     {
       "url": "/",
       "description": "Servidor Principal"
+    },
+    {
+      "url": "https://api.eai.com",
+      "description": "Servidor de Produção"
+    },
+    {
+      "url": "https://staging.api.eai.com",
+      "description": "Servidor de Staging"
     }
   ]
 }
