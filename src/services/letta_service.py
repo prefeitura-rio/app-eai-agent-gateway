@@ -13,6 +13,7 @@ from src.services.redis_service import (
     store_string_cache_sync,
 )
 from src.utils.letta.eai_agent import create_eai_agent, delete_eai_agent
+from asgiref.sync import async_to_sync
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer("letta-service")
@@ -130,7 +131,7 @@ class LettaService:
         except Exception as e:
             logger.warning(f"Failed to invalidate agent cache for {user_number}: {e}")
 
-    ## SYNC METHODS
+    ## SYNC METHODS that use async Letta client with async_to_sync
 
     def send_message_sync(
         self,
@@ -157,7 +158,7 @@ class LettaService:
                     )
                 messages.append(MessageCreate(role="user", content=message))
 
-                response = self.client_sync.agents.messages.create(
+                response = async_to_sync(self.client.agents.messages.create)(
                     agent_id=agent_id,
                     messages=messages,
                 )
@@ -233,7 +234,7 @@ class LettaService:
             # Cache miss or error, fetch from Letta API with fast timeout
             span.set_attribute("letta.cache_hit", False)
             try:
-                response = self.client_sync_fast.agents.list(
+                response = async_to_sync(self.client_fast.agents.list)(
                     tags=[user_number],
                     limit=1,
                     match_all_tags=False,

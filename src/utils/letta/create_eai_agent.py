@@ -5,6 +5,7 @@ from src.services.external_dependencies import (
     get_agent_config_from_api,
     get_system_prompt_from_api,
 )
+from asgiref.sync import async_to_sync
 
 tracer = get_tracer("create-eai-agent")
 
@@ -171,7 +172,7 @@ def create_eai_agent_sync(user_number: str, override_payload: dict | None = None
             agent_variables = _merge_config(base_config, override_payload)
 
             # Create agent
-            agent = letta_service.client_sync.agents.create(**agent_variables)
+            agent = async_to_sync(letta_service.client.agents.create)(**agent_variables)
 
             span.set_attribute("create_eai_agent.agent_id", agent.id)
             span.set_attribute("create_eai_agent.success", True)
