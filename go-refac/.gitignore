@@ -1,0 +1,8 @@
+bin/
+dist/
+*.log
+*.out
+*.test
+vendor/
+
+
