@@ -18,7 +18,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: eai-agent-gateway
-          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:latest
           envFrom:
             - secretRef:
                 name: eai-agent-gateway-secrets
