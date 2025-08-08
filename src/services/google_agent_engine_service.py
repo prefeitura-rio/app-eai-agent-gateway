@@ -23,45 +23,54 @@ tracer = get_tracer("google-agent-engine-service")
 # Lazy loading para evitar problemas de inicialização
 _vertexai_initialized = False
 
+
 def _ensure_vertexai_initialized():
     """Inicializa o VertexAI apenas quando necessário."""
     global _vertexai_initialized
     if not _vertexai_initialized:
         try:
             service_account_path = get_service_account_path(env.SERVICE_ACCOUNT)
-            logger.info(f"Initializing VertexAI with project={env.PROJECT_ID}, location={env.LOCATION}")
-            
+            logger.info(
+                f"Initializing VertexAI with project={env.PROJECT_ID}, location={env.LOCATION}"
+            )
+
             # Se temos um email de service account, passamos para o VertexAI
             # Se temos um arquivo, o GOOGLE_APPLICATION_CREDENTIALS já foi configurado
             vertexai_kwargs = {
                 "project": env.PROJECT_ID,
                 "location": env.LOCATION,
-                "staging_bucket": env.GCS_BUCKET_STAGING,
+                "staging_bucket": env.GCS_BUCKET,
             }
-            
+
             # Só passa service_account se for um email (contém @)
-            if service_account_path and '@' in service_account_path:
+            if service_account_path and "@" in service_account_path:
                 vertexai_kwargs["service_account"] = service_account_path
-            
+
             vertexai.init(**vertexai_kwargs)
             _vertexai_initialized = True
             logger.info("VertexAI initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize VertexAI: {e}")
             raise HTTPException(
-                status_code=503, 
-                detail=f"Google Cloud authentication failed: {str(e)}"
+                status_code=503, detail=f"Google Cloud authentication failed: {str(e)}"
             )
 
 
 class GoogleAgentEngineUsage:
     """Classe para compatibilidade com o formato de Usage do Letta."""
-    
-    def __init__(self, input_tokens: int = 0, output_tokens: int = 0, total_tokens: Optional[int] = None):
+
+    def __init__(
+        self,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        total_tokens: Optional[int] = None,
+    ):
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
-        self.total_tokens = total_tokens if total_tokens is not None else (input_tokens + output_tokens)
-    
+        self.total_tokens = (
+            total_tokens if total_tokens is not None else (input_tokens + output_tokens)
+        )
+
     def to_dict(self) -> dict:
         """Converte para dicionário para serialização."""
         return {
@@ -94,7 +103,7 @@ class GoogleAgentEngineService:
     def __init__(self):
         self._remote_agent = None
         self._reasoning_engine_id = env.REASONING_ENGINE_ID
-    
+
     @property
     def remote_agent(self):
         """Lazy loading do remote agent."""
@@ -103,28 +112,29 @@ class GoogleAgentEngineService:
             self._remote_agent = self._get_agent(self._reasoning_engine_id)
         return self._remote_agent
 
-    def _extract_usage_from_messages(self, messages: list[Any]) -> GoogleAgentEngineUsage:
+    def _extract_usage_from_messages(
+        self, messages: list[Any]
+    ) -> GoogleAgentEngineUsage:
         """Extrai informações de usage das mensagens retornadas pelo Google Agent Engine."""
         total_input_tokens = 0
         total_output_tokens = 0
-        
+
         for message in messages:
             # Para mensagens locais (LangChain)
-            if hasattr(message, 'usage_metadata'):
-                usage = getattr(message, 'usage_metadata', {})
+            if hasattr(message, "usage_metadata"):
+                usage = getattr(message, "usage_metadata", {})
                 if isinstance(usage, dict):
-                    total_input_tokens += usage.get('input_tokens', 0)
-                    total_output_tokens += usage.get('output_tokens', 0)
+                    total_input_tokens += usage.get("input_tokens", 0)
+                    total_output_tokens += usage.get("output_tokens", 0)
             # Para mensagens remotas (dict)
             elif isinstance(message, dict):
-                usage = message.get('usage_metadata', {})
+                usage = message.get("usage_metadata", {})
                 if isinstance(usage, dict):
-                    total_input_tokens += usage.get('input_tokens', 0)
-                    total_output_tokens += usage.get('output_tokens', 0)
-        
+                    total_input_tokens += usage.get("input_tokens", 0)
+                    total_output_tokens += usage.get("output_tokens", 0)
+
         return GoogleAgentEngineUsage(
-            input_tokens=total_input_tokens,
-            output_tokens=total_output_tokens
+            input_tokens=total_input_tokens, output_tokens=total_output_tokens
         )
 
     def _get_agent(self, reasoning_engine_id: str):
@@ -133,7 +143,7 @@ class GoogleAgentEngineService:
         return agent_engines.get(
             f"projects/{env.PROJECT_NUMBER}/locations/{env.LOCATION}/reasoningEngines/{reasoning_engine_id}"
         )
-    
+
     def _get_thread_cache_key(self, user_number: str) -> str:
         """Generate cache key for thread ID lookup."""
         return f"google_thread_id:{user_number}"
@@ -176,7 +186,9 @@ class GoogleAgentEngineService:
         Versão síncrona do send_message para compatibilidade com Celery.
         Usa asyncio.run() de forma otimizada para máxima performance.
         """
-        with tracer.start_as_current_span("google_agent_engine.send_message_sync") as span:
+        with tracer.start_as_current_span(
+            "google_agent_engine.send_message_sync"
+        ) as span:
             span.set_attribute("google_agent_engine.thread_id", thread_id)
             span.set_attribute("google_agent_engine.message_length", len(message))
             span.set_attribute(
@@ -190,7 +202,9 @@ class GoogleAgentEngineService:
                 }
 
                 config = {"configurable": {"thread_id": thread_id}}
-                response = async_to_sync(self.remote_agent.async_query)(input=data, config=config)
+                response = async_to_sync(self.remote_agent.async_query)(
+                    input=data, config=config
+                )
 
                 span.set_attribute(
                     "google_agent_engine.response_messages_count",
@@ -203,40 +217,50 @@ class GoogleAgentEngineService:
 
                 # Log usage information
                 if usage.total_tokens > 0:
-                    span.set_attribute("google_agent_engine.usage_tokens", usage.total_tokens)
-                    span.set_attribute("google_agent_engine.input_tokens", usage.input_tokens)
-                    span.set_attribute("google_agent_engine.output_tokens", usage.output_tokens)
-                    logger.debug(f"Google Agent Engine usage - Input: {usage.input_tokens}, Output: {usage.output_tokens}, Total: {usage.total_tokens}")
+                    span.set_attribute(
+                        "google_agent_engine.usage_tokens", usage.total_tokens
+                    )
+                    span.set_attribute(
+                        "google_agent_engine.input_tokens", usage.input_tokens
+                    )
+                    span.set_attribute(
+                        "google_agent_engine.output_tokens", usage.output_tokens
+                    )
+                    logger.debug(
+                        f"Google Agent Engine usage - Input: {usage.input_tokens}, Output: {usage.output_tokens}, Total: {usage.total_tokens}"
+                    )
 
                 # Serializa para o formato padrão do Letta
                 serialized_response = serialize_google_agent_response(
                     messages=messages,
                     usage=usage.to_dict(),
                     agent_id=thread_id,
-                    processed_at=thread_id  # Usar thread_id como processed_at por compatibilidade
+                    processed_at=thread_id,  # Usar thread_id como processed_at por compatibilidade
                 )
-                
+
                 return serialized_response.get("data", {}).get("messages", []), usage
 
             except Exception as e:
                 span.record_exception(e)
                 span.set_attribute("error", True)
                 logger.error(f"Error in sync send_message for thread {thread_id}: {e}")
-                
+
                 # Converter para as exceções apropriadas
                 if "timeout" in str(e).lower():
                     raise GoogleAgentEngineAPITimeoutError(
                         message=f"Timeout ao enviar mensagem: {str(e)}",
-                        thread_id=thread_id
+                        thread_id=thread_id,
                     )
                 else:
                     raise GoogleAgentEngineAPIError(
                         message=f"Erro ao enviar mensagem: {str(e)}",
-                        thread_id=thread_id
+                        thread_id=thread_id,
                     )
 
     def get_thread_id_sync(self, user_number: str) -> str | None:
-        with tracer.start_as_current_span("google_agent_engine.get_thread_id_sync") as span:
+        with tracer.start_as_current_span(
+            "google_agent_engine.get_thread_id_sync"
+        ) as span:
             span.set_attribute("google_agent_engine.user_number", user_number)
 
             cache_key = self._get_thread_cache_key(user_number)
@@ -248,7 +272,9 @@ class GoogleAgentEngineService:
                 if thread_id:
                     span.set_attribute("google_agent_engine.cache_hit", True)
                     span.set_attribute("google_agent_engine.thread_id", thread_id)
-                    logger.debug(f"Cache hit for thread ID: {user_number} -> {thread_id}")
+                    logger.debug(
+                        f"Cache hit for thread ID: {user_number} -> {thread_id}"
+                    )
                     return thread_id
             except Exception as e:
                 span.record_exception(e)
@@ -266,7 +292,9 @@ class GoogleAgentEngineService:
                 logger.debug(f"Cached thread ID: {user_number} -> {thread_id}")
             except Exception as cache_error:
                 span.record_exception(cache_error)
-                logger.warning(f"Failed to cache thread ID for {user_number}: {cache_error}")
+                logger.warning(
+                    f"Failed to cache thread ID for {user_number}: {cache_error}"
+                )
 
             return thread_id
 
@@ -275,7 +303,9 @@ class GoogleAgentEngineService:
         user_number: str,
         override_payload: dict | None = None,
     ) -> str | None:
-        with tracer.start_as_current_span("google_agent_engine.create_agent_sync") as span:
+        with tracer.start_as_current_span(
+            "google_agent_engine.create_agent_sync"
+        ) as span:
             span.set_attribute("google_agent_engine.user_number", user_number)
             span.set_attribute(
                 "google_agent_engine.has_override_payload",
@@ -301,7 +331,9 @@ class GoogleAgentEngineService:
     ## ASYNC METHODS
 
     async def send_message(self, thread_id: str, message: str):
-        with tracer.start_as_current_span("google_agent_engine.send_message_async") as span:
+        with tracer.start_as_current_span(
+            "google_agent_engine.send_message_async"
+        ) as span:
             span.set_attribute("google_agent_engine.thread_id", thread_id)
             span.set_attribute("google_agent_engine.message_length", len(message))
 
@@ -311,7 +343,9 @@ class GoogleAgentEngineService:
                 }
 
                 config = {"configurable": {"thread_id": thread_id}}
-                response = await self.remote_agent.async_query(input=data, config=config)
+                response = await self.remote_agent.async_query(
+                    input=data, config=config
+                )
 
                 span.set_attribute(
                     "google_agent_engine.response_messages_count",
@@ -324,19 +358,27 @@ class GoogleAgentEngineService:
 
                 # Log usage information
                 if usage.total_tokens > 0:
-                    span.set_attribute("google_agent_engine.usage_tokens", usage.total_tokens)
-                    span.set_attribute("google_agent_engine.input_tokens", usage.input_tokens)
-                    span.set_attribute("google_agent_engine.output_tokens", usage.output_tokens)
-                    logger.debug(f"Google Agent Engine usage - Input: {usage.input_tokens}, Output: {usage.output_tokens}, Total: {usage.total_tokens}")
+                    span.set_attribute(
+                        "google_agent_engine.usage_tokens", usage.total_tokens
+                    )
+                    span.set_attribute(
+                        "google_agent_engine.input_tokens", usage.input_tokens
+                    )
+                    span.set_attribute(
+                        "google_agent_engine.output_tokens", usage.output_tokens
+                    )
+                    logger.debug(
+                        f"Google Agent Engine usage - Input: {usage.input_tokens}, Output: {usage.output_tokens}, Total: {usage.total_tokens}"
+                    )
 
                 # Serializa para o formato padrão do Letta
                 serialized_response = serialize_google_agent_response(
                     messages=messages,
                     usage=usage.to_dict(),
                     agent_id=thread_id,
-                    processed_at=thread_id  # Usar thread_id como processed_at por compatibilidade
+                    processed_at=thread_id,  # Usar thread_id como processed_at por compatibilidade
                 )
-                
+
                 return serialized_response.get("data", {}).get("messages", []), usage
 
             except Exception as e:
@@ -361,7 +403,9 @@ class GoogleAgentEngineService:
                 if thread_id:
                     span.set_attribute("google_agent_engine.cache_hit", True)
                     span.set_attribute("google_agent_engine.thread_id", thread_id)
-                    logger.debug(f"Cache hit for thread ID: {user_number} -> {thread_id}")
+                    logger.debug(
+                        f"Cache hit for thread ID: {user_number} -> {thread_id}"
+                    )
                     return thread_id
             except Exception as e:
                 span.record_exception(e)
@@ -379,7 +423,9 @@ class GoogleAgentEngineService:
                 logger.debug(f"Cached thread ID: {user_number} -> {thread_id}")
             except Exception as cache_error:
                 span.record_exception(cache_error)
-                logger.warning(f"Failed to cache thread ID for {user_number}: {cache_error}")
+                logger.warning(
+                    f"Failed to cache thread ID for {user_number}: {cache_error}"
+                )
 
             return thread_id
 

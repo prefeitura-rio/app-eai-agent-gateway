@@ -31,22 +31,27 @@ os.environ.setdefault("APP_PREFIX", "mock-prefix")
 os.environ.setdefault("REASONING_ENGINE_ID", "mock-engine-id")
 os.environ.setdefault("PROJECT_ID", "mock-project-id")
 os.environ.setdefault("PROJECT_NUMBER", "123456789")
-os.environ.setdefault("SERVICE_ACCOUNT", "mock-service-account@mock.iam.gserviceaccount.com")
+os.environ.setdefault(
+    "SERVICE_ACCOUNT", "mock-service-account@mock.iam.gserviceaccount.com"
+)
 os.environ.setdefault("LOCATION", "us-central1")
 os.environ.setdefault("GCS_BUCKET", "mock-bucket")
-os.environ.setdefault("GCS_BUCKET_STAGING", "mock-bucket-staging")
+
 
 def mock_infisical_function(env_name, *, action="raise", default=None):
     """Mock da função getenv_or_action do infisical para não falhar."""
     return os.environ.get(env_name, default or f"mocked-{env_name}")
 
+
 def mock_setup_telemetry():
     """Mock da função setup_telemetry para não inicializar telemetria."""
     pass
 
+
 def mock_start_metrics_collector():
     """Mock da função start_metrics_collector para não inicializar métricas."""
     pass
+
 
 def mock_get_tracer(name):
     """Mock da função get_tracer para retornar um tracer mock."""
@@ -55,30 +60,33 @@ def mock_get_tracer(name):
     tracer.start_as_current_span.return_value.__exit__ = MagicMock()
     return tracer
 
+
 # Cria mocks dos módulos para evitar problemas de importação
-infisical_module = types.ModuleType('infisical')
+infisical_module = types.ModuleType("infisical")
 infisical_module.getenv_or_action = mock_infisical_function
-infisical_module.getenv_list_or_action = lambda env_name, *, action="raise", default=None: []
+infisical_module.getenv_list_or_action = (
+    lambda env_name, *, action="raise", default=None: []
+)
 infisical_module.mask_string = lambda string, *, mask="*": string
-sys.modules['src.utils.infisical'] = infisical_module
+sys.modules["src.utils.infisical"] = infisical_module
 
 # Mock do módulo de telemetria
-telemetry_module = types.ModuleType('telemetry')
+telemetry_module = types.ModuleType("telemetry")
 telemetry_module.setup_telemetry = mock_setup_telemetry
 telemetry_module.get_tracer = mock_get_tracer
 telemetry_module.instrument_fastapi = lambda x: None
 telemetry_module.instrument_celery = lambda: None
-sys.modules['src.config.telemetry'] = telemetry_module
+sys.modules["src.config.telemetry"] = telemetry_module
 
 # Mock do módulo de métricas
-prometheus_module = types.ModuleType('prometheus_metrics')
+prometheus_module = types.ModuleType("prometheus_metrics")
 prometheus_module.start_metrics_collector = mock_start_metrics_collector
 prometheus_module.get_metrics = lambda: "# Mock metrics"
 # Mock das métricas específicas
 prometheus_module.celery_task_duration = MagicMock()
 prometheus_module.celery_task_errors = MagicMock()
 prometheus_module.celery_tasks_total = MagicMock()
-sys.modules['src.services.prometheus_metrics'] = prometheus_module
+sys.modules["src.services.prometheus_metrics"] = prometheus_module
 
 # Agora pode importar os módulos sem problemas de dependências
 from fastapi.openapi.utils import get_openapi
@@ -86,6 +94,7 @@ from fastapi.openapi.utils import get_openapi
 # Agora pode importar a aplicação real
 try:
     from src.main import app
+
     print("✅ Aplicação real importada com sucesso!")
 except Exception as e:
     print(f"❌ Erro ao importar aplicação: {e}")
@@ -100,17 +109,15 @@ def generate_openapi_spec():
         description=app.description,
         routes=app.routes,
     )
-    
+
     # Adiciona informações extras ao schema
     openapi_schema["info"]["contact"] = {
         "name": "EAí Team",
-        "url": "https://github.com/your-org/app-eai-agent-gateway"
+        "url": "https://github.com/your-org/app-eai-agent-gateway",
     }
-    
-    openapi_schema["info"]["license"] = {
-        "name": "MIT"
-    }
-    
+
+    openapi_schema["info"]["license"] = {"name": "MIT"}
+
     # Adiciona configuração de segurança Bearer token
     openapi_schema["components"] = openapi_schema.get("components", {})
     openapi_schema["components"]["securitySchemes"] = {
@@ -118,25 +125,21 @@ def generate_openapi_spec():
             "type": "http",
             "scheme": "bearer",
             "bearerFormat": "JWT",
-            "description": "Insira o token Bearer para autenticação. Exemplo: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+            "description": "Insira o token Bearer para autenticação. Exemplo: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
         }
     }
-    
+
     # Adiciona segurança global para todos os endpoints
-    openapi_schema["security"] = [
-        {
-            "BearerAuth": []
-        }
-    ]
-    
+    openapi_schema["security"] = [{"BearerAuth": []}]
+
     # Adiciona servidores
     openapi_schema["servers"] = [
         {
             "url": "https://services.staging.app.dados.rio/eai-agent-gateway/",
-            "description": "Servidor de Produção"
+            "description": "Servidor de Produção",
         }
     ]
-    
+
     return openapi_schema
 
 
@@ -145,27 +148,27 @@ def save_docs():
     # Cria diretório docs se não existir
     docs_dir = Path("docs")
     docs_dir.mkdir(exist_ok=True)
-    
+
     # Gera a especificação OpenAPI
     openapi_spec = generate_openapi_spec()
-    
+
     # Salva o JSON do Swagger
     swagger_file = docs_dir / "swagger.json"
     with open(swagger_file, "w", encoding="utf-8") as f:
         json.dump(openapi_spec, f, indent=2, ensure_ascii=False)
-    
+
     print(f"✅ Documentação Swagger REAL gerada em: {swagger_file}")
     print(f"📊 Total de endpoints documentados: {len(openapi_spec.get('paths', {}))}")
-    
+
     # Lista os endpoints encontrados
-    paths = openapi_spec.get('paths', {})
+    paths = openapi_spec.get("paths", {})
     if paths:
         print("🔗 Endpoints documentados:")
         for path, methods in paths.items():
             for method in methods.keys():
-                if method != 'parameters':  # Ignora parâmetros globais
+                if method != "parameters":  # Ignora parâmetros globais
                     print(f"   {method.upper()} {path}")
-    
+
     # Cria um arquivo HTML simples para visualizar o Swagger
     html_content = f"""<!DOCTYPE html>
 <html>
@@ -210,13 +213,13 @@ def save_docs():
     </script>
 </body>
 </html>"""
-    
+
     html_file = docs_dir / "index.html"
     with open(html_file, "w", encoding="utf-8") as f:
         f.write(html_content)
-    
+
     print(f"✅ Interface HTML do Swagger gerada em: {html_file}")
-    
+
     return docs_dir
 
 
