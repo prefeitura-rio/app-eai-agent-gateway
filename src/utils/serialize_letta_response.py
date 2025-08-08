@@ -3,8 +3,11 @@ from typing import Any
 
 def serialize_letta_response(obj: Any) -> Any:
     """
-    Serializa objetos complexos do Letta para formatos JSON-compatíveis
+    Serializa objetos complexos do Letta e Google Agent Engine para formatos JSON-compatíveis
     """
+    if hasattr(obj, "to_dict"):
+        # Se tem método to_dict(), usa ele (ex: GoogleAgentEngineUsage)
+        return obj.to_dict()
     if hasattr(obj, "__dict__"):
         # Se o objeto tem __dict__, converte para dicionário
         return {

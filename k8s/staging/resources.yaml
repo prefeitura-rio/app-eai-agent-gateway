@@ -70,15 +70,15 @@ spec:
       containers:
         - name: eai-agent-gateway-worker
           image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
-          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery worker --pool=${CELERY_WORKER_POOL:-gevent} --concurrency=${MAX_PARALLEL:-500} --loglevel=${CELERY_LOG_LEVEL:-info}"]
+          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery worker --pool=${CELERY_WORKER_POOL:-threads} --concurrency=${MAX_PARALLEL:-20} --loglevel=${CELERY_LOG_LEVEL:-info}"]
           envFrom:
             - secretRef:
                 name: eai-agent-gateway-secrets
           env:
             - name: CELERY_WORKER_POOL
-              value: "gevent"
-            - name: ENABLE_EVENTLET_PATCH
-              value: "true"
+              value: "threads"
+            - name: MAX_PARALLEL
+              value: "20"
           resources:
             requests:
               ephemeral-storage: 100Mi

@@ -104,10 +104,31 @@ def instrument_redis():
         logger.error(f"Failed to instrument Redis: {e}")
 
 
+class NoOpSpan:
+    """Span no-op quando telemetria está desabilitada."""
+    def set_attribute(self, key: str, value):
+        pass
+    
+    def record_exception(self, exception):
+        pass
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
+class NoOpTracer:
+    """Tracer no-op quando telemetria está desabilitada."""
+    def start_as_current_span(self, name: str):
+        return NoOpSpan()
+
+
 def get_tracer(name: str = None):
     """Get a tracer instance"""
     if not env.OTEL_ENABLED:
-        return None
+        return NoOpTracer()
 
     if name is None:
         name = env.OTEL_SERVICE_NAME

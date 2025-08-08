@@ -101,6 +101,7 @@ async def user_webhook(request: UserWebhookSchema, response: Response):
             "api.has_previous_message",
             request.previous_message is not None,
         )
+        span.set_attribute("api.provider", request.provider)
 
         try:
             # Generate message ID immediately
@@ -124,12 +125,14 @@ async def user_webhook(request: UserWebhookSchema, response: Response):
                     user_number=request.user_number,
                     message=request.message,
                     previous_message=request.previous_message,
+                    provider=request.provider,
                 )
             else:
                 task_result = process_user_message.delay(
                     message_id=message_id,
                     user_number=request.user_number,
                     message=request.message,
+                    provider=request.provider,
                 )
 
             span.set_attribute("api.celery_task_id", task_result.id)
