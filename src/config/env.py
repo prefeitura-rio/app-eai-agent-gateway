@@ -80,3 +80,12 @@ PROJECT_NUMBER = getenv_or_action(env_name="PROJECT_NUMBER")
 SERVICE_ACCOUNT = getenv_or_action(env_name="SERVICE_ACCOUNT")
 LOCATION = getenv_or_action(env_name="LOCATION")
 GCS_BUCKET = getenv_or_action(env_name="GCS_BUCKET")
+
+# TRANSCRIBE SERVICE
+TRANSCRIBE_MAX_DURATION = int(
+    getenv_or_action(env_name="TRANSCRIBE_MAX_DURATION", default="60")
+)
+
+TRANSCRIBE_ALLOWED_URLS = getenv_or_action(
+    env_name="TRANSCRIBE_ALLOWED_URLS", default="https://whatsapp.dados.rio/"
+)

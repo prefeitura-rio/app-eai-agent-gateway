@@ -23,6 +23,8 @@ dependencies = [
     "opentelemetry-instrumentation-redis>=0.45b0",
     "opentelemetry-exporter-otlp-proto-grpc>=1.24.0",
     "asgiref>=3.9.1",
+    "google-cloud-speech>=2.27.0",
+    "mutagen>=1.47.0",
 ]
 
 [dependency-groups]

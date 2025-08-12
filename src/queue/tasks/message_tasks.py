@@ -24,6 +24,10 @@ from src.services.prometheus_metrics import (
 )
 from src.services.redis_service import store_response_sync, store_task_status_sync
 from src.utils.serialize_letta_response import serialize_letta_response
+from src.services.transcribe_service import (
+    transcribe_service,
+    TranscriptionError,
+)
 
 tracer = get_tracer("message-tasks")
 
@@ -102,6 +106,28 @@ def process_user_message(
 
             span.set_attribute("celery.agent_id", agent_id)
 
+            # If message is an audio URL, transcribe it before sending
+            transcript_text: str | None = None
+            try:
+                if transcribe_service.is_audio_url(message):
+                    span.set_attribute("celery.has_audio_url", True)
+                    logger.info(f"[{self.request.id}] Transcrevendo áudio da URL para user {user_number}")
+                    transcript_text = transcribe_service.transcribe_from_url_sync(message)
+                    span.set_attribute("celery.transcript_length", len(transcript_text) if transcript_text else 0)
+                    # Fallback se transcrição não retornar conteúdo
+                    if transcript_text and transcript_text.strip() and transcript_text != "Áudio sem conteúdo reconhecível":
+                        message = transcript_text
+                    else:
+                        logger.warning(f"[{self.request.id}] Transcrição sem conteúdo útil; aplicando fallback de mensagem")
+                        message = "Ajuda"
+            except TranscriptionError as te:
+                span.record_exception(te)
+                span.set_attribute("error", True)
+                span.set_attribute("celery.transcription_error", True)
+                logger.warning(f"[{self.request.id}] Erro ao transcrever áudio: {te}")
+                # Fallback para não bloquear o fluxo
+                message = "Ajuda"
+
             # Now send the message using the provider
             if previous_message is not None:
                 messages, usage = agent_provider.send_message_sync(
@@ -119,6 +145,8 @@ def process_user_message(
                 "processed_at": self.request.id,
                 "status": "done",
             }
+            if transcript_text is not None:
+                data["transcript"] = transcript_text
             store_response_sync(message_id, data)
             store_task_status_sync(message_id, self.request.id)
 
@@ -381,6 +409,26 @@ def send_agent_message(
                 f"[{self.request.id}] Processing message {message_id} for agent {agent_id}",
             )
 
+            # Se for URL de áudio, transcreve antes de enviar
+            transcript_text: str | None = None
+            try:
+                if transcribe_service.is_audio_url(message):
+                    span.set_attribute("celery.has_audio_url", True)
+                    logger.info(f"[{self.request.id}] Transcrevendo áudio da URL para agent {agent_id}")
+                    transcript_text = transcribe_service.transcribe_from_url_sync(message)
+                    span.set_attribute("celery.transcript_length", len(transcript_text) if transcript_text else 0)
+                    if transcript_text and transcript_text.strip() and transcript_text != "Áudio sem conteúdo reconhecível":
+                        message = transcript_text
+                    else:
+                        logger.warning(f"[{self.request.id}] Transcrição sem conteúdo útil; aplicando fallback de mensagem")
+                        message = "Ajuda"
+            except TranscriptionError as te:
+                span.record_exception(te)
+                span.set_attribute("error", True)
+                span.set_attribute("celery.transcription_error", True)
+                logger.warning(f"[{self.request.id}] Erro ao transcrever áudio: {te}")
+                message = "Ajuda"
+
             if previous_message is not None:
                 messages, usage = letta_service.send_message_sync(
                     agent_id,
@@ -397,6 +445,8 @@ def send_agent_message(
                 "processed_at": self.request.id,
                 "status": "done",
             }
+            if transcript_text is not None:
+                data["transcript"] = transcript_text
             store_response_sync(message_id, data)
 
             span.set_attribute("celery.success", True)
