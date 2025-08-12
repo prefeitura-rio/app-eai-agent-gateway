@@ -1,0 +1,167 @@
+---
+# API
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eai-agent-gateway
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  selector:
+    matchLabels:
+      app: eai-agent-gateway
+  template:
+    metadata:
+      labels:
+        app: eai-agent-gateway
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: eai-agent-gateway
+          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+          envFrom:
+            - secretRef:
+                name: eai-agent-gateway-secrets
+          resources:
+            requests:
+              ephemeral-storage: 100Mi
+              cpu: 1000m
+              memory: 1024Mi
+            limits:
+              cpu: 2000m
+              memory: 1536Mi
+          readinessProbe:
+            httpGet:
+              path: /docs
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /docs
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+          ports:
+            - containerPort: 8000
+              name: http
+      restartPolicy: Always
+
+---
+# Worker
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eai-agent-gateway-worker
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  selector:
+    matchLabels:
+      app: eai-agent-gateway-worker
+  template:
+    metadata:
+      labels:
+        app: eai-agent-gateway-worker
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: eai-agent-gateway-worker
+          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery worker --pool=${CELERY_WORKER_POOL:-threads} --concurrency=${MAX_PARALLEL:-20} --loglevel=${CELERY_LOG_LEVEL:-info}"]
+          envFrom:
+            - secretRef:
+                name: eai-agent-gateway-secrets
+          env:
+            - name: CELERY_WORKER_POOL
+              value: "threads"
+            - name: MAX_PARALLEL
+              value: "20"
+          resources:
+            requests:
+              ephemeral-storage: 100Mi
+              cpu: 500m
+              memory: 1024Mi
+            limits:
+              cpu: 2000m
+              memory: 2048Mi
+      restartPolicy: Always
+
+---
+# Pod Disruption Budget for Worker
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eai-agent-gateway-worker-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: eai-agent-gateway-worker
+
+---
+# Flower
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: eai-agent-gateway-flower
+  annotations:
+    reloader.stakater.com/auto: "true"
+spec:
+  selector:
+    matchLabels:
+      app: eai-agent-gateway-flower
+  template:
+    metadata:
+      labels:
+        app: eai-agent-gateway-flower
+    spec:
+      automountServiceAccountToken: false
+      containers:
+        - name: eai-agent-gateway-flower
+          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery flower --port=${FLOWER_PORT:-5555}"]
+          envFrom:
+            - secretRef:
+                name: eai-agent-gateway-secrets
+          resources:
+            requests:
+              ephemeral-storage: 100Mi
+              cpu: 1000m
+              memory: 512Mi
+            limits:
+              cpu: 2000m
+              memory: 1024Mi
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: eai-agent-gateway
+  name: eai-agent-gateway
+spec:
+  ports:
+    - name: "80"
+      port: 80
+      targetPort: 8000
+  selector:
+    app: eai-agent-gateway
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: eai-agent-gateway-flower
+  name: eai-agent-gateway-flower
+spec:
+  ports:
+    - name: "5555"
+      port: 5555
+      targetPort: 5555
+  selector:
+    app: eai-agent-gateway-flower
