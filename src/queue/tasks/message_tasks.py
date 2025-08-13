@@ -15,6 +15,7 @@ from src.services.letta_service import (
 from src.services.google_agent_engine_service import (
     GoogleAgentEngineAPIError,
     GoogleAgentEngineAPITimeoutError,
+    GoogleAgentEngineRateLimitError,
 )
 from src.services.agent_provider_factory import agent_provider_factory
 from src.services.prometheus_metrics import (
@@ -52,6 +53,7 @@ class SerializableHTTPError(Exception):
         LettaAPITimeoutError,
         GoogleAgentEngineAPIError,
         GoogleAgentEngineAPITimeoutError,
+        GoogleAgentEngineRateLimitError,
     ),
     retry_backoff=True,
     retry_kwargs={"max_retries": 3},
@@ -296,6 +298,37 @@ def process_user_message(
             )
             raise
 
+        except GoogleAgentEngineRateLimitError as exc:
+            span.record_exception(exc)
+            span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
+            span.set_attribute("celery.google_rate_limit", True)
+            if exc.retry_after:
+                span.set_attribute("celery.retry_after", exc.retry_after)
+            
+            logger.warning(
+                f"[{self.request.id}] Google Agent Engine rate limit for user message {message_id}: {exc}",
+            )
+            
+            # For rate limit errors, we always retry with exponential backoff
+            # The rate limiter will handle the actual delay
+            store_response_sync(
+                message_id,
+                {
+                    "status": "retry",
+                    "error": f"Google API rate limit: {exc.message}",
+                    "retry_count": self.request.retries,
+                    "max_retries": self.max_retries,
+                    "retry_after": exc.retry_after,
+                },
+            )
+            # Record rate limit metrics
+            duration = time.time() - start_time
+            celery_task_duration.labels(task_name=task_name).observe(duration)
+            celery_tasks_total.labels(task_name=task_name, status="rate_limit").inc()
+            celery_task_errors.labels(task_name=task_name, error_type="rate_limit").inc()
+            raise
+
         except (httpx.HTTPError, httpx.TimeoutException) as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
@@ -376,6 +409,7 @@ def process_user_message(
         SerializableHTTPError,
         LettaAPIError,
         LettaAPITimeoutError,
+        GoogleAgentEngineRateLimitError,
     ),
     retry_backoff=True,
     retry_kwargs={"max_retries": 3},
@@ -579,6 +613,37 @@ def send_agent_message(
                     "max_retries": self.max_retries,
                 },
             )
+            raise
+
+        except GoogleAgentEngineRateLimitError as exc:
+            span.record_exception(exc)
+            span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
+            span.set_attribute("celery.google_rate_limit", True)
+            if exc.retry_after:
+                span.set_attribute("celery.retry_after", exc.retry_after)
+            
+            logger.warning(
+                f"[{self.request.id}] Google Agent Engine rate limit for message {message_id}: {exc}",
+            )
+            
+            # For rate limit errors, we always retry with exponential backoff
+            # The rate limiter will handle the actual delay
+            store_response_sync(
+                message_id,
+                {
+                    "status": "retry",
+                    "error": f"Google API rate limit: {exc.message}",
+                    "retry_count": self.request.retries,
+                    "max_retries": self.max_retries,
+                    "retry_after": exc.retry_after,
+                },
+            )
+            # Record rate limit metrics
+            duration = time.time() - start_time
+            celery_task_duration.labels(task_name=task_name).observe(duration)
+            celery_tasks_total.labels(task_name=task_name, status="rate_limit").inc()
+            celery_task_errors.labels(task_name=task_name, error_type="rate_limit").inc()
             raise
 
         except (httpx.HTTPError, httpx.TimeoutException) as exc:

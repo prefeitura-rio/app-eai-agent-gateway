@@ -14,6 +14,7 @@ from src.services.redis_service import (
     store_string_cache_async,
     store_string_cache_sync,
 )
+from src.services.rate_limiter import rate_limiter
 from src.utils.google_auth import get_service_account_path
 from src.utils.serialize_google_agent_response import serialize_google_agent_response
 
@@ -97,6 +98,14 @@ class GoogleAgentEngineAPIError(Exception):
         self.status_code = status_code
         self.thread_id = thread_id
         super().__init__(message)
+
+
+class GoogleAgentEngineRateLimitError(GoogleAgentEngineAPIError):
+    """Exceção específica para rate limiting da API Google Agent Engine"""
+
+    def __init__(self, message: str, thread_id: str = None, retry_after: int = None):
+        super().__init__(message, status_code=429, thread_id=thread_id)
+        self.retry_after = retry_after
 
 
 class GoogleAgentEngineService:
@@ -196,6 +205,12 @@ class GoogleAgentEngineService:
                 previous_message is not None,
             )
 
+            # Apply rate limiting before making the API call
+            delay_seconds = rate_limiter.wait_if_needed()
+            if delay_seconds > 0:
+                span.set_attribute("google_agent_engine.rate_limit_delay", delay_seconds)
+                logger.info(f"Applied rate limiting delay of {delay_seconds:.2f}s for thread {thread_id}")
+
             try:
                 data = {
                     "messages": [{"role": "human", "content": message}],
@@ -205,6 +220,9 @@ class GoogleAgentEngineService:
                 response = async_to_sync(self.remote_agent.async_query)(
                     input=data, config=config
                 )
+                
+                # Record successful API call for rate limiting
+                rate_limiter.record_api_call()
 
                 span.set_attribute(
                     "google_agent_engine.response_messages_count",
@@ -245,8 +263,18 @@ class GoogleAgentEngineService:
                 span.set_attribute("error", True)
                 logger.error(f"Error in sync send_message for thread {thread_id}: {e}")
 
-                # Converter para as exceções apropriadas
-                if "timeout" in str(e).lower():
+                # Check for rate limiting errors
+                error_str = str(e).lower()
+                if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                    # Record rate limit hit for adaptive backoff
+                    rate_limiter.record_rate_limit_hit()
+                    span.set_attribute("google_agent_engine.rate_limit_error", True)
+                    raise GoogleAgentEngineRateLimitError(
+                        message=f"Rate limit exceeded: {str(e)}",
+                        thread_id=thread_id,
+                        retry_after=60,  # Default retry after 1 minute
+                    )
+                elif "timeout" in error_str:
                     raise GoogleAgentEngineAPITimeoutError(
                         message=f"Timeout ao enviar mensagem: {str(e)}",
                         thread_id=thread_id,

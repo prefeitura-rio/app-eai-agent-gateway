@@ -81,6 +81,23 @@ SERVICE_ACCOUNT = getenv_or_action(env_name="SERVICE_ACCOUNT")
 LOCATION = getenv_or_action(env_name="LOCATION")
 GCS_BUCKET = getenv_or_action(env_name="GCS_BUCKET")
 
+# GOOGLE AGENT ENGINE RATE LIMITING
+GOOGLE_API_RATE_LIMIT_ENABLED = getenv_or_action(
+    env_name="GOOGLE_API_RATE_LIMIT_ENABLED", default="false"
+).lower() == "true"
+GOOGLE_API_MAX_REQUESTS_PER_MINUTE = int(
+    getenv_or_action(env_name="GOOGLE_API_MAX_REQUESTS_PER_MINUTE", default="60")
+)
+GOOGLE_API_BACKOFF_MULTIPLIER = float(
+    getenv_or_action(env_name="GOOGLE_API_BACKOFF_MULTIPLIER", default="2.0")
+)
+GOOGLE_API_MAX_BACKOFF_SECONDS = int(
+    getenv_or_action(env_name="GOOGLE_API_MAX_BACKOFF_SECONDS", default="300")
+)
+GOOGLE_API_MIN_BACKOFF_SECONDS = int(
+    getenv_or_action(env_name="GOOGLE_API_MIN_BACKOFF_SECONDS", default="1")
+)
+
 # TRANSCRIBE SERVICE
 TRANSCRIBE_MAX_DURATION = int(
     getenv_or_action(env_name="TRANSCRIBE_MAX_DURATION", default="60")
