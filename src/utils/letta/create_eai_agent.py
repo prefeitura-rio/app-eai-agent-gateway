@@ -1,3 +1,5 @@
+import asyncio
+from asgiref.sync import async_to_sync
 from letta_client import ContinueToolRule
 
 from src.config.telemetry import get_tracer
@@ -5,9 +7,32 @@ from src.services.external_dependencies import (
     get_agent_config_from_api,
     get_system_prompt_from_api,
 )
-from asgiref.sync import async_to_sync
 
 tracer = get_tracer("create-eai-agent")
+
+
+def safe_async_to_sync(async_func, *args, **kwargs):
+    """
+    Safely execute async function in sync context, handling event loop issues.
+    This is especially important in Celery workers where event loops can be closed.
+    """
+    try:
+        # Try the normal async_to_sync first
+        return async_to_sync(async_func)(*args, **kwargs)
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+            # Create a new event loop for this operation
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(async_func(*args, **kwargs))
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+        else:
+            raise e
 
 
 async def _build_tool_rules(tools: list[str]):
@@ -172,7 +197,7 @@ def create_eai_agent_sync(user_number: str, override_payload: dict | None = None
             agent_variables = _merge_config(base_config, override_payload)
 
             # Create agent
-            agent = async_to_sync(letta_service.client.agents.create)(**agent_variables)
+            agent = safe_async_to_sync(letta_service.client.agents.create, **agent_variables)
 
             span.set_attribute("create_eai_agent.agent_id", agent.id)
             span.set_attribute("create_eai_agent.success", True)

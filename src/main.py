@@ -9,7 +9,7 @@ from src.services.prometheus_metrics import get_metrics, start_metrics_collector
 setup_telemetry()
 
 app = FastAPI(
-    title="EAí Gateway", 
+    title="EAí Gateway",
     version="0.1.0",
     description="API Gateway para agentes de IA integrados com diversos provedores",
     docs_url="/docs",

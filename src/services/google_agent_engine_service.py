@@ -1,25 +1,52 @@
-import logging
+import asyncio
 import json
-import vertexai
-from vertexai import agent_engines
-from fastapi import HTTPException
+import logging
 from typing import Any, Optional
+
+import vertexai
 from asgiref.sync import async_to_sync
+from fastapi import HTTPException
+from vertexai import agent_engines
 
 from src.config import env
 from src.config.telemetry import get_tracer
+from src.services.rate_limiter import rate_limiter
 from src.services.redis_service import (
     get_string_cache_async,
     get_string_cache_sync,
     store_string_cache_async,
     store_string_cache_sync,
 )
-from src.services.rate_limiter import rate_limiter
 from src.utils.google_auth import get_service_account_path
-from src.utils.serialize_google_agent_response import serialize_google_agent_response
+from src.utils.message_formatter import to_gateway_format
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer("google-agent-engine-service")
+
+
+def safe_async_to_sync(async_func, *args, **kwargs):
+    """
+    Safely execute async function in sync context, handling event loop issues.
+    This is especially important in Celery workers where event loops can be closed.
+    """
+    try:
+        # Try the normal async_to_sync first
+        return async_to_sync(async_func)(*args, **kwargs)
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+            # Create a new event loop for this operation
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(async_func(*args, **kwargs))
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+        else:
+            raise e
+
 
 # Lazy loading para evitar problemas de inicialização
 _vertexai_initialized = False
@@ -64,7 +91,7 @@ class GoogleAgentEngineUsage:
         self,
         input_tokens: int = 0,
         output_tokens: int = 0,
-        total_tokens: Optional[int] = None,
+        total_tokens: int | None = None,
     ):
         self.input_tokens = input_tokens
         self.output_tokens = output_tokens
@@ -217,10 +244,12 @@ class GoogleAgentEngineService:
                 }
 
                 config = {"configurable": {"thread_id": thread_id}}
-                response = async_to_sync(self.remote_agent.async_query)(
-                    input=data, config=config
+                response = safe_async_to_sync(
+                    self.remote_agent.async_query,
+                    input=data,
+                    config=config
                 )
-                
+
                 # Record successful API call for rate limiting
                 rate_limiter.record_api_call()
 
@@ -248,15 +277,14 @@ class GoogleAgentEngineService:
                         f"Google Agent Engine usage - Input: {usage.input_tokens}, Output: {usage.output_tokens}, Total: {usage.total_tokens}"
                     )
 
-                # Serializa para o formato padrão do Letta
-                serialized_response = serialize_google_agent_response(
+                # Converter para o formato padrão do gateway usando message_formatter
+                formatted_response = to_gateway_format(
                     messages=messages,
-                    usage=usage.to_dict(),
-                    agent_id=thread_id,
-                    processed_at=thread_id,  # Usar thread_id como processed_at por compatibilidade
+                    thread_id=thread_id,
+                    use_whatsapp_format=True
                 )
 
-                return serialized_response.get("data", {}).get("messages", []), usage
+                return formatted_response.get("data", {}).get("messages", []), usage
 
             except Exception as e:
                 span.record_exception(e)
@@ -399,15 +427,14 @@ class GoogleAgentEngineService:
                         f"Google Agent Engine usage - Input: {usage.input_tokens}, Output: {usage.output_tokens}, Total: {usage.total_tokens}"
                     )
 
-                # Serializa para o formato padrão do Letta
-                serialized_response = serialize_google_agent_response(
+                # Converter para o formato padrão do gateway usando message_formatter
+                formatted_response = to_gateway_format(
                     messages=messages,
-                    usage=usage.to_dict(),
-                    agent_id=thread_id,
-                    processed_at=thread_id,  # Usar thread_id como processed_at por compatibilidade
+                    thread_id=thread_id,
+                    use_whatsapp_format=True
                 )
 
-                return serialized_response.get("data", {}).get("messages", []), usage
+                return formatted_response.get("data", {}).get("messages", []), usage
 
             except Exception as e:
                 span.record_exception(e)

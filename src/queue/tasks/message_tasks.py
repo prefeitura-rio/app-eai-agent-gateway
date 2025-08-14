@@ -7,28 +7,28 @@ from loguru import logger
 from src.config import env
 from src.config.telemetry import get_tracer
 from src.queue.celery_app import celery
-from src.services.letta_service import (
-    LettaAPIError,
-    LettaAPITimeoutError,
-    letta_service,
-)
+from src.services.agent_provider_factory import agent_provider_factory
 from src.services.google_agent_engine_service import (
     GoogleAgentEngineAPIError,
     GoogleAgentEngineAPITimeoutError,
     GoogleAgentEngineRateLimitError,
 )
-from src.services.agent_provider_factory import agent_provider_factory
+from src.services.letta_service import (
+    LettaAPIError,
+    LettaAPITimeoutError,
+    letta_service,
+)
 from src.services.prometheus_metrics import (
     celery_task_duration,
     celery_task_errors,
     celery_tasks_total,
 )
 from src.services.redis_service import store_response_sync, store_task_status_sync
-from src.utils.serialize_letta_response import serialize_letta_response
 from src.services.transcribe_service import (
-    transcribe_service,
     TranscriptionError,
+    transcribe_service,
 )
+from src.utils.message_formatter import to_gateway_format
 
 tracer = get_tracer("message-tasks")
 
@@ -140,13 +140,18 @@ def process_user_message(
             else:
                 messages, usage = agent_provider.send_message_sync(agent_id, message)
 
-            data = {
-                "messages": serialize_letta_response(messages),
-                "usage": serialize_letta_response(usage),
+            # Converter para o formato padrão do gateway usando message_formatter
+            formatted_response = to_gateway_format(
+                messages=messages,
+                thread_id=agent_id,
+                use_whatsapp_format=True
+            )
+            data = formatted_response.get("data", {})
+            data.update({
                 "agent_id": agent_id,
                 "processed_at": self.request.id,
                 "status": "done",
-            }
+            })
             if transcript_text is not None:
                 data["transcript"] = transcript_text
             store_response_sync(message_id, data)
@@ -305,11 +310,11 @@ def process_user_message(
             span.set_attribute("celery.google_rate_limit", True)
             if exc.retry_after:
                 span.set_attribute("celery.retry_after", exc.retry_after)
-            
+
             logger.warning(
                 f"[{self.request.id}] Google Agent Engine rate limit for user message {message_id}: {exc}",
             )
-            
+
             # For rate limit errors, we always retry with exponential backoff
             # The rate limiter will handle the actual delay
             store_response_sync(
@@ -472,13 +477,18 @@ def send_agent_message(
             else:
                 messages, usage = letta_service.send_message_sync(agent_id, message)
 
-            data = {
-                "messages": serialize_letta_response(messages),
-                "usage": serialize_letta_response(usage),
+            # Converter para o formato padrão do gateway usando message_formatter
+            formatted_response = to_gateway_format(
+                messages=messages,
+                thread_id=agent_id,
+                use_whatsapp_format=True
+            )
+            data = formatted_response.get("data", {})
+            data.update({
                 "agent_id": agent_id,
                 "processed_at": self.request.id,
                 "status": "done",
-            }
+            })
             if transcript_text is not None:
                 data["transcript"] = transcript_text
             store_response_sync(message_id, data)
@@ -622,11 +632,11 @@ def send_agent_message(
             span.set_attribute("celery.google_rate_limit", True)
             if exc.retry_after:
                 span.set_attribute("celery.retry_after", exc.retry_after)
-            
+
             logger.warning(
                 f"[{self.request.id}] Google Agent Engine rate limit for message {message_id}: {exc}",
             )
-            
+
             # For rate limit errors, we always retry with exponential backoff
             # The rate limiter will handle the actual delay
             store_response_sync(

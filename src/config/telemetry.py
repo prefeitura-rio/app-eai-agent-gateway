@@ -108,13 +108,13 @@ class NoOpSpan:
     """Span no-op quando telemetria está desabilitada."""
     def set_attribute(self, key: str, value):
         pass
-    
+
     def record_exception(self, exception):
         pass
-    
+
     def __enter__(self):
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
 

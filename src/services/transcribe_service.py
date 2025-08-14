@@ -7,10 +7,9 @@ from typing import Optional
 import httpx
 from loguru import logger
 
+from src.config import env
 from src.config.telemetry import get_tracer
 from src.utils.google_auth import get_service_account_path
-from src.config import env
-
 
 tracer = get_tracer("transcribe-service")
 
@@ -190,7 +189,7 @@ class TranscribeService:
                     ),
                 ]
 
-                with io.open(audio_path, "rb") as audio_file:
+                with open(audio_path, "rb") as audio_file:
                     content = audio_file.read()
                     audio = speech.RecognitionAudio(content=content)
 
@@ -225,7 +224,7 @@ class TranscribeService:
             if not self.is_audio_url(url):
                 raise TranscriptionError("URL inválida ou formato de áudio não suportado")
 
-            audio_path: Optional[str] = None
+            audio_path: str | None = None
             try:
                 audio_path = self._download_audio_sync(url)
                 # Valida arquivo gerado

@@ -1,6 +1,8 @@
+import asyncio
 import logging
 
 import httpx
+from asgiref.sync import async_to_sync
 from fastapi import HTTPException
 from letta_client import AsyncLetta, Letta, MessageCreate
 
@@ -13,10 +15,33 @@ from src.services.redis_service import (
     store_string_cache_sync,
 )
 from src.utils.letta.eai_agent import create_eai_agent, delete_eai_agent
-from asgiref.sync import async_to_sync
 
 logger = logging.getLogger(__name__)
 tracer = get_tracer("letta-service")
+
+
+def safe_async_to_sync(async_func, *args, **kwargs):
+    """
+    Safely execute async function in sync context, handling event loop issues.
+    This is especially important in Celery workers where event loops can be closed.
+    """
+    try:
+        # Try the normal async_to_sync first
+        return async_to_sync(async_func)(*args, **kwargs)
+    except RuntimeError as e:
+        if "Event loop is closed" in str(e) or "no running event loop" in str(e):
+            # Create a new event loop for this operation
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(async_func(*args, **kwargs))
+            finally:
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+        else:
+            raise e
 
 
 class LettaAPITimeoutError(Exception):
@@ -158,7 +183,7 @@ class LettaService:
                     )
                 messages.append(MessageCreate(role="user", content=message))
 
-                response = async_to_sync(self.client.agents.messages.create)(
+                response = safe_async_to_sync(self.client.agents.messages.create,
                     agent_id=agent_id,
                     messages=messages,
                 )
@@ -234,7 +259,8 @@ class LettaService:
             # Cache miss or error, fetch from Letta API with fast timeout
             span.set_attribute("letta.cache_hit", False)
             try:
-                response = async_to_sync(self.client_fast.agents.list)(
+                response = safe_async_to_sync(
+                    self.client_fast.agents.list,
                     tags=[user_number],
                     limit=1,
                     match_all_tags=False,

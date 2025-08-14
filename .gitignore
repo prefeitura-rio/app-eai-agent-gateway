@@ -15,3 +15,6 @@ wheels/
 # Load test results and charts
 load-tests/results.json
 load-tests/charts/
+
+.claude
+CLAUDE.md

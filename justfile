@@ -47,3 +47,21 @@ dev-full:
     just worker &
     sleep 2
     just dev
+
+# Executa todos os testes
+test *args="":
+    uv run python tests/run_all_tests.py {{args}}
+
+# Executa apenas testes rápidos (sem integração)
+test-quick:
+    uv run python tests/run_all_tests.py --quick
+
+# Executa testes específicos
+test-formatter:
+    uv run python tests/test_message_formatter.py
+
+test-eventloop:
+    uv run python tests/test_event_loop_fixes.py
+
+test-integration:
+    uv run python tests/test_providers_integration.py

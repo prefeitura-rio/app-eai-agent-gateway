@@ -7,11 +7,15 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Any, Literal
 
-from src.services.letta_service import letta_service, LettaAPIError, LettaAPITimeoutError
 from src.services.google_agent_engine_service import (
-    google_agent_engine_service,
     GoogleAgentEngineAPIError,
     GoogleAgentEngineAPITimeoutError,
+    google_agent_engine_service,
+)
+from src.services.letta_service import (
+    LettaAPIError,
+    LettaAPITimeoutError,
+    letta_service,
 )
 
 logger = logging.getLogger(__name__)
@@ -167,7 +171,7 @@ class AgentProviderFactory:
         """Obter provedor de agentes baseado no tipo."""
         if provider_type not in cls._providers:
             raise ValueError(f"Provedor desconhecido: {provider_type}")
-        
+
         logger.debug(f"Using agent provider: {provider_type}")
         return cls._providers[provider_type]
 

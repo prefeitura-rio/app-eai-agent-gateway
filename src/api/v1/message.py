@@ -259,7 +259,7 @@ async def get_agent_message_from_queue(
                         "message_id": message_id,
                         "task_id": task_id_resp,
                     }
-                    await store_response_async(message_id, json.dumps(error_data))
+                    await store_response_async(message_id, error_data)
 
                     response_obj.status_code = 500
                     return {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any, Optional
 
 import redis as sync_redis
@@ -11,6 +12,21 @@ from src.config import env
 from src.config.telemetry import get_tracer
 
 tracer = get_tracer("redis-service")
+
+
+class DateTimeJSONEncoder(json.JSONEncoder):
+    """JSON encoder que converte objetos datetime para strings ISO"""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
+
+def safe_json_dumps(data: Any) -> str:
+    """
+    Converte dados para JSON de forma segura, lidando com objetos datetime.
+    """
+    return json.dumps(data, cls=DateTimeJSONEncoder, ensure_ascii=False)
 
 
 def _msg_key(message_id: str) -> str:
@@ -50,7 +66,7 @@ def store_response_sync(message_id: str, data: Any, ttl: int = TASK_RESULT_TTL) 
 
         try:
             if not isinstance(data, str | bytes):
-                data = json.dumps(data)
+                data = safe_json_dumps(data)
             sync_client.setex(_msg_key(message_id), ttl, data)
             span.set_attribute("redis.success", True)
         except Exception as e:
@@ -148,7 +164,7 @@ def store_json_cache_sync(
         span.set_attribute("redis.data_keys", list(data.keys()))
 
         try:
-            json_data = json.dumps(data)
+            json_data = safe_json_dumps(data)
             sync_client.setex(_cache_key(cache_key), ttl, json_data)
             span.set_attribute("redis.success", True)
             logger.debug(f"Cached JSON data for key: {_cache_key(cache_key)}")
@@ -201,7 +217,7 @@ async def store_response_async(
 
         try:
             if not isinstance(data, str | bytes):
-                data = json.dumps(data)
+                data = safe_json_dumps(data)
             await async_client.setex(_msg_key(message_id), ttl, data)
             span.set_attribute("redis.success", True)
         except Exception as e:
@@ -318,7 +334,7 @@ async def store_json_cache_async(
         span.set_attribute("redis.data_keys", list(data.keys()))
 
         try:
-            json_data = json.dumps(data)
+            json_data = safe_json_dumps(data)
             await async_client.setex(_cache_key(cache_key), ttl, json_data)
             span.set_attribute("redis.success", True)
             logger.debug(f"Cached JSON data for key: {_cache_key(cache_key)}")
