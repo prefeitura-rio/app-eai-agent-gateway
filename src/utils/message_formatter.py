@@ -1,5 +1,4 @@
 import hashlib
-import json
 import uuid
 from datetime import UTC, datetime, timezone
 from typing import Any, Dict, List, Optional, Union
@@ -293,15 +292,7 @@ class LangGraphMessageFormatter:
         """Processa uma tool call individual."""
         tool_call_id = tool_call.get("id", str(uuid.uuid4()))
 
-        # Tentar parsear arguments como JSON
         args = tool_call.get("args", {})
-        try:
-            if isinstance(args, str):
-                parsed_args = json.loads(args)
-            else:
-                parsed_args = args
-        except (json.JSONDecodeError, TypeError):
-            parsed_args = str(args)
 
         return {
             **base_dict,
@@ -309,7 +300,7 @@ class LangGraphMessageFormatter:
             "message_type": "tool_call_message",
             "tool_call": {
                 "name": tool_call.get("name", "unknown"),
-                "arguments": parsed_args,
+                "arguments": args,
                 "tool_call_id": tool_call_id,
             },
         }
@@ -326,15 +317,8 @@ class LangGraphMessageFormatter:
             or "unknown_tool"
         )
 
-        # Tentar parsear tool_return como JSON
+        # Manter content original - pode ser string ou objeto complexo
         tool_content = kwargs.get("content", "")
-        try:
-            if isinstance(tool_content, str) and tool_content.strip().startswith(("{", "[")):
-                parsed_tool_return = json.loads(tool_content)
-            else:
-                parsed_tool_return = tool_content
-        except (json.JSONDecodeError, TypeError):
-            parsed_tool_return = tool_content
 
         # Atualizar step_id após tool return
         self.current_step_id = f"step-{uuid.uuid4()}"
@@ -345,11 +329,11 @@ class LangGraphMessageFormatter:
             "name": tool_name,
             "message_type": "tool_return_message",
             "is_err": status == "error",
-            "tool_return": parsed_tool_return,
+            "tool_return": tool_content,
             "status": status,
             "tool_call_id": tool_call_id,
             "stdout": None,
-            "stderr": parsed_tool_return if status == "error" else None,
+            "stderr": tool_content if status == "error" else None,
         }
 
     def calculate_usage_statistics(self, messages_to_process: list[dict[str, Any]]) -> dict[str, Any]:
@@ -479,24 +463,81 @@ class LangGraphMessageFormatter:
                     msg_type = msg.get("type")
                     message_timestamp = msg.get("timestamp")
                 elif msg.get("message_type"):
-                    # Formato Letta - converter para formato LangChain
-                    msg_type_map = {
-                        "user_message": "human",
-                        "assistant_message": "ai",
-                        "tool_call_message": "ai",  # tool calls são mensagens AI
-                        "tool_return_message": "tool",
-                        "reasoning_message": "ai"
-                    }
-                    kwargs = {
-                        "type": msg_type_map.get(msg.get("message_type"), "unknown"),
-                        "content": msg.get("content", ""),
-                    }
-                    # Para tool calls, adicionar tool_calls
-                    if msg.get("message_type") == "tool_call_message" and msg.get("tool_call"):
-                        kwargs["tool_calls"] = [msg.get("tool_call")]
+                    # Formato Letta - processar diretamente sem conversão
+                    letta_message_type = msg.get("message_type")
                     
-                    msg_type = kwargs.get("type")
+                    # Calcular tempo entre mensagens
                     message_timestamp = msg.get("date")
+                    time_since_last_message = self.calculate_time_since_last_message(message_timestamp)
+                    
+                    # Atualizar estado da sessão
+                    self.update_session_state(message_timestamp, time_since_last_message, session_timeout_seconds)
+                    
+                    # Criar mensagem preservando os dados do Letta
+                    processed_msg = {
+                        "id": msg.get("id", f"message-{uuid.uuid4()}"),
+                        "date": message_timestamp,
+                        "session_id": self.current_session_id,
+                        "time_since_last_message": time_since_last_message,
+                        "name": msg.get("name"),
+                        "otid": msg.get("otid", str(uuid.uuid4())),
+                        "sender_id": msg.get("sender_id"),
+                        "step_id": msg.get("step_id", self.current_step_id),
+                        "is_err": msg.get("is_err"),
+                        "message_type": letta_message_type,
+                    }
+                    
+                    # Adicionar campos específicos por tipo
+                    if letta_message_type == "reasoning_message":
+                        processed_msg.update({
+                            "source": msg.get("source"),
+                            "reasoning": msg.get("reasoning"),
+                            "signature": msg.get("signature"),
+                            "model_name": None,
+                            "finish_reason": None,
+                            "avg_logprobs": None,
+                            "usage_metadata": None,
+                        })
+                    elif letta_message_type == "assistant_message":
+                        content = msg.get("content", "")
+                        processed_msg.update({
+                            "content": markdown_to_whatsapp(content) if use_whatsapp_format else content,
+                            "model_name": msg.get("model_name"),
+                            "finish_reason": msg.get("finish_reason"),
+                            "avg_logprobs": msg.get("avg_logprobs"),
+                            "usage_metadata": msg.get("usage_metadata"),
+                        })
+                    elif letta_message_type == "tool_call_message":
+                        processed_msg.update({
+                            "tool_call": msg.get("tool_call"),
+                            "model_name": msg.get("model_name"),
+                            "finish_reason": msg.get("finish_reason"),
+                            "avg_logprobs": msg.get("avg_logprobs"),
+                            "usage_metadata": msg.get("usage_metadata"),
+                        })
+                    elif letta_message_type == "tool_return_message":
+                        processed_msg.update({
+                            "tool_return": msg.get("tool_return", msg.get("content")),
+                            "status": "error" if msg.get("is_err") else "success",
+                            "tool_call_id": msg.get("tool_call_id"),
+                            "stdout": msg.get("stdout"),
+                            "stderr": msg.get("stderr"),
+                            "model_name": None,
+                            "finish_reason": None,
+                            "avg_logprobs": None,
+                            "usage_metadata": None,
+                        })
+                    elif letta_message_type == "user_message":
+                        processed_msg.update({
+                            "content": msg.get("content", ""),
+                            "model_name": None,
+                            "finish_reason": None,
+                            "avg_logprobs": None,
+                            "usage_metadata": None,
+                        })
+                    
+                    self.processed_messages.append(processed_msg)
+                    continue  # Pular o processamento normal
                 else:
                     # Formato desconhecido, pular
                     continue
