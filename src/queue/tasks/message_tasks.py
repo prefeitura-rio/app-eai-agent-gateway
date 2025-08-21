@@ -334,6 +334,95 @@ def process_user_message(
             celery_task_errors.labels(task_name=task_name, error_type="rate_limit").inc()
             raise
 
+        except GoogleAgentEngineAPITimeoutError as exc:
+            span.record_exception(exc)
+            span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
+            span.set_attribute("celery.google_timeout", True)
+            logger.warning(
+                f"[{self.request.id}] Google Agent Engine API timeout for user message {message_id}: {exc}",
+            )
+            if self.request.retries >= self.max_retries:
+                span.set_attribute("celery.max_retries_exceeded", True)
+                logger.error(
+                    f"[{self.request.id}] Max retries exceeded for user message {message_id}",
+                )
+                store_response_sync(
+                    message_id,
+                    {
+                        "status": "error",
+                        "error": f"Timeout da API Google Agent Engine após {self.max_retries + 1} tentativas: {exc.message}",
+                        "retry_count": self.request.retries,
+                        "max_retries": self.max_retries,
+                        "user_number": user_number,
+                        "message_id": message_id,
+                    },
+                )
+                # Record API timeout error metrics
+                duration = time.time() - start_time
+                celery_task_duration.labels(task_name=task_name).observe(duration)
+                celery_tasks_total.labels(
+                    task_name=task_name,
+                    status="api_timeout",
+                ).inc()
+                celery_task_errors.labels(
+                    task_name=task_name,
+                    error_type="api_timeout",
+                ).inc()
+                raise exc
+            store_response_sync(
+                message_id,
+                {
+                    "status": "retry",
+                    "error": f"Timeout da API Google Agent Engine: {exc.message}",
+                    "retry_count": self.request.retries,
+                    "max_retries": self.max_retries,
+                },
+            )
+            # Record retry metrics
+            duration = time.time() - start_time
+            celery_task_duration.labels(task_name=task_name).observe(duration)
+            celery_tasks_total.labels(task_name=task_name, status="retry").inc()
+            raise
+
+        except GoogleAgentEngineAPIError as exc:
+            span.record_exception(exc)
+            span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
+            span.set_attribute("celery.google_api_error", True)
+            logger.warning(
+                f"[{self.request.id}] Google Agent Engine API error for user message {message_id}: {exc}",
+            )
+            if self.request.retries >= self.max_retries:
+                span.set_attribute("celery.max_retries_exceeded", True)
+                logger.error(
+                    f"[{self.request.id}] Max retries exceeded for user message {message_id}",
+                )
+                error_msg = f"Erro da API Google Agent Engine após {self.max_retries + 1} tentativas: {exc.message}"
+
+                store_response_sync(
+                    message_id,
+                    {
+                        "status": "error",
+                        "error": error_msg,
+                        "retry_count": self.request.retries,
+                        "max_retries": self.max_retries,
+                        "user_number": user_number,
+                        "message_id": message_id,
+                    },
+                )
+                raise exc
+            store_response_sync(
+                message_id,
+                {
+                    "status": "retry",
+                    "error": f"Erro da API Google Agent Engine: {exc.message}",
+                    "retry_count": self.request.retries,
+                    "max_retries": self.max_retries,
+                },
+            )
+            raise
+
         except (httpx.HTTPError, httpx.TimeoutException) as exc:
             span.record_exception(exc)
             span.set_attribute("error", True)
@@ -654,6 +743,95 @@ def send_agent_message(
             celery_task_duration.labels(task_name=task_name).observe(duration)
             celery_tasks_total.labels(task_name=task_name, status="rate_limit").inc()
             celery_task_errors.labels(task_name=task_name, error_type="rate_limit").inc()
+            raise
+
+        except GoogleAgentEngineAPITimeoutError as exc:
+            span.record_exception(exc)
+            span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
+            span.set_attribute("celery.google_timeout", True)
+            logger.warning(
+                f"[{self.request.id}] Google Agent Engine API timeout for message {message_id}: {exc}",
+            )
+            if self.request.retries >= self.max_retries:
+                span.set_attribute("celery.max_retries_exceeded", True)
+                logger.error(
+                    f"[{self.request.id}] Max retries exceeded for message {message_id}",
+                )
+                store_response_sync(
+                    message_id,
+                    {
+                        "status": "error",
+                        "error": f"Timeout da API Google Agent Engine após {self.max_retries + 1} tentativas: {exc.message}",
+                        "retry_count": self.request.retries,
+                        "max_retries": self.max_retries,
+                        "agent_id": agent_id,
+                        "message_id": message_id,
+                    },
+                )
+                # Record API timeout error metrics
+                duration = time.time() - start_time
+                celery_task_duration.labels(task_name=task_name).observe(duration)
+                celery_tasks_total.labels(
+                    task_name=task_name,
+                    status="api_timeout",
+                ).inc()
+                celery_task_errors.labels(
+                    task_name=task_name,
+                    error_type="api_timeout",
+                ).inc()
+                raise exc
+            store_response_sync(
+                message_id,
+                {
+                    "status": "retry",
+                    "error": f"Timeout da API Google Agent Engine: {exc.message}",
+                    "retry_count": self.request.retries,
+                    "max_retries": self.max_retries,
+                },
+            )
+            # Record retry metrics
+            duration = time.time() - start_time
+            celery_task_duration.labels(task_name=task_name).observe(duration)
+            celery_tasks_total.labels(task_name=task_name, status="retry").inc()
+            raise
+
+        except GoogleAgentEngineAPIError as exc:
+            span.record_exception(exc)
+            span.set_attribute("error", True)
+            span.set_attribute("celery.success", False)
+            span.set_attribute("celery.google_api_error", True)
+            logger.warning(
+                f"[{self.request.id}] Google Agent Engine API error for message {message_id}: {exc}",
+            )
+            if self.request.retries >= self.max_retries:
+                span.set_attribute("celery.max_retries_exceeded", True)
+                logger.error(
+                    f"[{self.request.id}] Max retries exceeded for message {message_id}",
+                )
+                error_msg = f"Erro da API Google Agent Engine após {self.max_retries + 1} tentativas: {exc.message}"
+
+                store_response_sync(
+                    message_id,
+                    {
+                        "status": "error",
+                        "error": error_msg,
+                        "retry_count": self.request.retries,
+                        "max_retries": self.max_retries,
+                        "agent_id": agent_id,
+                        "message_id": message_id,
+                    },
+                )
+                raise exc
+            store_response_sync(
+                message_id,
+                {
+                    "status": "retry",
+                    "error": f"Erro da API Google Agent Engine: {exc.message}",
+                    "retry_count": self.request.retries,
+                    "max_retries": self.max_retries,
+                },
+            )
             raise
 
         except (httpx.HTTPError, httpx.TimeoutException) as exc:

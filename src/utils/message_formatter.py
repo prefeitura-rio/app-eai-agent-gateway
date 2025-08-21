@@ -447,7 +447,7 @@ class LangGraphMessageFormatter:
                 else:
                     # Pular mensagem que não pode ser processada
                     continue
-            
+
             # Detectar se é formato LangChain serializado ou formato direto
             if "kwargs" in msg:
                 # Formato LangChain serializado (BaseMessage)
@@ -465,14 +465,14 @@ class LangGraphMessageFormatter:
                 elif msg.get("message_type"):
                     # Formato Letta - processar diretamente sem conversão
                     letta_message_type = msg.get("message_type")
-                    
+
                     # Calcular tempo entre mensagens
                     message_timestamp = msg.get("date")
                     time_since_last_message = self.calculate_time_since_last_message(message_timestamp)
-                    
+
                     # Atualizar estado da sessão
                     self.update_session_state(message_timestamp, time_since_last_message, session_timeout_seconds)
-                    
+
                     # Criar mensagem preservando os dados do Letta
                     processed_msg = {
                         "id": msg.get("id", f"message-{uuid.uuid4()}"),
@@ -486,7 +486,7 @@ class LangGraphMessageFormatter:
                         "is_err": msg.get("is_err"),
                         "message_type": letta_message_type,
                     }
-                    
+
                     # Adicionar campos específicos por tipo
                     if letta_message_type == "reasoning_message":
                         processed_msg.update({
@@ -535,7 +535,7 @@ class LangGraphMessageFormatter:
                             "avg_logprobs": None,
                             "usage_metadata": None,
                         })
-                    
+
                     self.processed_messages.append(processed_msg)
                     continue  # Pular o processamento normal
                 else:
