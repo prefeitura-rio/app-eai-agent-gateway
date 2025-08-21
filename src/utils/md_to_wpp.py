@@ -133,7 +133,7 @@ def markdown_to_whatsapp(text):
     # FIX 2: Clean up the specific escaped quote pattern.
     converted_text = re.sub(r"\{r'\\\"(.*?)\\\"\'\}", r'"\1"', converted_text)
     converted_text = re.sub(r'"', "'", converted_text)
-    
+
     # Clean up excess newlines
     converted_text = re.sub(r"\n{3,}", "\n\n", converted_text)
     converted_text = converted_text.strip()
