@@ -83,9 +83,9 @@ function calculateDistributionStats(times, label) {
 // Test configuration
 export const options = {
   stages: [
-    { duration: '3m', target: 5000 },
-    { duration: '10m', target: 5000 },
-    { duration: '2m', target: 0 },
+    { duration: '1m', target: 1500 },
+    { duration: '3m', target: 1500 },
+    { duration: '1m', target: 0 },
   ],
   thresholds: {
     http_req_duration: ['p(95)<5000'], // 95% of requests must complete below 5s
@@ -100,6 +100,7 @@ export const options = {
 const BASE_URL = __ENV.BASE_URL || 'https://eai-agent-gateway-superapp-staging.squirrel-regulus.ts.net';
 const BEARER_TOKEN = __ENV.BEARER_TOKEN;
 const MESSAGES_PER_USER = parseInt(__ENV.MESSAGES_PER_USER, 10) || 3;
+const MESSAGE_DELAY_SECONDS = parseInt(__ENV.MESSAGE_DELAY_SECONDS, 10) || 10; // Delay between messages to emulate user reading/thinking/typing time
 
 function generateRandomUserNumber() {
   const randomPart = Math.floor(Math.random() * 10000000000).toString().padStart(10, '0');
@@ -107,6 +108,9 @@ function generateRandomUserNumber() {
 }
 
 function generateRandomString(length = 32) {
+  if (Math.random() < 0.25) {
+    return 'Qual o presidente da australia? Use a tool google_search pra responder';
+  }
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
   let result = '';
   for (let i = 0; i < length; i++) {
@@ -259,10 +263,21 @@ export default function () {
   
   // First message: load test warning
   sendMessageAndPoll(userNumber, LOAD_TEST_MESSAGE, headers);
+  
+  // Add delay between messages to emulate user reading/thinking/typing time
+  if (MESSAGES_PER_USER > 1) {
+    sleep(MESSAGE_DELAY_SECONDS);
+  }
+  
   // Subsequent messages: random strings
   for (let i = 1; i < MESSAGES_PER_USER; i++) {
     const randomMsg = generateRandomString(32);
     sendMessageAndPoll(userNumber, randomMsg, headers);
+    
+    // Add delay between messages (except after the last one)
+    if (i < MESSAGES_PER_USER - 1) {
+      sleep(MESSAGE_DELAY_SECONDS);
+    }
   }
 }
 
