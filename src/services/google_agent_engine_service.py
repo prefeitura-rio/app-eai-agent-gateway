@@ -235,8 +235,12 @@ class GoogleAgentEngineService:
             # Apply rate limiting before making the API call
             delay_seconds = rate_limiter.wait_if_needed()
             if delay_seconds > 0:
-                span.set_attribute("google_agent_engine.rate_limit_delay", delay_seconds)
-                logger.info(f"Applied rate limiting delay of {delay_seconds:.2f}s for thread {thread_id}")
+                span.set_attribute(
+                    "google_agent_engine.rate_limit_delay", delay_seconds
+                )
+                logger.info(
+                    f"Applied rate limiting delay of {delay_seconds:.2f}s for thread {thread_id}"
+                )
 
             try:
                 data = {
@@ -245,9 +249,7 @@ class GoogleAgentEngineService:
 
                 config = {"configurable": {"thread_id": thread_id}}
                 response = safe_async_to_sync(
-                    self.remote_agent.async_query,
-                    input=data,
-                    config=config
+                    self.remote_agent.async_query, input=data, config=config
                 )
 
                 # Record successful API call for rate limiting
@@ -278,13 +280,13 @@ class GoogleAgentEngineService:
                     )
 
                 # Converter para o formato padrão do gateway usando message_formatter
-                formatted_response = to_gateway_format(
-                    messages=messages,
-                    thread_id=thread_id,
-                    use_whatsapp_format=True
-                )
+                # formatted_response = to_gateway_format(
+                #     messages=messages,
+                #     thread_id=thread_id,
+                #     use_whatsapp_format=True
+                # )
 
-                return formatted_response.get("data", {}).get("messages", []), usage
+                return messages, usage
 
             except Exception as e:
                 span.record_exception(e)
@@ -293,7 +295,11 @@ class GoogleAgentEngineService:
 
                 # Check for rate limiting errors
                 error_str = str(e).lower()
-                if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:
+                if (
+                    "429" in error_str
+                    or "rate limit" in error_str
+                    or "too many requests" in error_str
+                ):
                     # Record rate limit hit for adaptive backoff
                     rate_limiter.record_rate_limit_hit()
                     span.set_attribute("google_agent_engine.rate_limit_error", True)
@@ -428,13 +434,13 @@ class GoogleAgentEngineService:
                     )
 
                 # Converter para o formato padrão do gateway usando message_formatter
-                formatted_response = to_gateway_format(
-                    messages=messages,
-                    thread_id=thread_id,
-                    use_whatsapp_format=True
-                )
+                # formatted_response = to_gateway_format(
+                #     messages=messages,
+                #     thread_id=thread_id,
+                #     use_whatsapp_format=True
+                # )
 
-                return formatted_response.get("data", {}).get("messages", []), usage
+                return messages, usage
 
             except Exception as e:
                 span.record_exception(e)
