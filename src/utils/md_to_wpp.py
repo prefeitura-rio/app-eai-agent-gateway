@@ -49,6 +49,12 @@ def markdown_to_whatsapp(text):
     # 3. INLINE FORMATTING (using temporary placeholders)
     # The order is critical: multi-character markers first.
     converted_text = re.sub(r"~~(.*?)~~", r"<s>\1</s>", converted_text, flags=re.DOTALL)
+
+    # Handle triple asterisk pattern (***text***) for bold+italic
+    converted_text = re.sub(
+        r"\*\*\*(.*?)\*\*\*", r"<i><b>\1</b></i>", converted_text, flags=re.DOTALL
+    )
+
     converted_text = re.sub(
         r"\*\*(.*?)\*\*", r"<b>\1</b>", converted_text, flags=re.DOTALL
     )
@@ -146,7 +152,6 @@ def markdown_to_whatsapp(text):
             footnotes_text += f"[{num}] {footnote_defs.get(key, '')}\n"
         converted_text += footnotes_text.rstrip()
 
-    converted_text = converted_text.replace('\\"', '"').replace('"\\', '"')
     return converted_text
 
 
@@ -283,6 +288,11 @@ def run_tests():
                 "_italic_",
                 "```\ncode block\n```",
             ],
+        },
+        {
+            "name": "Triple star pattern",
+            "input": "***Disque Denúncia:***",
+            "expected_contains": ["_*Disque Denúncia:*_"],
         },
     ]
     print("=== RUNNING COMPREHENSIVE VALIDATION TESTS ===\n")
