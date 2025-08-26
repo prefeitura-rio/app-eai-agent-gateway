@@ -125,7 +125,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 		// Process the user message with optional OTel tracing
 		var response string
 		var err error
-		
+
 		if deps.OTelWorkerWrapper != nil {
 			// Wrap with OpenTelemetry tracing
 			err = deps.OTelWorkerWrapper.WrapWorkerTask(ctx, "user_message_worker", "process_user_message", func(tracedCtx context.Context) error {
@@ -136,7 +136,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			// Process without tracing
 			response, err = processUserMessage(ctx, &queueMsg, deps)
 		}
-		
+
 		if err != nil {
 			logger.WithError(err).Error("Failed to process user message")
 
@@ -167,87 +167,6 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 		}
 
 		logger.WithField("response_length", len(response)).Info("User message processed successfully")
-
-		// Return success (service layer will handle acknowledgment)
-		return nil
-	}
-}
-
-// CreateAgentMessageHandler creates a handler for agent messages
-func CreateAgentMessageHandler(deps *MessageHandlerDependencies) func(context.Context, amqp.Delivery) error {
-	return func(ctx context.Context, delivery amqp.Delivery) error {
-		logger := deps.Logger.WithFields(logrus.Fields{
-			"handler":      "agent_message",
-			"delivery_tag": delivery.DeliveryTag,
-			"message_id":   delivery.MessageId,
-		})
-
-		logger.Info("Processing agent message")
-
-		// Parse the queue message
-		var queueMsg models.QueueMessage
-		if err := json.Unmarshal(delivery.Body, &queueMsg); err != nil {
-			logger.WithError(err).Error("Failed to unmarshal queue message")
-			// Return error for malformed messages (service layer will handle nack)
-			return err
-		}
-
-		logger = logger.WithFields(logrus.Fields{
-			"queue_message_id": queueMsg.ID,
-			"agent_id":         queueMsg.AgentID,
-			"message_type":     queueMsg.Type,
-		})
-
-		// Update task status to processing
-		if err := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusProcessing), deps.Config.Redis.TaskStatusTTL); err != nil {
-			logger.WithError(err).Error("Failed to update task status to processing")
-		}
-
-		// Process the agent message with optional OTel tracing
-		var response string
-		var err error
-		
-		if deps.OTelWorkerWrapper != nil {
-			// Wrap with OpenTelemetry tracing
-			err = deps.OTelWorkerWrapper.WrapWorkerTask(ctx, "agent_message_worker", "process_agent_message", func(tracedCtx context.Context) error {
-				response, err = processAgentMessage(tracedCtx, &queueMsg, deps)
-				return err
-			})
-		} else {
-			// Process without tracing
-			response, err = processAgentMessage(ctx, &queueMsg, deps)
-		}
-		
-		if err != nil {
-			logger.WithError(err).Error("Failed to process agent message")
-
-			// Store error in Redis
-			errorKey := "task:error:" + queueMsg.ID
-			if redisErr := deps.RedisService.Set(ctx, errorKey, err.Error(), deps.Config.Redis.TaskStatusTTL); redisErr != nil {
-				logger.WithError(redisErr).Error("Failed to store error in Redis")
-			}
-
-			// Update task status to failed
-			if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusFailed), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
-				logger.WithError(statusErr).Error("Failed to update task status to failed")
-			}
-
-			// Return success to prevent infinite retries (service layer will handle ack)
-			return nil
-		}
-
-		// Store the response in Redis
-		if err := deps.RedisService.SetTaskResult(ctx, queueMsg.ID, response, deps.Config.Redis.TaskResultTTL); err != nil {
-			logger.WithError(err).Error("Failed to store task result")
-			// Don't fail the message processing for Redis storage issues
-		}
-
-		// Update task status to completed
-		if err := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusCompleted), deps.Config.Redis.TaskStatusTTL); err != nil {
-			logger.WithError(err).Error("Failed to update task status to completed")
-		}
-
-		logger.WithField("response_length", len(response)).Info("Agent message processed successfully")
 
 		// Return success (service layer will handle acknowledgment)
 		return nil
@@ -296,10 +215,10 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 
 	// Check if message is an audio URL (independent of service availability)
 	isAudioURL := isAudioURL(message)
-	
+
 	if isAudioURL {
 		logger.WithField("audio_url", message).Info("Detected audio URL, attempting transcription")
-		
+
 		if deps.TranscribeService == nil {
 			logger.Warn("Transcribe service not available, using fallback")
 			message = "Ajuda"
@@ -427,125 +346,6 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		"messages_count":      len(transformedMessages),
 		"had_transcript":      transcriptText != nil,
 	}).Info("Successfully processed user message with full transformation pipeline")
-
-	return processedResponse, nil
-}
-
-// processAgentMessage handles the actual agent message processing logic
-func processAgentMessage(ctx context.Context, msg *models.QueueMessage, deps *MessageHandlerDependencies) (string, error) {
-	logger := deps.Logger.WithField("function", "processAgentMessage")
-
-	logger.WithFields(logrus.Fields{
-		"agent_id":       msg.AgentID,
-		"message_length": len(msg.Message),
-	}).Info("Processing agent direct message with Google Agent Engine")
-
-	// Validate agent ID
-	if msg.AgentID == "" {
-		return "", fmt.Errorf("agent ID is required for agent messages")
-	}
-
-	// Validate message content
-	if deps.MessageFormatter != nil {
-		if err := deps.MessageFormatter.ValidateMessageContent(msg.Message); err != nil {
-			logger.WithError(err).Error("Message content validation failed")
-			return "", fmt.Errorf("invalid message content: %w", err)
-		}
-	}
-
-	// Check if Google Agent service is available
-	if deps.GoogleAgentService == nil {
-		logger.Error("Google Agent Engine service not available")
-		return "", fmt.Errorf("google Agent Engine service is required but not available")
-	}
-
-	// Send direct message to Google Agent Engine (legacy support)
-	agentResponse, err := deps.GoogleAgentService.SendDirectMessage(ctx, msg.AgentID, msg.Message)
-	if err != nil {
-		logger.WithError(err).Error("Failed to send direct message to Google Agent Engine")
-		return "", fmt.Errorf("failed to get AI response: %w", err)
-	}
-
-	// Parse Google's raw JSON response immediately after getting it from Google Agent Engine
-	logger.WithField("raw_response_length", len(agentResponse.Content)).Debug("Processing Google Agent Engine direct message response")
-
-	// Clean the JSON string first to handle newlines and other whitespace issues
-	cleanedResponse := strings.ReplaceAll(agentResponse.Content, "\n", "")
-	cleanedResponse = strings.ReplaceAll(cleanedResponse, "\r", "")
-	cleanedResponse = strings.TrimSpace(cleanedResponse)
-
-	var parsedResponse map[string]interface{}
-	if err := json.Unmarshal([]byte(cleanedResponse), &parsedResponse); err != nil {
-		logger.WithFields(logrus.Fields{
-			"error":       err.Error(),
-			"raw_json":    cleanedResponse,
-			"json_length": len(cleanedResponse),
-		}).Error("Failed to parse Google Agent Engine JSON response for direct message")
-		return "", fmt.Errorf("failed to parse AI response JSON: %w", err)
-	}
-
-	// Extract the 'output' field which contains the messages
-	output, exists := parsedResponse["output"]
-	if !exists {
-		logger.Error("No 'output' field found in Google Agent Engine direct message response")
-		return "", fmt.Errorf("invalid Google Agent Engine response format - missing 'output' field")
-	}
-
-	outputMap, ok := output.(map[string]interface{})
-	if !ok {
-		logger.Error("'output' field is not a map in Google Agent Engine direct message response")
-		return "", fmt.Errorf("invalid Google Agent Engine response format - 'output' is not an object")
-	}
-
-	// Extract messages array from the output structure
-	var transformedMessages []interface{}
-	if messagesArray, exists := outputMap["messages"]; exists {
-		transformedMessages = transformGoogleAgentMessages(deps.Logger, messagesArray)
-	} else {
-		// Fallback to empty messages if no messages field
-		logger.Warn("No 'messages' field found in output for direct message, using empty array")
-		transformedMessages = []interface{}{}
-	}
-
-	// For direct messages, agent ID is provided in the message
-	agentID := msg.AgentID
-
-	// Set agent_id in the usage statistics message
-	if len(transformedMessages) > 0 {
-		if lastMsg, ok := transformedMessages[len(transformedMessages)-1].(map[string]interface{}); ok {
-			if msgType, exists := lastMsg["message_type"]; exists && msgType == "usage_statistics" {
-				lastMsg["agent_id"] = agentID
-			}
-		}
-	}
-
-	// Apply WhatsApp formatting to individual message content
-	transformedMessages = applyWhatsAppFormattingToMessages(deps.Logger, deps.MessageFormatter, transformedMessages)
-
-	// Build the final response data to match Python API structure
-	processedData := models.ProcessedMessageData{
-		Messages:    transformedMessages,
-		AgentID:     agentID,
-		ProcessedAt: msg.ID, // Use message ID as processed_at identifier
-		Status:      "done",
-	}
-
-	// Convert the processed data to JSON for storage in Redis
-	processedBytes, err := json.Marshal(processedData)
-	if err != nil {
-		logger.WithError(err).Error("Failed to marshal processed data to JSON for direct message")
-		return "", fmt.Errorf("failed to marshal processed response: %w", err)
-	}
-
-	processedResponse := string(processedBytes)
-
-	// Log successful processing
-	logger.WithFields(logrus.Fields{
-		"agent_id":            agentID,
-		"raw_response_length": len(agentResponse.Content),
-		"processed_length":    len(processedResponse),
-		"messages_count":      len(transformedMessages),
-	}).Info("Successfully processed agent direct message with full transformation pipeline")
 
 	return processedResponse, nil
 }

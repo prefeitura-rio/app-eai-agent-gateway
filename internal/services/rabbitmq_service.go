@@ -151,26 +151,15 @@ func (r *RabbitMQService) setupTopology() error {
 		return fmt.Errorf("failed to declare user queue: %w", err)
 	}
 
-	// Declare agent messages queue
-	if err := r.declareQueueWithDLX(r.config.RabbitMQ.AgentQueue); err != nil {
-		return fmt.Errorf("failed to declare agent queue: %w", err)
-	}
-
-	// Declare additional message processing queues
+	// Declare user messages queue
 	if err := r.declareQueueWithDLX(r.config.RabbitMQ.UserMessagesQueue); err != nil {
 		return fmt.Errorf("failed to declare user messages queue: %w", err)
-	}
-
-	if err := r.declareQueueWithDLX(r.config.RabbitMQ.AgentMessagesQueue); err != nil {
-		return fmt.Errorf("failed to declare agent messages queue: %w", err)
 	}
 
 	// Declare dead letter queues
 	queues := []string{
 		r.config.RabbitMQ.UserQueue,
-		r.config.RabbitMQ.AgentQueue,
 		r.config.RabbitMQ.UserMessagesQueue,
-		r.config.RabbitMQ.AgentMessagesQueue,
 	}
 
 	for _, queue := range queues {

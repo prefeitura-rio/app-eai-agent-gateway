@@ -296,64 +296,6 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	}, nil
 }
 
-// SendDirectMessage sends a message directly to an agent (legacy support)
-func (s *GoogleAgentEngineService) SendDirectMessage(ctx context.Context, agentID string, content string) (*models.AgentResponse, error) {
-	start := time.Now()
-
-	s.logger.WithFields(logrus.Fields{
-		"agent_id":       agentID,
-		"content_length": len(content),
-	}).Debug("Sending direct message to agent")
-
-	// Apply rate limiting
-	if err := s.rateLimiter.Wait(ctx, "google_agent_engine"); err != nil {
-		return nil, fmt.Errorf("rate limit exceeded: %w", err)
-	}
-
-	// For direct messages, we create a temporary thread-like context
-	// This maintains compatibility with the legacy API while using Google Agent Engine
-	tempThreadID := fmt.Sprintf("direct_%s_%d", agentID, time.Now().UnixNano())
-
-	// Call the reasoning engine via HTTP REST API for direct messages
-	responseContent, err := s.queryReasoningEngine(ctx, tempThreadID, content)
-	if err != nil {
-		s.logger.WithError(err).WithField("agent_id", agentID).Error("Failed to query reasoning engine for direct message")
-		return nil, fmt.Errorf("failed to get AI response: %w", err)
-	}
-
-	if responseContent == "" {
-		responseContent = "I apologize, but I couldn't generate a response. Please try again."
-	}
-
-	// Usage metadata is not available from reasoning engine API
-	var usage *models.UsageMetadata
-
-	// Generate response message ID
-	messageID := fmt.Sprintf("msg_%s_%d", agentID, time.Now().UnixNano())
-
-	duration := time.Since(start)
-
-	s.logger.WithFields(logrus.Fields{
-		"agent_id":        agentID,
-		"message_id":      messageID,
-		"response_length": len(responseContent),
-		"duration_ms":     duration.Milliseconds(),
-		"usage":           usage,
-	}).Info("Direct message processed successfully")
-
-	return &models.AgentResponse{
-		Content:   responseContent,
-		ThreadID:  tempThreadID,
-		MessageID: messageID,
-		Metadata: map[string]interface{}{
-			"duration_ms": duration.Milliseconds(),
-			"agent_id":    agentID,
-			"direct_mode": true,
-		},
-		Usage: usage,
-	}, nil
-}
-
 // getAccessToken gets an access token using the default token source
 func (s *GoogleAgentEngineService) getAccessToken(ctx context.Context) (string, error) {
 	ts, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")

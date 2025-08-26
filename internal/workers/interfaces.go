@@ -95,9 +95,6 @@ type AgentClientInterface interface {
 
 	// SendMessage sends a message to a thread and gets response
 	SendMessage(ctx context.Context, threadID string, content string) (*models.AgentResponse, error)
-
-	// SendDirectMessage sends message directly to agent (legacy support)
-	SendDirectMessage(ctx context.Context, agentID string, content string) (*models.AgentResponse, error)
 }
 
 // MessageFormatterInterface defines message formatting operations

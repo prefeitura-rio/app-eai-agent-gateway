@@ -14,9 +14,9 @@ import (
 	"time"
 
 	speech "cloud.google.com/go/speech/apiv2"
-	speechpb "google.golang.org/genproto/googleapis/cloud/speech/v2"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/api/option"
+	speechpb "google.golang.org/genproto/googleapis/cloud/speech/v2"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 )
