@@ -8,12 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
@@ -27,6 +26,7 @@ type GoogleAgentEngineService struct {
 	rateLimiter  RateLimiterInterface
 	redisService RedisServiceInterface
 	httpClient   *http.Client
+	tokenSource  oauth2.TokenSource // Direct token source, no temp files
 }
 
 // ReasoningEngineRequest represents the request structure for reasoning engine queries
@@ -58,23 +58,16 @@ type RedisServiceInterface interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// setGoogleApplicationCredentials sets up credentials for google.DefaultTokenSource
-func setGoogleApplicationCredentials(credentialsJSON []byte) error {
-	// Create a temporary file for the credentials
-	tempDir := os.TempDir()
-	tempFile := filepath.Join(tempDir, fmt.Sprintf("gcp-credentials-%d.json", time.Now().UnixNano()))
-
-	if err := os.WriteFile(tempFile, credentialsJSON, 0600); err != nil {
-		return fmt.Errorf("failed to write credentials to temp file: %w", err)
+// createTokenSourceFromCredentials creates a token source directly from credentials JSON
+// This avoids writing to temp files which may fail in read-only Kubernetes environments
+func createTokenSourceFromCredentials(ctx context.Context, credentialsJSON []byte) (oauth2.TokenSource, error) {
+	// Create credentials directly from JSON without temp files
+	creds, err := google.CredentialsFromJSON(ctx, credentialsJSON, "https://www.googleapis.com/auth/cloud-platform")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create credentials from JSON: %w", err)
 	}
 
-	// Set the environment variable for google.DefaultTokenSource
-	if err := os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", tempFile); err != nil {
-		_ = os.Remove(tempFile) // Clean up on error
-		return fmt.Errorf("failed to set GOOGLE_APPLICATION_CREDENTIALS: %w", err)
-	}
-
-	return nil
+	return creds.TokenSource, nil
 }
 
 // ThreadInfo represents thread information stored in Redis
@@ -105,7 +98,8 @@ func NewGoogleAgentEngineService(
 		return nil, fmt.Errorf("google Agent Engine reasoning engine ID is required")
 	}
 
-	// Set up credentials for DefaultTokenSource to work properly
+	// Set up credentials using direct token source (no temp files)
+	var tokenSource oauth2.TokenSource
 	if cfg.GoogleAgentEngine.CredentialsJSON != "" {
 		// Try to decode as base64 first (for SERVICE_ACCOUNT env var)
 		credentialsData := cfg.GoogleAgentEngine.CredentialsJSON
@@ -114,10 +108,14 @@ func NewGoogleAgentEngineService(
 			credentialsData = string(decoded)
 		}
 
-		// Set the GOOGLE_APPLICATION_CREDENTIALS environment variable if not set
-		// This allows google.DefaultTokenSource to work with our credentials
-		if err := setGoogleApplicationCredentials([]byte(credentialsData)); err != nil {
-			logger.WithError(err).Warn("Failed to set up credentials for DefaultTokenSource")
+		// Create token source directly from credentials (no temp files)
+		var err error
+		tokenSource, err = createTokenSourceFromCredentials(context.Background(), []byte(credentialsData))
+		if err != nil {
+			logger.WithError(err).Warn("Failed to create token source from credentials, falling back to default")
+			tokenSource = nil
+		} else {
+			logger.Info("Successfully created token source from provided credentials")
 		}
 	}
 
@@ -132,6 +130,7 @@ func NewGoogleAgentEngineService(
 		rateLimiter:  rateLimiter,
 		redisService: redisService,
 		httpClient:   httpClient,
+		tokenSource:  tokenSource,
 	}
 
 	logger.WithFields(logrus.Fields{
@@ -296,11 +295,20 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	}, nil
 }
 
-// getAccessToken gets an access token using the default token source
+// getAccessToken gets an access token using the configured token source or default
 func (s *GoogleAgentEngineService) getAccessToken(ctx context.Context) (string, error) {
-	ts, err := google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
-	if err != nil {
-		return "", fmt.Errorf("failed to get token source: %w", err)
+	var ts oauth2.TokenSource
+	
+	// Use our stored token source if available, otherwise fall back to default
+	if s.tokenSource != nil {
+		ts = s.tokenSource
+	} else {
+		// Fall back to default token source (uses ADC or workload identity)
+		var err error
+		ts, err = google.DefaultTokenSource(ctx, "https://www.googleapis.com/auth/cloud-platform")
+		if err != nil {
+			return "", fmt.Errorf("failed to get default token source: %w", err)
+		}
 	}
 
 	tok, err := ts.Token()
