@@ -82,8 +82,8 @@ k8s/*/kustomization.yaml.bak
 k8s/*/*.yaml.bak
 
 # Binary output from justfile
-gateway
-worker
+/gateway
+/worker
 
 # Certificates and keys
 *.key

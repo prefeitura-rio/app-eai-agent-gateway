@@ -57,6 +57,7 @@ type RabbitMQConfig struct {
 	UserQueue         string `mapstructure:"RABBITMQ_USER_QUEUE"`
 	UserMessagesQueue string `mapstructure:"RABBITMQ_USER_MESSAGES_QUEUE"`
 	DLXExchange       string `mapstructure:"RABBITMQ_DLX_EXCHANGE"`
+	MaxParallel       int    `mapstructure:"MAX_PARALLEL"`
 	MaxRetries        int    `mapstructure:"RABBITMQ_MAX_RETRIES"`
 	RetryDelay        int    `mapstructure:"RABBITMQ_RETRY_DELAY"`
 	SoftTimeLimit     int    `mapstructure:"CELERY_SOFT_TIME_LIMIT"`
