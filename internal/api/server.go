@@ -27,10 +27,11 @@ type Server struct {
 	messageHandler  *handlers.MessageHandler
 	redisService    *services.RedisService
 	rabbitMQService *services.RabbitMQService
+	otelService     *services.OTelService // Optional OTel service
 }
 
 // NewServer creates a new HTTP server
-func NewServer(cfg *config.Config, logger *logrus.Logger) (*Server, error) {
+func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.OTelService) (*Server, error) {
 	// Set Gin mode based on environment
 	if cfg.Observability.LogLevel == "debug" {
 		gin.SetMode(gin.DebugMode)
@@ -56,6 +57,7 @@ func NewServer(cfg *config.Config, logger *logrus.Logger) (*Server, error) {
 		router:          gin.New(),
 		redisService:    redisService,
 		rabbitMQService: rabbitMQService,
+		otelService:     otelService,
 		healthHandler: handlers.NewHealthHandler(
 			cfg.Observability.HealthCheckTimeout,
 			cfg.Observability.ReadinessCheckTimeout,
@@ -85,6 +87,12 @@ func (s *Server) setupMiddleware() {
 
 	// Logging middleware
 	s.router.Use(middleware.Logger(s.logger))
+
+	// OpenTelemetry middleware (if OTel service is available)
+	if s.otelService != nil {
+		s.logger.Info("Adding OpenTelemetry middleware for HTTP request tracing")
+		s.router.Use(middleware.OTelMiddleware(s.otelService))
+	}
 
 	// Security headers
 	s.router.Use(middleware.SecurityHeaders())

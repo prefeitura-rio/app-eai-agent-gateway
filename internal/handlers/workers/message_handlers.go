@@ -12,6 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/middleware"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
@@ -24,6 +25,7 @@ type MessageHandlerDependencies struct {
 	GoogleAgentService *services.GoogleAgentEngineService
 	TranscribeService  TranscribeServiceInterface
 	MessageFormatter   MessageFormatterInterface
+	OTelWorkerWrapper  *middleware.OTelWorkerWrapper // Optional OTel wrapper
 }
 
 // TranscribeServiceInterface defines audio transcription operations
@@ -120,8 +122,21 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			logger.WithError(err).Error("Failed to update task status to processing")
 		}
 
-		// Process the user message
-		response, err := processUserMessage(ctx, &queueMsg, deps)
+		// Process the user message with optional OTel tracing
+		var response string
+		var err error
+		
+		if deps.OTelWorkerWrapper != nil {
+			// Wrap with OpenTelemetry tracing
+			err = deps.OTelWorkerWrapper.WrapWorkerTask(ctx, "user_message_worker", "process_user_message", func(tracedCtx context.Context) error {
+				response, err = processUserMessage(tracedCtx, &queueMsg, deps)
+				return err
+			})
+		} else {
+			// Process without tracing
+			response, err = processUserMessage(ctx, &queueMsg, deps)
+		}
+		
 		if err != nil {
 			logger.WithError(err).Error("Failed to process user message")
 
@@ -188,8 +203,21 @@ func CreateAgentMessageHandler(deps *MessageHandlerDependencies) func(context.Co
 			logger.WithError(err).Error("Failed to update task status to processing")
 		}
 
-		// Process the agent message
-		response, err := processAgentMessage(ctx, &queueMsg, deps)
+		// Process the agent message with optional OTel tracing
+		var response string
+		var err error
+		
+		if deps.OTelWorkerWrapper != nil {
+			// Wrap with OpenTelemetry tracing
+			err = deps.OTelWorkerWrapper.WrapWorkerTask(ctx, "agent_message_worker", "process_agent_message", func(tracedCtx context.Context) error {
+				response, err = processAgentMessage(tracedCtx, &queueMsg, deps)
+				return err
+			})
+		} else {
+			// Process without tracing
+			response, err = processAgentMessage(ctx, &queueMsg, deps)
+		}
+		
 		if err != nil {
 			logger.WithError(err).Error("Failed to process agent message")
 
