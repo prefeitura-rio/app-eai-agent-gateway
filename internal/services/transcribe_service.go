@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"mime"
@@ -12,13 +13,29 @@ import (
 	"strings"
 	"time"
 
-	speech "cloud.google.com/go/speech/apiv1"
-	"cloud.google.com/go/speech/apiv1/speechpb"
+	speech "cloud.google.com/go/speech/apiv2"
+	speechpb "google.golang.org/genproto/googleapis/cloud/speech/v2"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/api/option"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 )
+
+// decodeServiceAccount decodes the SERVICE_ACCOUNT environment variable (same as sandbox.go)
+func decodeServiceAccount(env string) ([]byte, error) {
+	// Try base64 decode first
+	if decoded, err := base64.StdEncoding.DecodeString(env); err == nil {
+		if len(decoded) > 0 && decoded[0] == '{' {
+			return decoded, nil
+		}
+	}
+	// Try raw JSON
+	raw := []byte(env)
+	if len(raw) > 0 && raw[0] == '{' {
+		return raw, nil
+	}
+	return nil, fmt.Errorf("SERVICE_ACCOUNT is not valid base64 JSON nor raw JSON")
+}
 
 // TranscribeServiceInterface defines the interface for audio transcription
 type TranscribeServiceInterface interface {
@@ -69,18 +86,29 @@ func NewTranscribeService(
 ) (*TranscribeService, error) {
 	ctx := context.Background()
 
-	// Create client options
-	var clientOptions []option.ClientOption
+	// Use exact same pattern as sandbox.go newSpeechClient function
+	svcEnv := os.Getenv("SERVICE_ACCOUNT")
+	var client *speech.Client
+	var err error
 
-	// Add credentials if provided via Google Cloud config
-	if cfg.GoogleCloud.ServiceAccount != "" {
-		clientOptions = append(clientOptions, option.WithCredentialsFile(cfg.GoogleCloud.ServiceAccount))
-	}
-
-	// Create the Speech client
-	client, err := speech.NewClient(ctx, clientOptions...)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Speech client: %w", err)
+	if svcEnv != "" {
+		logger.Info("Transcribe service - using SERVICE_ACCOUNT env var")
+		creds, decodeErr := decodeServiceAccount(svcEnv)
+		if decodeErr != nil {
+			logger.WithError(decodeErr).Error("Failed to decode SERVICE_ACCOUNT")
+			return nil, fmt.Errorf("decoding SERVICE_ACCOUNT: %w", decodeErr)
+		}
+		client, err = speech.NewClient(ctx, option.WithCredentialsJSON(creds))
+		if err != nil {
+			return nil, fmt.Errorf("speech.NewClient(with creds): %w", err)
+		}
+		logger.Info("Transcribe service - authenticated using SERVICE_ACCOUNT env var")
+	} else {
+		client, err = speech.NewClient(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("speech.NewClient(ADC): %w", err)
+		}
+		logger.Info("Transcribe service - authenticated using Application Default Credentials")
 	}
 
 	service := &TranscribeService{
@@ -175,27 +203,28 @@ func (s *TranscribeService) TranscribeFromFile(ctx context.Context, filePath str
 	reqCtx, cancel := context.WithTimeout(ctx, s.config.Transcribe.RequestTimeout)
 	defer cancel()
 
-	// Build recognition config
-	config := &speechpb.RecognitionConfig{
-		Encoding:                   s.detectEncoding(filePath),
-		SampleRateHertz:            int32(s.config.Transcribe.SampleRateHertz),
-		LanguageCode:               s.config.Transcribe.LanguageCode,
-		EnableWordTimeOffsets:      s.config.Transcribe.EnableWordTimeOffsets,
-		EnableWordConfidence:       s.config.Transcribe.EnableWordConfidence,
-		MaxAlternatives:            int32(s.config.Transcribe.MaxAlternatives),
-		ProfanityFilter:            s.config.Transcribe.ProfanityFilter,
-		EnableAutomaticPunctuation: true,
-		UseEnhanced:                true,
-		Model:                      "latest_long",
+	// Get project ID from config
+	projectID := s.config.GoogleCloud.ProjectID
+	if projectID == "" {
+		return nil, fmt.Errorf("PROJECT_ID is required for Speech v2 API")
 	}
 
-	// Create recognition request
+	// Build recognition request using Speech v2 API (same pattern as sandbox.go)
 	req := &speechpb.RecognizeRequest{
-		Config: config,
-		Audio: &speechpb.RecognitionAudio{
-			AudioSource: &speechpb.RecognitionAudio_Content{
-				Content: audioData,
+		Recognizer: fmt.Sprintf("projects/%s/locations/global/recognizers/_", projectID),
+		Config: &speechpb.RecognitionConfig{
+			DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{
+				AutoDecodingConfig: &speechpb.AutoDetectDecodingConfig{},
 			},
+			Features: &speechpb.RecognitionFeatures{
+				EnableAutomaticPunctuation: true,
+				MaxAlternatives:            int32(s.config.Transcribe.MaxAlternatives),
+			},
+			LanguageCodes: []string{s.config.Transcribe.LanguageCode},
+			Model:         "long",
+		},
+		AudioSource: &speechpb.RecognizeRequest_Content{
+			Content: audioData,
 		},
 	}
 
@@ -353,30 +382,9 @@ func (s *TranscribeService) getFileExtension(resp *http.Response, audioURL strin
 	return ".mp3"
 }
 
-// detectEncoding determines the audio encoding based on file extension
-func (s *TranscribeService) detectEncoding(filePath string) speechpb.RecognitionConfig_AudioEncoding {
-	ext := strings.ToLower(filepath.Ext(filePath))
+// Note: detectEncoding function removed - Speech v2 API uses auto-detection
 
-	switch ext {
-	case ".wav":
-		return speechpb.RecognitionConfig_LINEAR16
-	case ".flac":
-		return speechpb.RecognitionConfig_FLAC
-	case ".mp3":
-		return speechpb.RecognitionConfig_MP3
-	case ".ogg":
-		return speechpb.RecognitionConfig_OGG_OPUS
-	case ".webm":
-		return speechpb.RecognitionConfig_WEBM_OPUS
-	case ".mp4", ".m4a":
-		return speechpb.RecognitionConfig_MP3 // Fallback
-	default:
-		s.logger.WithField("extension", ext).Warn("Unknown audio format, using MP3 encoding")
-		return speechpb.RecognitionConfig_MP3
-	}
-}
-
-// processRecognitionResponse processes the Google Speech API response
+// processRecognitionResponse processes the Google Speech v2 API response (matching sandbox.go pattern)
 func (s *TranscribeService) processRecognitionResponse(resp *speechpb.RecognizeResponse, start time.Time) *TranscriptionResult {
 	result := &TranscriptionResult{
 		Duration: time.Since(start),
@@ -384,68 +392,43 @@ func (s *TranscribeService) processRecognitionResponse(resp *speechpb.RecognizeR
 		Metadata: make(map[string]interface{}),
 	}
 
-	if len(resp.Results) == 0 {
+	if resp == nil || len(resp.Results) == 0 {
 		s.logger.Warn("No transcription results returned")
 		result.Text = ""
 		result.Confidence = 0.0
 		return result
 	}
 
-	// Get the best result (first one)
-	bestResult := resp.Results[0]
-	if len(bestResult.Alternatives) == 0 {
-		result.Text = ""
-		result.Confidence = 0.0
-		return result
-	}
-
-	// Primary result
-	primary := bestResult.Alternatives[0]
-	result.Text = primary.Transcript
-	result.Confidence = primary.Confidence
-
-	// Add alternatives if requested
-	if s.config.Transcribe.MaxAlternatives > 1 {
-		for i, alt := range bestResult.Alternatives[1:] {
-			if i >= s.config.Transcribe.MaxAlternatives-1 {
-				break
+	// Process Speech v2 API results (similar to sandbox.go processing)
+	for i, res := range resp.Results {
+		if len(res.Alternatives) > 0 {
+			// Use the first result and first alternative (highest confidence)
+			if i == 0 {
+				primary := res.Alternatives[0]
+				result.Text = primary.Transcript
+				result.Confidence = primary.Confidence
 			}
-			result.Alternatives = append(result.Alternatives, TranscriptionAlternative{
-				Text:       alt.Transcript,
-				Confidence: alt.Confidence,
-			})
+
+			// Add alternatives if requested
+			if s.config.Transcribe.MaxAlternatives > 1 {
+				for j, alt := range res.Alternatives[1:] {
+					if j >= s.config.Transcribe.MaxAlternatives-1 {
+						break
+					}
+					result.Alternatives = append(result.Alternatives, TranscriptionAlternative{
+						Text:       alt.Transcript,
+						Confidence: alt.Confidence,
+					})
+				}
+			}
 		}
 	}
 
-	// Add word-level information if enabled
-	if s.config.Transcribe.EnableWordTimeOffsets && len(primary.Words) > 0 {
-		for _, word := range primary.Words {
-			wordInfo := WordInfo{
-				Word: word.Word,
-			}
-
-			if word.StartTime != nil {
-				wordInfo.StartTime = time.Duration(word.StartTime.Seconds)*time.Second +
-					time.Duration(word.StartTime.Nanos)*time.Nanosecond
-			}
-
-			if word.EndTime != nil {
-				wordInfo.EndTime = time.Duration(word.EndTime.Seconds)*time.Second +
-					time.Duration(word.EndTime.Nanos)*time.Nanosecond
-			}
-
-			if s.config.Transcribe.EnableWordConfidence {
-				wordInfo.Confidence = word.Confidence
-			}
-
-			result.WordInfo = append(result.WordInfo, wordInfo)
-		}
-	}
-
-	// Add metadata
-	result.Metadata["total_billed_time"] = resp.TotalBilledTime
+	// Add metadata (Speech v2 format)
 	result.Metadata["result_count"] = len(resp.Results)
-	result.Metadata["alternative_count"] = len(bestResult.Alternatives)
+	if len(resp.Results) > 0 && len(resp.Results[0].Alternatives) > 0 {
+		result.Metadata["alternative_count"] = len(resp.Results[0].Alternatives)
+	}
 
 	return result
 }
@@ -459,22 +442,19 @@ func (s *TranscribeService) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("rate limit exceeded for health check")
 	}
 
-	// Simple connectivity test - try to create a recognition config
-	testCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// Simple connectivity test for Speech v2 API
+	_, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	_ = testCtx // Context will be used when implementing actual connectivity test
 
-	// Test basic client functionality by checking supported languages
-	// This is a lightweight operation that verifies connectivity
-	config := &speechpb.RecognitionConfig{
-		Encoding:        speechpb.RecognitionConfig_LINEAR16,
-		SampleRateHertz: 16000,
-		LanguageCode:    "en-US",
+	// Verify we have required configuration for Speech v2
+	projectID := s.config.GoogleCloud.ProjectID
+	if projectID == "" {
+		return fmt.Errorf("PROJECT_ID is required for Speech v2 API health check")
 	}
 
-	// Validate the config format (this doesn't make an API call)
-	if config.Encoding == speechpb.RecognitionConfig_ENCODING_UNSPECIFIED {
-		return fmt.Errorf("transcription service configuration error")
+	// Basic validation that client was created successfully
+	if s.client == nil {
+		return fmt.Errorf("transcription service client is not initialized")
 	}
 
 	return nil

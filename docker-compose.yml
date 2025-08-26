@@ -70,6 +70,9 @@ services:
       
       # Observability
       - OTEL_ENABLED=false
+      
+      # STT Configuration
+      - TRANSCRIBE_ALLOWED_URLS=https://whatsapp.dados.rio/,http://host.docker.internal:8001
     depends_on:
       - redis
       - rabbitmq

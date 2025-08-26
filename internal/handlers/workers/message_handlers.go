@@ -45,6 +45,9 @@ func NewTranscribeServiceAdapter(service *services.TranscribeService) *Transcrib
 
 // TranscribeAudio implements the interface by calling TranscribeFromURL
 func (a *TranscribeServiceAdapter) TranscribeAudio(ctx context.Context, audioURL string) (string, error) {
+	if a.service == nil {
+		return "", fmt.Errorf("transcribe service is not available")
+	}
 	result, err := a.service.TranscribeFromURL(ctx, audioURL)
 	if err != nil {
 		return "", err
@@ -54,7 +57,8 @@ func (a *TranscribeServiceAdapter) TranscribeAudio(ctx context.Context, audioURL
 
 // IsAudioURL checks if the URL appears to be an audio file
 func (a *TranscribeServiceAdapter) IsAudioURL(url string) bool {
-	// Simple check for audio file extensions
+	// Check for audio file extensions regardless of service availability
+	// This allows detection even when transcribe service is not configured
 	audioExtensions := []string{".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".wma"}
 	for _, ext := range audioExtensions {
 		if strings.HasSuffix(strings.ToLower(url), ext) {
@@ -66,6 +70,9 @@ func (a *TranscribeServiceAdapter) IsAudioURL(url string) bool {
 
 // ValidateAudioURL validates the audio URL format
 func (a *TranscribeServiceAdapter) ValidateAudioURL(url string) error {
+	if a.service == nil {
+		return fmt.Errorf("transcribe service is not available")
+	}
 	if url == "" {
 		return fmt.Errorf("audio URL cannot be empty")
 	}
@@ -219,6 +226,17 @@ func CreateAgentMessageHandler(deps *MessageHandlerDependencies) func(context.Co
 	}
 }
 
+// isAudioURL checks if the URL appears to be an audio file (standalone function)
+func isAudioURL(url string) bool {
+	audioExtensions := []string{".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".wma"}
+	for _, ext := range audioExtensions {
+		if strings.HasSuffix(strings.ToLower(url), ext) {
+			return true
+		}
+	}
+	return false
+}
+
 // processUserMessage handles the actual user message processing logic (matches Python process_user_message)
 func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *MessageHandlerDependencies) (string, error) {
 	logger := deps.Logger.WithField("function", "processUserMessage")
@@ -229,6 +247,8 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		"has_previous_message": msg.PreviousMessage != nil,
 		"provider":             msg.Provider,
 	}).Info("Processing user message")
+
+	logger.Info("DEBUG: Starting processUserMessage function execution")
 
 	// Validate provider - currently only support google_agent_engine
 	if msg.Provider != "google_agent_engine" {
@@ -246,21 +266,29 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	message := msg.Message
 	var transcriptText *string
 
-	if deps.TranscribeService != nil && deps.TranscribeService.IsAudioURL(message) {
-		logger.WithField("audio_url", message).Info("Transcribing audio message")
-
-		transcript, err := deps.TranscribeService.TranscribeAudio(ctx, message)
-		if err != nil {
-			logger.WithError(err).Warn("Failed to transcribe audio, using fallback")
-			// Fallback to not block the flow (matches Python logic)
+	// Check if message is an audio URL (independent of service availability)
+	isAudioURL := isAudioURL(message)
+	
+	if isAudioURL {
+		logger.WithField("audio_url", message).Info("Detected audio URL, attempting transcription")
+		
+		if deps.TranscribeService == nil {
+			logger.Warn("Transcribe service not available, using fallback")
 			message = "Ajuda"
-		} else if transcript != "" && strings.TrimSpace(transcript) != "" && transcript != "Áudio sem conteúdo reconhecível" {
-			transcriptText = &transcript
-			message = transcript
-			logger.WithField("transcript_length", len(transcript)).Info("Audio transcribed successfully")
 		} else {
-			logger.Warn("Transcription returned no useful content, using fallback")
-			message = "Ajuda"
+			transcript, err := deps.TranscribeService.TranscribeAudio(ctx, message)
+			if err != nil {
+				logger.WithError(err).Warn("Failed to transcribe audio, using fallback")
+				// Fallback to not block the flow (matches Python logic)
+				message = "Ajuda"
+			} else if transcript != "" && strings.TrimSpace(transcript) != "" && transcript != "Áudio sem conteúdo reconhecível" {
+				transcriptText = &transcript
+				message = transcript
+				logger.WithField("transcript_length", len(transcript)).Info("Audio transcribed successfully")
+			} else {
+				logger.Warn("Transcription returned no useful content, using fallback")
+				message = "Ajuda"
+			}
 		}
 	}
 

@@ -96,3 +96,5 @@ worker
 *.bak
 *.backup
 *.old
+
+sandbox.go
