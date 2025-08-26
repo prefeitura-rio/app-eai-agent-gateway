@@ -1,0 +1,279 @@
+basePath: /
+definitions:
+  models.MessageResponse:
+    description: Message processing response
+    properties:
+      data:
+        type: object
+      error:
+        example: Error message if processing failed
+        type: string
+      status:
+        example: completed
+        type: string
+    type: object
+  models.TaskDebugInfo:
+    properties:
+      created_at:
+        type: string
+      last_error:
+        type: string
+      message_id:
+        type: string
+      processing_log:
+        items:
+          type: string
+        type: array
+      queue_info:
+        additionalProperties: true
+        type: object
+      retry_count:
+        type: integer
+      status:
+        $ref: '#/definitions/models.TaskStatus'
+      updated_at:
+        type: string
+    type: object
+  models.TaskStatus:
+    enum:
+    - pending
+    - processing
+    - completed
+    - failed
+    type: string
+    x-enum-varnames:
+    - TaskStatusPending
+    - TaskStatusProcessing
+    - TaskStatusCompleted
+    - TaskStatusFailed
+  models.UserWebhookRequest:
+    properties:
+      message:
+        example: Hello, how can you help me?
+        type: string
+      metadata:
+        additionalProperties: true
+        type: object
+      previous_message:
+        example: Previous message context
+        type: string
+      provider:
+        example: google_agent_engine
+        type: string
+      user_number:
+        example: "5521999999999"
+        type: string
+    required:
+    - message
+    - user_number
+    type: object
+  models.WebhookResponse:
+    properties:
+      message_id:
+        example: 123e4567-e89b-12d3-a456-426614174000
+        type: string
+      polling_endpoint:
+        example: /api/v1/message/response?message_id=123e4567-e89b-12d3-a456-426614174000
+        type: string
+      status:
+        example: processing
+        type: string
+    type: object
+host: localhost:8000
+info:
+  contact:
+    email: example@example.com
+    name: EAí Team
+    url: https://github.com/prefeitura-rio/app-eai-agent-gateway
+  description: Gateway service for AI agent interactions with WhatsApp integration
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  termsOfService: http://swagger.io/terms/
+  title: EAí Agent Gateway API
+  version: 0.1.0
+paths:
+  /api/v1/message/debug/task-status:
+    get:
+      consumes:
+      - application/json
+      description: Get detailed debug information about message processing task status
+      parameters:
+      - description: Message ID (UUID)
+        in: query
+        name: message_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Task debug information
+          schema:
+            $ref: '#/definitions/models.TaskDebugInfo'
+        "400":
+          description: Invalid request or message ID format
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Task not found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get task debug status
+      tags:
+      - Debug
+  /api/v1/message/response:
+    get:
+      consumes:
+      - application/json
+      description: Poll for the processing result of a message by message ID
+      parameters:
+      - description: Message ID (UUID)
+        in: query
+        name: message_id
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Message completed or failed
+          schema:
+            $ref: '#/definitions/models.MessageResponse'
+        "202":
+          description: Message still processing
+          schema:
+            $ref: '#/definitions/models.MessageResponse'
+        "400":
+          description: Invalid request or message ID format
+          schema:
+            additionalProperties: true
+            type: object
+        "404":
+          description: Message not found
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Get message response
+      tags:
+      - Messages
+  /api/v1/message/webhook/user:
+    post:
+      consumes:
+      - application/json
+      description: Accepts a user message and queues it for processing by AI agents
+      parameters:
+      - description: User message request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.UserWebhookRequest'
+      produces:
+      - application/json
+      responses:
+        "202":
+          description: Message queued successfully
+          schema:
+            $ref: '#/definitions/models.WebhookResponse'
+        "400":
+          description: Invalid request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Process user message webhook
+      tags:
+      - Messages
+  /health:
+    get:
+      consumes:
+      - application/json
+      description: Returns the health status of the service and its dependencies
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Service is healthy
+          schema:
+            additionalProperties: true
+            type: object
+        "503":
+          description: Service is unhealthy
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Health check
+      tags:
+      - Health
+  /live:
+    get:
+      consumes:
+      - application/json
+      description: Returns whether the service is alive (for Kubernetes liveness probe)
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Service is alive
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Liveness check
+      tags:
+      - Health
+  /ready:
+    get:
+      consumes:
+      - application/json
+      description: Returns whether the service is ready to handle requests
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: Service is ready
+          schema:
+            additionalProperties: true
+            type: object
+        "503":
+          description: Service is not ready
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Readiness check
+      tags:
+      - Health
+produces:
+- application/json
+schemes:
+- http
+- https
+securityDefinitions:
+  BasicAuth:
+    type: basic
+swagger: "2.0"
+tags:
+- description: Health check endpoints for monitoring
+  name: Health
+- description: Message processing endpoints for webhooks and responses
+  name: Messages
+- description: Debug and troubleshooting endpoints
+  name: Debug
+x-extension-openapi:
+  example: value on a json format

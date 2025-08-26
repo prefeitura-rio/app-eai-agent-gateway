@@ -25,15 +25,32 @@
           with pkgs;
           mkShell {
             packages = [
+              # Go development
+              go
+              air # Go hot reload
+              golangci-lint
+              
+              # Swagger documentation (will be installed via go install)
+              # swag tool available via `go install github.com/swaggo/swag/cmd/swag@latest`
+              
+              # Docker
+              docker-compose
+              
+              # Development tools
+              just
+              k6
+              curl
+              jq
+              
+              # Python (for scripts/analysis)
               (python313.withPackages (ps: with ps; [
                 matplotlib
                 numpy
                 pandas
+                requests
                 seaborn
               ]))
               uv
-              k6
-              just
             ];
 
             LD_LIBRARY_PATH = lib.makeLibraryPath [

@@ -1,5 +1,5 @@
 ---
-# API
+# API Gateway
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,43 +14,85 @@ spec:
     metadata:
       labels:
         app: eai-agent-gateway
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
       automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: eai-agent-gateway
           image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+          command: ["/app/gateway"]
           envFrom:
             - secretRef:
                 name: eai-agent-gateway-secrets
+          env:
+            - name: SERVER_PORT
+              value: "8000"
+            - name: METRICS_PORT
+              value: "8080"
+            - name: GIN_MODE
+              value: "release"
+            - name: LOG_LEVEL
+              value: "warn"
+            - name: LOG_FORMAT
+              value: "json"
           resources:
             requests:
-              ephemeral-storage: 100Mi
-              cpu: 1000m
-              memory: 1024Mi
+              ephemeral-storage: 500Mi
+              cpu: 500m
+              memory: 1Gi
             limits:
+              ephemeral-storage: 2Gi
               cpu: 2000m
-              memory: 1536Mi
+              memory: 2Gi
           readinessProbe:
             httpGet:
-              path: /docs
+              path: /ready
               port: 8000
             initialDelaySeconds: 5
             periodSeconds: 10
-            timeoutSeconds: 3
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
-              path: /docs
+              path: /live
               port: 8000
-            initialDelaySeconds: 15
-            periodSeconds: 20
-            timeoutSeconds: 3
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 12
           ports:
             - containerPort: 8000
               name: http
+              protocol: TCP
+            - containerPort: 8080
+              name: metrics
+              protocol: TCP
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
       restartPolicy: Always
 
 ---
-# Worker
+# Message Workers
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -67,30 +109,80 @@ spec:
         app: eai-agent-gateway-worker
     spec:
       automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
       containers:
         - name: eai-agent-gateway-worker
           image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
-          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery worker --pool=${CELERY_WORKER_POOL:-threads} --concurrency=${MAX_PARALLEL:-20} --loglevel=${CELERY_LOG_LEVEL:-info}"]
+          command: ["/app/worker"]
           envFrom:
             - secretRef:
                 name: eai-agent-gateway-secrets
           env:
-            - name: CELERY_WORKER_POOL
-              value: "threads"
-            - name: MAX_PARALLEL
-              value: "20"
+            - name: LOG_LEVEL
+              value: "warn"
+            - name: LOG_FORMAT
+              value: "json"
           resources:
             requests:
-              ephemeral-storage: 100Mi
-              cpu: 500m
-              memory: 1024Mi
+              ephemeral-storage: 1Gi
+              cpu: 1000m
+              memory: 2Gi
             limits:
-              cpu: 2000m
-              memory: 2048Mi
+              ephemeral-storage: 4Gi
+              cpu: 4000m
+              memory: 4Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
       restartPolicy: Always
 
 ---
-# Pod Disruption Budget for Worker
+# API Gateway Service
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: eai-agent-gateway
+  name: eai-agent-gateway
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8080"
+    prometheus.io/path: "/metrics"
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+      protocol: TCP
+    - name: metrics
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  selector:
+    app: eai-agent-gateway
+
+---
+# Pod Disruption Budget for API
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: eai-agent-gateway-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: eai-agent-gateway
+
+---
+# Pod Disruption Budget for Workers
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -100,68 +192,3 @@ spec:
   selector:
     matchLabels:
       app: eai-agent-gateway-worker
-
----
-# Flower
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: eai-agent-gateway-flower
-  annotations:
-    reloader.stakater.com/auto: "true"
-spec:
-  selector:
-    matchLabels:
-      app: eai-agent-gateway-flower
-  template:
-    metadata:
-      labels:
-        app: eai-agent-gateway-flower
-    spec:
-      automountServiceAccountToken: false
-      containers:
-        - name: eai-agent-gateway-flower
-          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
-          command: ["/bin/sh", "-c", "uv run celery -A src.queue.celery_app.celery flower --port=${FLOWER_PORT:-5555}"]
-          envFrom:
-            - secretRef:
-                name: eai-agent-gateway-secrets
-          resources:
-            requests:
-              ephemeral-storage: 100Mi
-              cpu: 1000m
-              memory: 512Mi
-            limits:
-              cpu: 2000m
-              memory: 1024Mi
-      restartPolicy: Always
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    app: eai-agent-gateway
-  name: eai-agent-gateway
-spec:
-  ports:
-    - name: "80"
-      port: 80
-      targetPort: 8000
-  selector:
-    app: eai-agent-gateway
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  labels:
-    app: eai-agent-gateway-flower
-  name: eai-agent-gateway-flower
-spec:
-  ports:
-    - name: "5555"
-      port: 5555
-      targetPort: 5555
-  selector:
-    app: eai-agent-gateway-flower

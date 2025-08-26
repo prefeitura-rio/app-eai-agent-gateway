@@ -1,65 +1,120 @@
 # Git
-.git
+.git/
 .gitignore
+.gitmodules
 
 # Documentation
-README.md
+*.md
 docs/
+*.txt
 
-# CI/CD
-.github/
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-venv.bak/
-
-# IDE
+# Development files
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS
-.DS_Store
-Thumbs.db
+# Build artifacts
+bin/
+build/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test files
+*_test.go
+test/
+coverage.out
+coverage.html
+
+# Go mod cache (will be downloaded in container)
+vendor/
+
+# Local development
+.env  # Note: Temporarily copied via Dockerfile COPY .env* for Docker Compose development
+.env.local
+.env.development
+.env.test
 
 # Logs
 *.log
+logs/
 
-# Testing
-.coverage
-.pytest_cache/
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Python files (legacy)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
 .tox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesis
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # Temporary files
-.tmp/
-temp/
 tmp/
+temp/
+*.tmp
+
+# IDE files
+*.code-workspace
+
+# Docker files
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+.circleci/
+
+# Kubernetes
+deployments/k8s/
+*.yaml
+*.yml
+
+# Certificates and keys
+*.key
+*.crt
+*.pem
+*.p12
+*.pfx
+
+# Backup files
+*.bak
+*.backup
+*.old
