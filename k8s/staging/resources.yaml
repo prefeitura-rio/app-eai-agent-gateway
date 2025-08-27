@@ -222,7 +222,7 @@ spec:
     - type: rabbitmq
       metadata:
         protocol: http
-        host: "http://rabbitmq:15672"
+        host: "http://rabbitmq.eai-agent-gateway.svc.cluster.local:15672"
         queueName: user_messages
         mode: QueueLength
         value: "100"
