@@ -804,6 +804,14 @@ func isRetriableError(err error) bool {
 			strings.Contains(errorStr, "network") {
 			return true
 		}
+		
+		// Check for transient execution failures
+		if strings.Contains(errorStr, "agent engine error") ||
+			strings.Contains(errorStr, "an error occurred during invocation") ||
+			strings.Contains(errorStr, "failed_precondition") ||
+			strings.Contains(errorStr, "execution failed") {
+			return true
+		}
 	}
 	
 	// Check for network.Error interface
