@@ -87,44 +87,58 @@ def create_histograms(data, output_dir="charts"):
     # 1. All Messages Histogram
     if 'message_completion_time' in metrics:
         times = metrics['message_completion_time']['values']
-        # Use Sturges' rule for optimal bin count: bins = 1 + 3.322 * log10(n)
-        bins = max(10, min(50, int(1 + 3.322 * np.log10(len(times)))))
-        axes[0, 0].hist(times, bins=bins, alpha=0.7, color='skyblue', edgecolor='black')
-        axes[0, 0].set_title('All Messages Completion Time')
-        axes[0, 0].set_xlabel('Time (ms)')
-        axes[0, 0].set_ylabel('Frequency')
-        axes[0, 0].axvline(np.mean(times), color='red', linestyle='--', label=f'Mean: {np.mean(times):.0f}ms')
-        axes[0, 0].axvline(np.percentile(times, 95), color='orange', linestyle='--', label=f'P95: {np.percentile(times, 95):.0f}ms')
-        axes[0, 0].legend()
+        if len(times) > 0:
+            # Use Sturges' rule for optimal bin count: bins = 1 + 3.322 * log10(n)
+            bins = max(10, min(50, int(1 + 3.322 * np.log10(len(times)))))
+            axes[0, 0].hist(times, bins=bins, alpha=0.7, color='skyblue', edgecolor='black')
+            axes[0, 0].set_title('All Messages Completion Time')
+            axes[0, 0].set_xlabel('Time (ms)')
+            axes[0, 0].set_ylabel('Frequency')
+            axes[0, 0].axvline(np.mean(times), color='red', linestyle='--', label=f'Mean: {np.mean(times):.0f}ms')
+            axes[0, 0].axvline(np.percentile(times, 95), color='orange', linestyle='--', label=f'P95: {np.percentile(times, 95):.0f}ms')
+            axes[0, 0].legend()
+        else:
+            axes[0, 0].text(0.5, 0.5, 'No message data', transform=axes[0, 0].transAxes, 
+                           ha='center', va='center', fontsize=14, color='gray')
+            axes[0, 0].set_title('All Messages Completion Time')
         axes[0, 0].grid(True, alpha=0.3)
     
     # 2. Successful Messages Histogram
     if 'successful_message_completion_time' in metrics:
         times = metrics['successful_message_completion_time']['values']
-        # Use Sturges' rule for optimal bin count: bins = 1 + 3.322 * log10(n)
-        bins = max(10, min(50, int(1 + 3.322 * np.log10(len(times)))))
-        axes[0, 1].hist(times, bins=bins, alpha=0.7, color='lightgreen', edgecolor='black')
-        axes[0, 1].set_title('Successful Messages Completion Time')
-        axes[0, 1].set_xlabel('Time (ms)')
-        axes[0, 1].set_ylabel('Frequency')
-        axes[0, 1].axvline(np.mean(times), color='red', linestyle='--', label=f'Mean: {np.mean(times):.0f}ms')
-        axes[0, 1].axvline(np.percentile(times, 95), color='orange', linestyle='--', label=f'P95: {np.percentile(times, 95):.0f}ms')
-        axes[0, 1].legend()
+        if len(times) > 0:
+            # Use Sturges' rule for optimal bin count: bins = 1 + 3.322 * log10(n)
+            bins = max(10, min(50, int(1 + 3.322 * np.log10(len(times)))))
+            axes[0, 1].hist(times, bins=bins, alpha=0.7, color='lightgreen', edgecolor='black')
+            axes[0, 1].set_title('Successful Messages Completion Time')
+            axes[0, 1].set_xlabel('Time (ms)')
+            axes[0, 1].set_ylabel('Frequency')
+            axes[0, 1].axvline(np.mean(times), color='red', linestyle='--', label=f'Mean: {np.mean(times):.0f}ms')
+            axes[0, 1].axvline(np.percentile(times, 95), color='orange', linestyle='--', label=f'P95: {np.percentile(times, 95):.0f}ms')
+            axes[0, 1].legend()
+        else:
+            axes[0, 1].text(0.5, 0.5, 'No successful messages', transform=axes[0, 1].transAxes, 
+                           ha='center', va='center', fontsize=14, color='orange')
+            axes[0, 1].set_title('Successful Messages Completion Time')
         axes[0, 1].grid(True, alpha=0.3)
     
     # 3. Failed Messages Histogram
     if 'failed_message_completion_time' in metrics:
         times = metrics['failed_message_completion_time']['values']
-        # Use Sturges' rule for optimal bin count: bins = 1 + 3.322 * log10(n)
-        bins = max(10, min(50, int(1 + 3.322 * np.log10(len(times)))))
-        axes[1, 0].hist(times, bins=bins, alpha=0.7, color='lightcoral', edgecolor='black')
-        axes[1, 0].set_title('Failed Messages Completion Time')
-        axes[1, 0].set_xlabel('Time (ms)')
-        axes[1, 0].set_ylabel('Frequency')
         if len(times) > 0:
+            # Use Sturges' rule for optimal bin count: bins = 1 + 3.322 * log10(n)
+            bins = max(10, min(50, int(1 + 3.322 * np.log10(len(times)))))
+            axes[1, 0].hist(times, bins=bins, alpha=0.7, color='lightcoral', edgecolor='black')
+            axes[1, 0].set_title('Failed Messages Completion Time')
+            axes[1, 0].set_xlabel('Time (ms)')
+            axes[1, 0].set_ylabel('Frequency')
             axes[1, 0].axvline(np.mean(times), color='red', linestyle='--', label=f'Mean: {np.mean(times):.0f}ms')
             axes[1, 0].axvline(np.percentile(times, 95), color='orange', linestyle='--', label=f'P95: {np.percentile(times, 95):.0f}ms')
             axes[1, 0].legend()
+        else:
+            axes[1, 0].text(0.5, 0.5, 'No failed messages', transform=axes[1, 0].transAxes, 
+                           ha='center', va='center', fontsize=14, color='green')
+            axes[1, 0].set_title('Failed Messages Completion Time')
         axes[1, 0].grid(True, alpha=0.3)
     
     # 4. Success Rate Pie Chart
@@ -198,7 +212,7 @@ def create_detailed_analysis(data, output_dir="charts"):
                 all_labels.append(metric_name.replace('_', ' ').title())
     
     if all_data:
-        axes[1].boxplot(all_data, labels=all_labels)
+        axes[1].boxplot(all_data, tick_labels=all_labels)
         axes[1].set_ylabel('Time (ms)')
         axes[1].set_title('Distribution Box Plot')
         axes[1].grid(True, alpha=0.3)
