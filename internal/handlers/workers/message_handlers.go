@@ -131,6 +131,23 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 		if deps.OTelWorkerWrapper != nil {
 			// Wrap with OpenTelemetry tracing
 			err = deps.OTelWorkerWrapper.WrapWorkerTask(ctx, "user_message_worker", "process_user_message", func(tracedCtx context.Context) error {
+				// Detect message type early for tracing attributes
+				isAudio := isAudioURL(queueMsg.Message)
+				
+				// Add message type attribute to current span if possible
+				if span := trace.SpanFromContext(tracedCtx); span.IsRecording() {
+					span.SetAttributes(
+						attribute.Bool("message.is_audio", isAudio),
+						attribute.String("message.type", func() string {
+							if isAudio {
+								return "audio"
+							}
+							return "text"
+						}()),
+						attribute.Int("message.length", len(queueMsg.Message)),
+					)
+				}
+				
 				response, err = processUserMessage(tracedCtx, &queueMsg, deps)
 				return err
 			})
