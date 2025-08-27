@@ -187,7 +187,7 @@ func (r *RabbitMQService) processMessage(ctx context.Context, msg amqp.Delivery,
 	logger.Debug("Processing message")
 
 	// Create a context with timeout for message processing
-	msgCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	msgCtx, cancel := context.WithTimeout(ctx, r.config.RabbitMQ.MessageTimeout)
 	defer cancel()
 
 	// Process the message
@@ -242,7 +242,7 @@ func (c *Consumer) processMessageWithRetry(ctx context.Context, msg amqp.Deliver
 	maxRetries := int64(c.rabbitMQ.config.RabbitMQ.MaxRetries)
 
 	// Create a context with timeout for message processing
-	msgCtx, cancel := context.WithTimeout(ctx, time.Duration(c.rabbitMQ.config.RabbitMQ.RetryDelay)*time.Second)
+	msgCtx, cancel := context.WithTimeout(ctx, c.rabbitMQ.config.RabbitMQ.MessageTimeout)
 	defer cancel()
 
 	// Process the message

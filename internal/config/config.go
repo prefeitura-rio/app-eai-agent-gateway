@@ -58,10 +58,11 @@ type RabbitMQConfig struct {
 	UserMessagesQueue string `mapstructure:"RABBITMQ_USER_MESSAGES_QUEUE"`
 	DLXExchange       string `mapstructure:"RABBITMQ_DLX_EXCHANGE"`
 	MaxParallel       int    `mapstructure:"MAX_PARALLEL"`
-	MaxRetries        int    `mapstructure:"RABBITMQ_MAX_RETRIES"`
-	RetryDelay        int    `mapstructure:"RABBITMQ_RETRY_DELAY"`
-	SoftTimeLimit     int    `mapstructure:"CELERY_SOFT_TIME_LIMIT"`
-	HardTimeLimit     int    `mapstructure:"CELERY_TIME_LIMIT"`
+	MaxRetries           int           `mapstructure:"RABBITMQ_MAX_RETRIES"`
+	RetryDelay           int           `mapstructure:"RABBITMQ_RETRY_DELAY"`
+	MessageTimeout       time.Duration `mapstructure:"RABBITMQ_MESSAGE_TIMEOUT"`
+	SoftTimeLimit        int           `mapstructure:"CELERY_SOFT_TIME_LIMIT"`
+	HardTimeLimit        int           `mapstructure:"CELERY_TIME_LIMIT"`
 }
 
 type RedisConfig struct {
@@ -231,6 +232,7 @@ func setDefaults() {
 	viper.SetDefault("RABBITMQ_DLX_EXCHANGE", "eai_gateway_dlx")
 	viper.SetDefault("RABBITMQ_MAX_RETRIES", 3)
 	viper.SetDefault("RABBITMQ_RETRY_DELAY", 30)
+	viper.SetDefault("RABBITMQ_MESSAGE_TIMEOUT", "2000s") // 33+ minutes to allow Google API calls
 	viper.SetDefault("CELERY_SOFT_TIME_LIMIT", 90)
 	viper.SetDefault("CELERY_TIME_LIMIT", 120)
 
@@ -372,6 +374,7 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("RABBITMQ_DLX_EXCHANGE")
 	_ = viper.BindEnv("RABBITMQ_MAX_RETRIES")
 	_ = viper.BindEnv("RABBITMQ_RETRY_DELAY")
+	_ = viper.BindEnv("RABBITMQ_MESSAGE_TIMEOUT")
 	_ = viper.BindEnv("CELERY_SOFT_TIME_LIMIT")
 	_ = viper.BindEnv("CELERY_TIME_LIMIT")
 
