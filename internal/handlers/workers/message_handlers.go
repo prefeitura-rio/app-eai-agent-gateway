@@ -185,7 +185,11 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			shouldRetry := isRetriableError(err)
 			
 			if shouldRetry {
-				logger.WithField("retriable", true).Warn("Error is retriable, will be retried by RabbitMQ")
+				logger.WithFields(logrus.Fields{
+					"retriable": true,
+					"error_type": "retriable",
+					"error_message": err.Error(),
+				}).Warn("Error is retriable, will be retried by RabbitMQ")
 				// Update task status to processing (keep it processing for retry)
 				if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusProcessing), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
 					logger.WithError(statusErr).Error("Failed to update task status to processing for retry")
@@ -203,7 +207,11 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				// Return error to trigger RabbitMQ retry
 				return err
 			} else {
-				logger.WithField("retriable", false).Error("Error is permanent, marking task as failed")
+				logger.WithFields(logrus.Fields{
+					"retriable": false,
+					"error_type": "permanent",
+					"error_message": err.Error(),
+				}).Error("Error is permanent, marking task as failed")
 				// Update task status to failed for permanent errors
 				if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusFailed), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
 					logger.WithError(statusErr).Error("Failed to update task status to failed")
@@ -752,7 +760,11 @@ func isRetriableError(err error) bool {
 		strings.Contains(errorStr, "network unreachable") ||
 		strings.Contains(errorStr, "no route to host") ||
 		strings.Contains(errorStr, "connection reset") ||
-		strings.Contains(errorStr, "broken pipe") {
+		strings.Contains(errorStr, "connection was closed") ||
+		strings.Contains(errorStr, "connection closed") ||
+		strings.Contains(errorStr, "broken pipe") ||
+		strings.Contains(errorStr, "connection lost") ||
+		strings.Contains(errorStr, "connection interrupted") {
 		return true
 	}
 	
@@ -781,6 +793,19 @@ func isRetriableError(err error) bool {
 		return true
 	}
 	
+	// Google Reasoning Engine specific errors - check inner error details
+	if strings.Contains(errorStr, "reasoning engine execution failed") {
+		// Look for connection issues in the nested error details
+		if strings.Contains(errorStr, "connection was closed") ||
+			strings.Contains(errorStr, "connection lost") ||
+			strings.Contains(errorStr, "connection interrupted") ||
+			strings.Contains(errorStr, "connection reset") ||
+			strings.Contains(errorStr, "timeout") ||
+			strings.Contains(errorStr, "network") {
+			return true
+		}
+	}
+	
 	// Check for network.Error interface
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		return true
@@ -788,7 +813,7 @@ func isRetriableError(err error) bool {
 	
 	// Permanent failures - should NOT be retried:
 	// - Authentication errors (401, 403, invalid credentials)
-	// - Client errors (400, 404, malformed requests)
+	// - Client errors (400, 404, malformed requests) WITHOUT underlying connection issues
 	// - Application logic errors (invalid input, etc.)
 	
 	return false
