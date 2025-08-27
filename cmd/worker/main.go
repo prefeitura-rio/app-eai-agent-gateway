@@ -116,6 +116,12 @@ func main() {
 		TranscribeService:  transcribeAdapter,
 		MessageFormatter:   messageFormatterService,
 		OTelWorkerWrapper:  otelWorkerWrapper, // Optional OTel wrapper
+		TracePropagator:    func() *middleware.TraceCorrelationPropagator {
+			if otelService != nil {
+				return middleware.NewTraceCorrelationPropagator(otelService)
+			}
+			return nil
+		}(), // Optional trace propagator for distributed tracing
 	}
 
 	// Create message handler

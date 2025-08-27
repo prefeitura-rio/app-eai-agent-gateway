@@ -63,7 +63,12 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			cfg.Observability.ReadinessCheckTimeout,
 			logger,
 		),
-		messageHandler: handlers.NewMessageHandler(logger, cfg, redisService, rabbitMQService),
+		messageHandler: handlers.NewMessageHandler(logger, cfg, redisService, rabbitMQService, func() *middleware.TraceCorrelationPropagator {
+			if otelService != nil {
+				return middleware.NewTraceCorrelationPropagator(otelService)
+			}
+			return nil
+		}()),
 	}
 
 	// Add services to health checks

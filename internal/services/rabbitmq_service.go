@@ -273,6 +273,62 @@ func (r *RabbitMQService) PublishMessage(ctx context.Context, queueName string, 
 	return nil
 }
 
+// PublishMessageWithHeaders publishes a message with custom headers (for trace context)
+func (r *RabbitMQService) PublishMessageWithHeaders(ctx context.Context, queueName string, message interface{}, headers map[string]interface{}) error {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	if !r.isConnected {
+		return fmt.Errorf("RabbitMQ connection is not available")
+	}
+
+	// Serialize message to JSON
+	body, err := json.Marshal(message)
+	if err != nil {
+		return fmt.Errorf("failed to marshal message: %w", err)
+	}
+
+	// Convert headers to AMQP Table
+	amqpHeaders := amqp.Table{}
+	for k, v := range headers {
+		amqpHeaders[k] = v
+	}
+
+	// Publish message with headers
+	err = r.channel.PublishWithContext(
+		ctx,
+		r.config.RabbitMQ.Exchange, // exchange
+		queueName,                  // routing key
+		false,                      // mandatory
+		false,                      // immediate
+		amqp.Publishing{
+			ContentType:  "application/json",
+			Body:         body,
+			DeliveryMode: amqp.Persistent, // Make message persistent
+			Timestamp:    time.Now(),
+			MessageId:    fmt.Sprintf("%d", time.Now().UnixNano()),
+			Headers:      amqpHeaders, // Include trace headers
+		},
+	)
+
+	if err != nil {
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"queue":   queueName,
+			"message": string(body),
+			"headers": headers,
+		}).Error("Failed to publish message with headers")
+		return fmt.Errorf("failed to publish message with headers: %w", err)
+	}
+
+	r.logger.WithFields(logrus.Fields{
+		"queue":      queueName,
+		"message_id": fmt.Sprintf("%d", time.Now().UnixNano()),
+		"headers":    headers,
+	}).Debug("Message with headers published successfully")
+
+	return nil
+}
+
 // PublishMessageWithDelay publishes a message with a delay using RabbitMQ delayed message plugin
 func (r *RabbitMQService) PublishMessageWithDelay(ctx context.Context, queueName string, message interface{}, delay time.Duration) error {
 	r.mutex.RLock()

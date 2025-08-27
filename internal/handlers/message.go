@@ -8,8 +8,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/middleware"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
 )
 
@@ -26,15 +29,17 @@ type RedisServiceInterface interface {
 // RabbitMQServiceInterface defines RabbitMQ operations needed by MessageHandler
 type RabbitMQServiceInterface interface {
 	PublishMessage(ctx context.Context, queueName string, message interface{}) error
+	PublishMessageWithHeaders(ctx context.Context, queueName string, message interface{}, headers map[string]interface{}) error
 	IsConnected() bool
 }
 
 // MessageHandler handles message processing endpoints
 type MessageHandler struct {
-	logger          *logrus.Logger
-	config          *config.Config
-	redisService    RedisServiceInterface
-	rabbitMQService RabbitMQServiceInterface
+	logger               *logrus.Logger
+	config               *config.Config
+	redisService         RedisServiceInterface
+	rabbitMQService      RabbitMQServiceInterface
+	tracePropagator      *middleware.TraceCorrelationPropagator // Optional for distributed tracing
 }
 
 // NewMessageHandler creates a new message handler
@@ -43,12 +48,14 @@ func NewMessageHandler(
 	config *config.Config,
 	redisService RedisServiceInterface,
 	rabbitMQService RabbitMQServiceInterface,
+	tracePropagator *middleware.TraceCorrelationPropagator,
 ) *MessageHandler {
 	return &MessageHandler{
 		logger:          logger,
 		config:          config,
 		redisService:    redisService,
 		rabbitMQService: rabbitMQService,
+		tracePropagator: tracePropagator,
 	}
 }
 
@@ -92,13 +99,41 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 		"message_length":       len(req.Message),
 	})
 
+	// Create distributed tracing span for end-to-end tracking
+	var span trace.Span
+	var traceHeaders map[string]interface{}
+	ctx := c.Request.Context()
+	
+	if h.tracePropagator != nil {
+		ctx, span = h.tracePropagator.CreateChildSpan(ctx, "user_message_e2e",
+			attribute.String("message.id", messageID),
+			attribute.String("user.number", req.UserNumber),
+			attribute.String("provider", provider),
+			attribute.Int("message.length", len(req.Message)),
+			attribute.Bool("message.is_audio", isAudioURL(req.Message)),
+			attribute.String("message.type", func() string {
+				if isAudioURL(req.Message) {
+					return "audio"
+				}
+				return "text"
+			}()),
+		)
+		defer span.End()
+		
+		// Inject trace context into headers for RabbitMQ
+		traceHeaders = make(map[string]interface{})
+		for k, v := range h.tracePropagator.InjectTraceContext(ctx) {
+			traceHeaders[k] = v
+		}
+	}
+
 	logger.Info("Processing user webhook request")
 
 	// Store initial status to handle immediate polling (like Python API)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if err := h.redisService.SetTaskStatus(ctx, messageID, string(models.TaskStatusProcessing), h.config.Redis.TaskStatusTTL); err != nil {
+	if err := h.redisService.SetTaskStatus(ctxTimeout, messageID, string(models.TaskStatusProcessing), h.config.Redis.TaskStatusTTL); err != nil {
 		logger.WithError(err).Error("Failed to set initial task status")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Internal server error",
@@ -133,15 +168,30 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	}
 	if metadataBytes, err := json.Marshal(metadataForResponse); err == nil {
 		metadataKey := "task:metadata:" + messageID
-		_ = h.redisService.Set(ctx, metadataKey, string(metadataBytes), h.config.Redis.TaskStatusTTL)
+		_ = h.redisService.Set(ctxTimeout, metadataKey, string(metadataBytes), h.config.Redis.TaskStatusTTL)
 	}
 
-	// Queue message for processing
-	if err := h.rabbitMQService.PublishMessage(ctx, h.config.RabbitMQ.UserMessagesQueue, queueMessage); err != nil {
+	// Queue message for processing with trace headers
+	var err error
+	if traceHeaders != nil && h.rabbitMQService != nil {
+		// Use interface that supports headers if tracing is enabled
+		if publisherWithHeaders, ok := h.rabbitMQService.(interface {
+			PublishMessageWithHeaders(ctx context.Context, queueName string, message interface{}, headers map[string]interface{}) error
+		}); ok {
+			err = publisherWithHeaders.PublishMessageWithHeaders(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage, traceHeaders)
+		} else {
+			// Fallback to regular publish
+			err = h.rabbitMQService.PublishMessage(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage)
+		}
+	} else {
+		err = h.rabbitMQService.PublishMessage(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage)
+	}
+	
+	if err != nil {
 		logger.WithError(err).Error("Failed to queue user message")
 
 		// Update task status to failed
-		_ = h.redisService.SetTaskStatus(ctx, messageID, string(models.TaskStatusFailed), h.config.Redis.TaskStatusTTL)
+		_ = h.redisService.SetTaskStatus(ctxTimeout, messageID, string(models.TaskStatusFailed), h.config.Redis.TaskStatusTTL)
 
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Internal server error",
@@ -188,11 +238,35 @@ func (h *MessageHandler) HandleMessageResponse(c *gin.Context) {
 	logger := h.logger.WithField("message_id", req.MessageID)
 	logger.Debug("Handling message response request")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// Start with request context
+	ctx := c.Request.Context()
+	
+	// Try to extract trace context from stored result if available
+	if h.tracePropagator != nil {
+		traceKey := "task:trace:" + req.MessageID
+		if traceData, err := h.redisService.Get(ctx, traceKey); err == nil && traceData != "" {
+			var traceHeaders map[string]string
+			if err := json.Unmarshal([]byte(traceData), &traceHeaders); err == nil && len(traceHeaders) > 0 {
+				ctx = h.tracePropagator.ExtractTraceContext(ctx, traceHeaders)
+				logger.Debug("Extracted stored trace context for response delivery")
+			}
+		}
+	}
+
+	// Create span for response delivery
+	var span trace.Span
+	if h.tracePropagator != nil {
+		ctx, span = h.tracePropagator.CreateChildSpan(ctx, "deliver_response",
+			attribute.String("message.id", req.MessageID),
+		)
+		defer span.End()
+	}
+
+	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	// Get task status from Redis
-	status, err := h.redisService.GetTaskStatus(ctx, req.MessageID)
+	status, err := h.redisService.GetTaskStatus(ctxTimeout, req.MessageID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to get task status")
 		c.JSON(http.StatusNotFound, gin.H{
@@ -209,7 +283,7 @@ func (h *MessageHandler) HandleMessageResponse(c *gin.Context) {
 	// If task is completed, get the result
 	if status == string(models.TaskStatusCompleted) {
 		var result string
-		if err := h.redisService.GetTaskResult(ctx, req.MessageID, &result); err != nil {
+		if err := h.redisService.GetTaskResult(ctxTimeout, req.MessageID, &result); err != nil {
 			logger.WithError(err).Warn("Task completed but no result found")
 		} else {
 			// The result is already processed by the worker and contains the final ProcessedMessageData
@@ -235,9 +309,18 @@ func (h *MessageHandler) HandleMessageResponse(c *gin.Context) {
 	if status == string(models.TaskStatusFailed) {
 		// Try to get error details from Redis (could be stored by worker)
 		errorKey := "task:error:" + req.MessageID
-		if errorMsg, err := h.redisService.Get(ctx, errorKey); err == nil {
+		if errorMsg, err := h.redisService.Get(ctxTimeout, errorKey); err == nil {
 			response.Error = &errorMsg
 		}
+	}
+
+	// Add response attributes to tracing span
+	if span != nil {
+		span.SetAttributes(
+			attribute.String("response.status", status),
+			attribute.Bool("response.has_data", response.Data != nil),
+			attribute.Bool("response.has_error", response.Error != nil),
+		)
 	}
 
 	logger.WithField("status", status).Debug("Returning message response")
@@ -356,4 +439,15 @@ func parseRetryCount(s string) int {
 		return 3
 	}
 	return -1 // Invalid
+}
+
+// isAudioURL checks if the URL appears to be an audio file
+func isAudioURL(url string) bool {
+	audioExtensions := []string{".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".wma"}
+	for _, ext := range audioExtensions {
+		if len(url) >= len(ext) && url[len(url)-len(ext):] == ext {
+			return true
+		}
+	}
+	return false
 }

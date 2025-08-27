@@ -27,7 +27,8 @@ type MessageHandlerDependencies struct {
 	GoogleAgentService *services.GoogleAgentEngineService
 	TranscribeService  TranscribeServiceInterface
 	MessageFormatter   MessageFormatterInterface
-	OTelWorkerWrapper  *middleware.OTelWorkerWrapper // Optional OTel wrapper
+	OTelWorkerWrapper  *middleware.OTelWorkerWrapper        // Optional OTel wrapper
+	TracePropagator    *middleware.TraceCorrelationPropagator // Optional trace propagator
 }
 
 // TranscribeServiceInterface defines audio transcription operations
@@ -101,6 +102,20 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			"delivery_tag": delivery.DeliveryTag,
 			"message_id":   delivery.MessageId,
 		})
+
+		// Extract trace context from RabbitMQ headers if available
+		if deps.TracePropagator != nil && delivery.Headers != nil {
+			traceHeaders := make(map[string]string)
+			for k, v := range delivery.Headers {
+				if str, ok := v.(string); ok {
+					traceHeaders[k] = str
+				}
+			}
+			if len(traceHeaders) > 0 {
+				ctx = deps.TracePropagator.ExtractTraceContext(ctx, traceHeaders)
+				logger.Debug("Extracted distributed trace context from RabbitMQ headers")
+			}
+		}
 
 		logger.Info("Processing user message")
 
@@ -178,6 +193,17 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 		if err := deps.RedisService.SetTaskResult(ctx, queueMsg.ID, response, deps.Config.Redis.TaskResultTTL); err != nil {
 			logger.WithError(err).Error("Failed to store task result")
 			// Don't fail the message processing for Redis storage issues
+		}
+
+		// Store trace context with result for end-to-end tracing
+		if deps.TracePropagator != nil {
+			traceHeaders := deps.TracePropagator.InjectTraceContext(ctx)
+			if len(traceHeaders) > 0 {
+				traceKey := "task:trace:" + queueMsg.ID
+				if traceBytes, err := json.Marshal(traceHeaders); err == nil {
+					_ = deps.RedisService.Set(ctx, traceKey, string(traceBytes), deps.Config.Redis.TaskResultTTL)
+				}
+			}
 		}
 
 		// Update task status to completed
