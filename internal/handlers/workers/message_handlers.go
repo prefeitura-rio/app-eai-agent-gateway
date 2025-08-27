@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -180,13 +181,46 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				logger.WithError(redisErr).Error("Failed to store error in Redis")
 			}
 
-			// Update task status to failed
-			if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusFailed), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
-				logger.WithError(statusErr).Error("Failed to update task status to failed")
+			// Determine if this error should be retried
+			shouldRetry := isRetriableError(err)
+			
+			if shouldRetry {
+				logger.WithField("retriable", true).Warn("Error is retriable, will be retried by RabbitMQ")
+				// Update task status to processing (keep it processing for retry)
+				if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusProcessing), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
+					logger.WithError(statusErr).Error("Failed to update task status to processing for retry")
+				}
+				// Add retriable error attributes to the main span if available
+				if deps.OTelWorkerWrapper != nil {
+					if span := trace.SpanFromContext(ctx); span.IsRecording() {
+						span.SetAttributes(
+							attribute.Bool("task.will_retry", true),
+							attribute.String("task.error_type", "retriable"),
+							attribute.String("task.error", err.Error()),
+						)
+					}
+				}
+				// Return error to trigger RabbitMQ retry
+				return err
+			} else {
+				logger.WithField("retriable", false).Error("Error is permanent, marking task as failed")
+				// Update task status to failed for permanent errors
+				if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusFailed), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
+					logger.WithError(statusErr).Error("Failed to update task status to failed")
+				}
+				// Add permanent error attributes to the main span if available
+				if deps.OTelWorkerWrapper != nil {
+					if span := trace.SpanFromContext(ctx); span.IsRecording() {
+						span.SetAttributes(
+							attribute.Bool("task.will_retry", false),
+							attribute.String("task.error_type", "permanent"),
+							attribute.String("task.error", err.Error()),
+						)
+					}
+				}
+				// Return nil to prevent retry for permanent failures
+				return nil
 			}
-
-			// Return success to prevent infinite retries (service layer will handle ack)
-			return nil
 		}
 
 		// Store the response in Redis
@@ -209,6 +243,18 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 		// Update task status to completed
 		if err := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusCompleted), deps.Config.Redis.TaskStatusTTL); err != nil {
 			logger.WithError(err).Error("Failed to update task status to completed")
+		}
+
+		// Add success attributes to the main span if available
+		if deps.OTelWorkerWrapper != nil {
+			if span := trace.SpanFromContext(ctx); span.IsRecording() {
+				span.SetAttributes(
+					attribute.Bool("task.will_retry", false),
+					attribute.String("task.error_type", "none"),
+					attribute.Bool("task.success", true),
+					attribute.Int("task.response_length", len(response)),
+				)
+			}
 		}
 
 		logger.WithField("response_length", len(response)).Info("User message processed successfully")
@@ -684,6 +730,68 @@ func generateStepID() string {
 	b := make([]byte, 16)
 	_, _ = rand.Read(b) // Ignore error as rand.Read from crypto/rand always returns len(b), nil
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
+// isRetriableError determines if an error should be retried by RabbitMQ
+func isRetriableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	
+	errorStr := strings.ToLower(err.Error())
+	
+	// Timeout errors - should be retried
+	if strings.Contains(errorStr, "context deadline exceeded") ||
+		strings.Contains(errorStr, "timeout") ||
+		strings.Contains(errorStr, "timed out") {
+		return true
+	}
+	
+	// Network errors - should be retried
+	if strings.Contains(errorStr, "connection refused") ||
+		strings.Contains(errorStr, "network unreachable") ||
+		strings.Contains(errorStr, "no route to host") ||
+		strings.Contains(errorStr, "connection reset") ||
+		strings.Contains(errorStr, "broken pipe") {
+		return true
+	}
+	
+	// HTTP 5xx errors - should be retried
+	if strings.Contains(errorStr, "500") ||
+		strings.Contains(errorStr, "502") ||
+		strings.Contains(errorStr, "503") ||
+		strings.Contains(errorStr, "504") ||
+		strings.Contains(errorStr, "internal server error") ||
+		strings.Contains(errorStr, "bad gateway") ||
+		strings.Contains(errorStr, "service unavailable") ||
+		strings.Contains(errorStr, "gateway timeout") {
+		return true
+	}
+	
+	// Rate limiting - should be retried
+	if strings.Contains(errorStr, "rate limit") ||
+		strings.Contains(errorStr, "too many requests") ||
+		strings.Contains(errorStr, "429") {
+		return true
+	}
+	
+	// DNS errors - should be retried
+	if strings.Contains(errorStr, "no such host") ||
+		strings.Contains(errorStr, "dns") {
+		return true
+	}
+	
+	// Check for network.Error interface
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return true
+	}
+	
+	// Permanent failures - should NOT be retried:
+	// - Authentication errors (401, 403, invalid credentials)
+	// - Client errors (400, 404, malformed requests)
+	// - Application logic errors (invalid input, etc.)
+	
+	return false
 }
 
 // applyWhatsAppFormattingToMessages applies WhatsApp formatting to individual message content
