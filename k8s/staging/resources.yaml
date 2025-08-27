@@ -188,3 +188,43 @@ spec:
   selector:
     matchLabels:
       app: eai-agent-gateway-worker
+
+---
+apiVersion: keda.sh/v1alpha1
+kind: TriggerAuthentication
+metadata:
+  name: keda-trigger-auth-rabbitmq-conn
+spec:
+  secretTargetRef:
+    - parameter: host
+      name: rabbitmq-credentials
+      key: host
+    - parameter: username
+      name: rabbitmq-credentials
+      key: username
+    - parameter: password
+      name: rabbitmq-credentials
+      key: password
+
+---
+# Worker ScaledObject
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: eai-agent-gateway-worker-scaledobject
+spec:
+  scaleTargetRef:
+    kind: Deployment
+    name: eai-agent-gateway-worker
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  triggers:
+    - type: rabbitmq
+      metadata:
+        protocol: http
+        host: "http://rabbitmq:15672"
+        queueName: user_messages
+        mode: QueueLength
+        value: "100"
+      authenticationRef:
+        name: keda-trigger-auth-rabbitmq-conn
