@@ -238,3 +238,9 @@ swagger-clean:
     @echo "Cleaning Swagger documentation..."
     @rm -rf docs/
     @echo "Swagger documentation cleaned"
+
+load-test token:
+    BEARER_TOKEN={{token}} k6 run --out json=load-tests/results.json load-tests/main.js
+
+plot-results:
+    cd load-tests && python generate-charts.py results.json
