@@ -217,7 +217,7 @@ spec:
     kind: Deployment
     name: eai-agent-gateway-worker
   minReplicaCount: 1
-  maxReplicaCount: 10
+  maxReplicaCount: 20
   triggers:
     - type: rabbitmq
       metadata:
