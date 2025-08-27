@@ -125,12 +125,12 @@ spec:
           resources:
             requests:
               ephemeral-storage: 1Gi
-              cpu: 1000m
-              memory: 2Gi
+              cpu: 250m
+              memory: 128Mi
             limits:
               ephemeral-storage: 4Gi
-              cpu: 4000m
-              memory: 4Gi
+              cpu: 1000m
+              memory: 512Mi
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
