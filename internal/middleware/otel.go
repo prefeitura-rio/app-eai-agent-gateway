@@ -103,6 +103,11 @@ func (w *OTelWorkerWrapper) WrapWorkerTask(ctx context.Context, workerType, task
 	return w.otelService.TraceWorkerTask(ctx, workerType, taskType, taskFunc)
 }
 
+// StartSpan creates a new child span with the given name and attributes
+func (w *OTelWorkerWrapper) StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	return w.otelService.StartSpan(ctx, name, trace.WithAttributes(attrs...))
+}
+
 // OTelQueueWrapper provides OpenTelemetry tracing for queue operations
 type OTelQueueWrapper struct {
 	otelService *services.OTelService

@@ -10,6 +10,8 @@ import (
 
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/middleware"
@@ -217,24 +219,52 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	isAudioURL := isAudioURL(message)
 
 	if isAudioURL {
+		// Trace audio transcription step
+		var transcribeCtx context.Context
+		var transcribeSpan trace.Span
+		if deps.OTelWorkerWrapper != nil {
+			transcribeCtx, transcribeSpan = deps.OTelWorkerWrapper.StartSpan(ctx, "audio_transcription",
+				attribute.String("audio.url", message),
+				attribute.Bool("audio.detected", true))
+			defer transcribeSpan.End()
+		} else {
+			transcribeCtx = ctx
+		}
+
 		logger.WithField("audio_url", message).Info("Detected audio URL, attempting transcription")
 
 		if deps.TranscribeService == nil {
 			logger.Warn("Transcribe service not available, using fallback")
 			message = "Ajuda"
+			if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
+				transcribeSpan.SetAttributes(attribute.String("audio.result", "service_unavailable"))
+			}
 		} else {
-			transcript, err := deps.TranscribeService.TranscribeAudio(ctx, message)
+			transcript, err := deps.TranscribeService.TranscribeAudio(transcribeCtx, message)
 			if err != nil {
 				logger.WithError(err).Warn("Failed to transcribe audio, using fallback")
 				// Fallback to not block the flow (matches Python logic)
 				message = "Ajuda"
+				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
+					transcribeSpan.SetAttributes(
+						attribute.String("audio.result", "error"),
+						attribute.String("audio.error", err.Error()))
+				}
 			} else if transcript != "" && strings.TrimSpace(transcript) != "" && transcript != "Áudio sem conteúdo reconhecível" {
 				transcriptText = &transcript
 				message = transcript
 				logger.WithField("transcript_length", len(transcript)).Info("Audio transcribed successfully")
+				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
+					transcribeSpan.SetAttributes(
+						attribute.String("audio.result", "success"),
+						attribute.Int("audio.transcript_length", len(transcript)))
+				}
 			} else {
 				logger.Warn("Transcription returned no useful content, using fallback")
 				message = "Ajuda"
+				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
+					transcribeSpan.SetAttributes(attribute.String("audio.result", "empty_content"))
+				}
 			}
 		}
 	}
@@ -247,21 +277,75 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		}
 	}
 
+	// Trace thread creation step
+	var threadCtx context.Context
+	var threadSpan trace.Span
+	if deps.OTelWorkerWrapper != nil {
+		threadCtx, threadSpan = deps.OTelWorkerWrapper.StartSpan(ctx, "thread_management",
+			attribute.String("user.number", msg.UserNumber))
+		defer threadSpan.End()
+	} else {
+		threadCtx = ctx
+	}
+
 	// Get or create thread for user (thread ID corresponds to agent ID in Python logic)
-	threadID, err := deps.GoogleAgentService.GetOrCreateThread(ctx, msg.UserNumber)
+	threadID, err := deps.GoogleAgentService.GetOrCreateThread(threadCtx, msg.UserNumber)
 	if err != nil {
 		logger.WithError(err).Error("Failed to get or create thread")
+		if deps.OTelWorkerWrapper != nil && threadSpan != nil {
+			threadSpan.SetAttributes(
+				attribute.String("thread.result", "error"),
+				attribute.String("thread.error", err.Error()))
+		}
 		return "", fmt.Errorf("failed to get thread: %w", err)
+	}
+
+	if deps.OTelWorkerWrapper != nil && threadSpan != nil {
+		threadSpan.SetAttributes(
+			attribute.String("thread.result", "success"),
+			attribute.String("thread.id", threadID))
 	}
 
 	logger.WithField("thread_id", threadID).Info("Using thread for conversation")
 
+	// Trace Google Agent Engine call
+	var agentCtx context.Context
+	var agentSpan trace.Span
+	if deps.OTelWorkerWrapper != nil {
+		agentCtx, agentSpan = deps.OTelWorkerWrapper.StartSpan(ctx, "google_agent_engine_call",
+			attribute.String("thread.id", threadID),
+			attribute.String("message.content", message),
+			attribute.Int("message.length", len(message)))
+		defer agentSpan.End()
+	} else {
+		agentCtx = ctx
+	}
+
 	// Send message to Google Agent Engine
 	// The Google Agent Engine automatically handles previous message context via thread ID
-	agentResponse, err := deps.GoogleAgentService.SendMessage(ctx, threadID, message)
+	agentResponse, err := deps.GoogleAgentService.SendMessage(agentCtx, threadID, message)
 	if err != nil {
 		logger.WithError(err).Error("Failed to send message to Google Agent Engine")
+		if deps.OTelWorkerWrapper != nil && agentSpan != nil {
+			agentSpan.SetAttributes(
+				attribute.String("agent.result", "error"),
+				attribute.String("agent.error", err.Error()))
+		}
 		return "", fmt.Errorf("failed to get AI response: %w", err)
+	}
+
+	if deps.OTelWorkerWrapper != nil && agentSpan != nil {
+		agentSpan.SetAttributes(
+			attribute.String("agent.result", "success"),
+			attribute.Int("agent.response_length", len(agentResponse.Content)))
+	}
+
+	// Trace response processing step
+	var responseSpan trace.Span
+	if deps.OTelWorkerWrapper != nil {
+		_, responseSpan = deps.OTelWorkerWrapper.StartSpan(ctx, "response_processing",
+			attribute.String("response.raw_length", fmt.Sprintf("%d", len(agentResponse.Content))))
+		defer responseSpan.End()
 	}
 
 	// Parse Google's raw JSON response immediately after getting it from Google Agent Engine
@@ -279,6 +363,11 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 			"raw_json":    cleanedResponse,
 			"json_length": len(cleanedResponse),
 		}).Error("Failed to parse Google Agent Engine JSON response")
+		if deps.OTelWorkerWrapper != nil && responseSpan != nil {
+			responseSpan.SetAttributes(
+				attribute.String("response.result", "json_parse_error"),
+				attribute.String("response.error", err.Error()))
+		}
 		return "", fmt.Errorf("failed to parse AI response JSON: %w", err)
 	}
 
@@ -336,6 +425,14 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	}
 
 	processedResponse := string(processedBytes)
+
+	// Record successful response processing in tracing
+	if deps.OTelWorkerWrapper != nil && responseSpan != nil {
+		responseSpan.SetAttributes(
+			attribute.String("response.result", "success"),
+			attribute.Int("response.messages_count", len(transformedMessages)),
+			attribute.Int("response.processed_length", len(processedResponse)))
+	}
 
 	// Log successful processing (matches Python log format)
 	logger.WithFields(logrus.Fields{
