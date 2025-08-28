@@ -143,19 +143,14 @@ func (s *TranscribeService) TranscribeFromURL(ctx context.Context, audioURL stri
 		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
 
-	// Download the file
-	tempFile, err := s.downloadFile(ctx, audioURL)
+	// Download the file directly into memory (no temp files for read-only filesystem compatibility)
+	audioData, err := s.downloadFileToMemory(ctx, audioURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download file: %w", err)
 	}
-	defer func() {
-		if err := os.Remove(tempFile); err != nil {
-			s.logger.WithError(err).WithField("temp_file", tempFile).Warn("Failed to clean up temporary file")
-		}
-	}()
 
-	// Transcribe the downloaded file
-	result, err := s.TranscribeFromFile(ctx, tempFile)
+	// Transcribe the audio data directly
+	result, err := s.transcribeFromMemory(ctx, audioData)
 	if err != nil {
 		return nil, err
 	}
@@ -199,44 +194,11 @@ func (s *TranscribeService) TranscribeFromFile(ctx context.Context, filePath str
 		return nil, fmt.Errorf("failed to read audio file: %w", err)
 	}
 
-	// Create transcription request with timeout
-	reqCtx, cancel := context.WithTimeout(ctx, s.config.Transcribe.RequestTimeout)
-	defer cancel()
-
-	// Get project ID from config
-	projectID := s.config.GoogleCloud.ProjectID
-	if projectID == "" {
-		return nil, fmt.Errorf("PROJECT_ID is required for Speech v2 API")
-	}
-
-	// Build recognition request using Speech v2 API (same pattern as sandbox.go)
-	req := &speechpb.RecognizeRequest{
-		Recognizer: fmt.Sprintf("projects/%s/locations/global/recognizers/_", projectID),
-		Config: &speechpb.RecognitionConfig{
-			DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{
-				AutoDecodingConfig: &speechpb.AutoDetectDecodingConfig{},
-			},
-			Features: &speechpb.RecognitionFeatures{
-				EnableAutomaticPunctuation: true,
-				MaxAlternatives:            int32(s.config.Transcribe.MaxAlternatives),
-			},
-			LanguageCodes: []string{s.config.Transcribe.LanguageCode},
-			Model:         "long",
-		},
-		AudioSource: &speechpb.RecognizeRequest_Content{
-			Content: audioData,
-		},
-	}
-
-	// Perform transcription
-	resp, err := s.client.Recognize(reqCtx, req)
+	// Transcribe the audio data
+	result, err := s.transcribeFromMemory(ctx, audioData)
 	if err != nil {
-		s.logger.WithError(err).WithField("file_path", filePath).Error("Failed to transcribe audio")
-		return nil, fmt.Errorf("failed to transcribe audio: %w", err)
+		return nil, err
 	}
-
-	// Process results
-	result := s.processRecognitionResponse(resp, start)
 
 	// Add file metadata
 	if result.Metadata == nil {
@@ -306,6 +268,107 @@ func (s *TranscribeService) validateFile(filePath string) error {
 	}
 
 	return fmt.Errorf("unsupported file format: %s (supported: %v)", ext, supportedFormats)
+}
+
+// transcribeFromMemory transcribes audio data from memory
+func (s *TranscribeService) transcribeFromMemory(ctx context.Context, audioData []byte) (*TranscriptionResult, error) {
+	start := time.Now()
+
+	// Create transcription request with timeout
+	reqCtx, cancel := context.WithTimeout(ctx, s.config.Transcribe.RequestTimeout)
+	defer cancel()
+
+	// Get project ID from config
+	projectID := s.config.GoogleCloud.ProjectID
+	if projectID == "" {
+		return nil, fmt.Errorf("PROJECT_ID is required for Speech v2 API")
+	}
+
+	// Build recognition request using Speech v2 API
+	req := &speechpb.RecognizeRequest{
+		Recognizer: fmt.Sprintf("projects/%s/locations/global/recognizers/_", projectID),
+		Config: &speechpb.RecognitionConfig{
+			DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{
+				AutoDecodingConfig: &speechpb.AutoDetectDecodingConfig{},
+			},
+			Features: &speechpb.RecognitionFeatures{
+				EnableAutomaticPunctuation: true,
+				MaxAlternatives:            int32(s.config.Transcribe.MaxAlternatives),
+			},
+			LanguageCodes: []string{s.config.Transcribe.LanguageCode},
+			Model:         "long",
+		},
+		AudioSource: &speechpb.RecognizeRequest_Content{
+			Content: audioData,
+		},
+	}
+
+	// Perform transcription
+	resp, err := s.client.Recognize(reqCtx, req)
+	if err != nil {
+		s.logger.WithError(err).WithField("audio_size_bytes", len(audioData)).Error("Failed to transcribe audio from memory")
+		return nil, fmt.Errorf("failed to transcribe audio: %w", err)
+	}
+
+	// Process results
+	result := s.processRecognitionResponse(resp, start)
+
+	// Add metadata
+	if result.Metadata == nil {
+		result.Metadata = make(map[string]interface{})
+	}
+	result.Metadata["audio_size_bytes"] = len(audioData)
+	result.Metadata["transcription_duration_ms"] = time.Since(start).Milliseconds()
+
+	return result, nil
+}
+
+// downloadFileToMemory downloads an audio file from URL directly into memory
+func (s *TranscribeService) downloadFileToMemory(ctx context.Context, audioURL string) ([]byte, error) {
+	// Create download context with timeout
+	dlCtx, cancel := context.WithTimeout(ctx, s.config.Transcribe.DownloadTimeout)
+	defer cancel()
+
+	// Create HTTP request
+	req, err := http.NewRequestWithContext(dlCtx, "GET", audioURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+	}
+
+	// Perform request
+	client := &http.Client{
+		Timeout: s.config.Transcribe.DownloadTimeout,
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download failed with status: %d", resp.StatusCode)
+	}
+
+	// Read content with size limit directly into memory
+	maxSizeBytes := int64(s.config.Transcribe.MaxFileSizeMB) * 1024 * 1024
+	limited := io.LimitReader(resp.Body, maxSizeBytes+1) // +1 to detect oversized files
+
+	audioData, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read audio data: %w", err)
+	}
+
+	if int64(len(audioData)) > maxSizeBytes {
+		return nil, fmt.Errorf("downloaded file size %d bytes exceeds maximum %d bytes", len(audioData), maxSizeBytes)
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"audio_url":   audioURL,
+		"size_bytes":  len(audioData),
+		"content_type": resp.Header.Get("Content-Type"),
+	}).Debug("Audio file downloaded to memory")
+
+	return audioData, nil
 }
 
 // downloadFile downloads an audio file from URL to a temporary file
