@@ -322,7 +322,9 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		if deps.OTelWorkerWrapper != nil {
 			transcribeCtx, transcribeSpan = deps.OTelWorkerWrapper.StartSpan(ctx, "audio_transcription",
 				attribute.String("audio.url", message),
-				attribute.Bool("audio.detected", true))
+				attribute.Bool("audio.detected", true),
+				attribute.String("transcription.status", "started"),
+				attribute.String("audio.format", getAudioFormatFromURL(message)))
 			defer transcribeSpan.End()
 		} else {
 			transcribeCtx = ctx
@@ -334,9 +336,19 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 			logger.Warn("Transcribe service not available, using fallback")
 			message = "Ajuda"
 			if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
-				transcribeSpan.SetAttributes(attribute.String("audio.result", "service_unavailable"))
+				transcribeSpan.SetAttributes(
+					attribute.String("transcription.status", "failed"),
+					attribute.String("transcription.result", "service_unavailable"),
+					attribute.String("transcription.error_type", "service_not_available"),
+					attribute.Bool("transcription.fallback_used", true),
+					attribute.String("transcription.fallback_message", "Ajuda"))
 			}
 		} else {
+			// Record transcription attempt
+			if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
+				transcribeSpan.SetAttributes(attribute.String("transcription.status", "attempting"))
+			}
+			
 			transcript, err := deps.TranscribeService.TranscribeAudio(transcribeCtx, message)
 			if err != nil {
 				logger.WithError(err).Warn("Failed to transcribe audio, using fallback")
@@ -344,8 +356,12 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 				message = "Ajuda"
 				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
 					transcribeSpan.SetAttributes(
-						attribute.String("audio.result", "error"),
-						attribute.String("audio.error", err.Error()))
+						attribute.String("transcription.status", "failed"),
+						attribute.String("transcription.result", "error"),
+						attribute.String("transcription.error_type", classifyTranscriptionError(err)),
+						attribute.String("transcription.error", err.Error()),
+						attribute.Bool("transcription.fallback_used", true),
+						attribute.String("transcription.fallback_message", "Ajuda"))
 				}
 			} else if transcript != "" && strings.TrimSpace(transcript) != "" && transcript != "Áudio sem conteúdo reconhecível" {
 				transcriptText = &transcript
@@ -353,14 +369,23 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 				logger.WithField("transcript_length", len(transcript)).Info("Audio transcribed successfully")
 				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
 					transcribeSpan.SetAttributes(
-						attribute.String("audio.result", "success"),
-						attribute.Int("audio.transcript_length", len(transcript)))
+						attribute.String("transcription.status", "completed"),
+						attribute.String("transcription.result", "success"),
+						attribute.Int("transcription.transcript_length", len(transcript)),
+						attribute.Bool("transcription.fallback_used", false),
+						attribute.String("transcription.confidence", "high"))
 				}
 			} else {
 				logger.Warn("Transcription returned no useful content, using fallback")
 				message = "Ajuda"
 				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
-					transcribeSpan.SetAttributes(attribute.String("audio.result", "empty_content"))
+					transcribeSpan.SetAttributes(
+						attribute.String("transcription.status", "failed"),
+						attribute.String("transcription.result", "empty_content"),
+						attribute.String("transcription.error_type", "empty_or_invalid_content"),
+						attribute.String("transcription.original_content", transcript),
+						attribute.Bool("transcription.fallback_used", true),
+						attribute.String("transcription.fallback_message", "Ajuda"))
 				}
 			}
 		}
@@ -858,4 +883,79 @@ func applyWhatsAppFormattingToMessages(logger *logrus.Logger, messageFormatter M
 		}
 	}
 	return messages
+}
+
+// getAudioFormatFromURL extracts the audio format from URL extension
+func getAudioFormatFromURL(url string) string {
+	// Extract extension from URL
+	parts := strings.Split(url, ".")
+	if len(parts) > 1 {
+		ext := strings.ToLower(parts[len(parts)-1])
+		// Handle URLs with query parameters
+		if strings.Contains(ext, "?") {
+			ext = strings.Split(ext, "?")[0]
+		}
+		return ext
+	}
+	return "unknown"
+}
+
+// classifyTranscriptionError categorizes transcription errors for better observability
+func classifyTranscriptionError(err error) string {
+	if err == nil {
+		return "none"
+	}
+	
+	errorStr := strings.ToLower(err.Error())
+	
+	// Network/connectivity errors
+	if strings.Contains(errorStr, "connection") ||
+		strings.Contains(errorStr, "network") ||
+		strings.Contains(errorStr, "timeout") ||
+		strings.Contains(errorStr, "deadline exceeded") {
+		return "network_error"
+	}
+	
+	// Authentication errors
+	if strings.Contains(errorStr, "unauthorized") ||
+		strings.Contains(errorStr, "permission") ||
+		strings.Contains(errorStr, "credentials") ||
+		strings.Contains(errorStr, "authentication") {
+		return "auth_error"
+	}
+	
+	// Google API specific errors
+	if strings.Contains(errorStr, "invalid argument") ||
+		strings.Contains(errorStr, "recognitionaudio empty") {
+		return "api_validation_error"
+	}
+	
+	// Rate limiting
+	if strings.Contains(errorStr, "rate limit") ||
+		strings.Contains(errorStr, "quota") ||
+		strings.Contains(errorStr, "too many requests") {
+		return "rate_limit_error"
+	}
+	
+	// File/format errors
+	if strings.Contains(errorStr, "unsupported") ||
+		strings.Contains(errorStr, "format") ||
+		strings.Contains(errorStr, "invalid file") {
+		return "format_error"
+	}
+	
+	// Download errors
+	if strings.Contains(errorStr, "download") ||
+		strings.Contains(errorStr, "failed to get") ||
+		strings.Contains(errorStr, "http") {
+		return "download_error"
+	}
+	
+	// Service unavailable
+	if strings.Contains(errorStr, "service") ||
+		strings.Contains(errorStr, "unavailable") {
+		return "service_error"
+	}
+	
+	return "unknown_error"
 }

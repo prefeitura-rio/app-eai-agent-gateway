@@ -26,6 +26,13 @@ The end-to-end trace spans multiple services and includes these key spans:
 - `task.will_retry`: `true` | `false`
 - `task.error_type`: `"none"` | `"retriable"` | `"permanent"`
 
+### Transcription Status
+- `transcription.status`: `"started"` | `"attempting"` | `"completed"` | `"failed"`
+- `transcription.result`: `"success"` | `"error"` | `"service_unavailable"` | `"empty_content"`
+- `transcription.error_type`: `"network_error"` | `"auth_error"` | `"api_validation_error"` | `"rate_limit_error"` | `"format_error"` | `"download_error"` | `"service_error"` | `"unknown_error"`
+- `transcription.fallback_used`: `true` | `false`
+- `audio.format`: `"oga"` | `"mp3"` | `"m4a"` | etc.
+
 ### Response Status
 - `response.status`: `"completed"` | `"failed"` | `"processing"`
 - `response.has_data`: `true` | `false`
@@ -124,6 +131,39 @@ GROUP BY operation_name
 ```
 
 **Purpose:** Identify bottlenecks in specific processing steps.
+
+### 6. Transcription Success Rate
+
+**Panel Type:** Stat/Gauge
+
+**Query:**
+```sql
+SELECT 
+  audio.format,
+  count(*) FILTER (WHERE transcription.result = 'success') * 100.0 / count(*) as success_rate
+FROM traces 
+WHERE operation_name = 'audio_transcription'
+GROUP BY audio.format
+```
+
+**Purpose:** Monitor transcription success rates by audio format.
+
+### 7. Transcription Error Analysis
+
+**Panel Type:** Pie Chart
+
+**Query:**
+```sql
+SELECT 
+  transcription.error_type,
+  count(*) as count
+FROM traces 
+WHERE operation_name = 'audio_transcription'
+  AND transcription.status = 'failed'
+GROUP BY transcription.error_type
+```
+
+**Purpose:** Analyze distribution of transcription failure types.
 
 ## Dashboard Template Variables
 
