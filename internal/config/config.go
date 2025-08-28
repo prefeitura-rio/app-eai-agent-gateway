@@ -270,7 +270,7 @@ func setDefaults() {
 	viper.SetDefault("TRANSCRIBE_MAX_DURATION_MINUTES", 10)
 	viper.SetDefault("TRANSCRIBE_ALLOWED_URLS", "https://whatsapp.dados.rio/")
 	viper.SetDefault("TRANSCRIBE_MAX_FILE_SIZE_MB", 25)
-	viper.SetDefault("TRANSCRIBE_SUPPORTED_FORMATS", "mp3,wav,ogg,webm,mp4,m4a,flac")
+	viper.SetDefault("TRANSCRIBE_SUPPORTED_FORMATS", "mp3,wav,ogg,oga,webm,mp4,m4a,flac,opus")
 	viper.SetDefault("TRANSCRIBE_TEMP_DIR", "/tmp")
 	viper.SetDefault("TRANSCRIBE_CLEANUP_INTERVAL", "5m")
 	viper.SetDefault("TRANSCRIBE_REQUEST_TIMEOUT", "60s")
