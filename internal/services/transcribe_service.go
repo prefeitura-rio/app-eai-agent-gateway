@@ -143,16 +143,35 @@ func (s *TranscribeService) TranscribeFromURL(ctx context.Context, audioURL stri
 		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
 
-	// Download the file directly into memory (no temp files for read-only filesystem compatibility)
+	// Try in-memory approach first for read-only filesystem compatibility
+	s.logger.Debug("Attempting in-memory transcription")
 	audioData, err := s.downloadFileToMemory(ctx, audioURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download file: %w", err)
 	}
 
-	// Transcribe the audio data directly
 	result, err := s.transcribeFromMemory(ctx, audioData)
 	if err != nil {
-		return nil, err
+		// If in-memory transcription fails, try fallback to temp file approach
+		s.logger.WithError(err).Warn("In-memory transcription failed, falling back to temp file approach")
+		
+		tempFile, tempErr := s.downloadFile(ctx, audioURL)
+		if tempErr != nil {
+			return nil, fmt.Errorf("failed to download file to temp location: %w (original in-memory error: %v)", tempErr, err)
+		}
+		defer func() {
+			if removeErr := os.Remove(tempFile); removeErr != nil {
+				s.logger.WithError(removeErr).WithField("temp_file", tempFile).Warn("Failed to clean up temporary file")
+			}
+		}()
+
+		result, err = s.TranscribeFromFile(ctx, tempFile)
+		if err != nil {
+			return nil, fmt.Errorf("both in-memory and temp file transcription failed: %w", err)
+		}
+		s.logger.Info("Temp file transcription succeeded as fallback")
+	} else {
+		s.logger.Debug("In-memory transcription succeeded")
 	}
 
 	// Add download metadata
@@ -194,11 +213,44 @@ func (s *TranscribeService) TranscribeFromFile(ctx context.Context, filePath str
 		return nil, fmt.Errorf("failed to read audio file: %w", err)
 	}
 
-	// Transcribe the audio data
-	result, err := s.transcribeFromMemory(ctx, audioData)
-	if err != nil {
-		return nil, err
+	// Create transcription request with timeout (original working approach)
+	reqCtx, cancel := context.WithTimeout(ctx, s.config.Transcribe.RequestTimeout)
+	defer cancel()
+
+	// Get project ID from config
+	projectID := s.config.GoogleCloud.ProjectID
+	if projectID == "" {
+		return nil, fmt.Errorf("PROJECT_ID is required for Speech v2 API")
 	}
+
+	// Build recognition request using Speech v2 API (original working pattern)
+	req := &speechpb.RecognizeRequest{
+		Recognizer: fmt.Sprintf("projects/%s/locations/global/recognizers/_", projectID),
+		Config: &speechpb.RecognitionConfig{
+			DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{
+				AutoDecodingConfig: &speechpb.AutoDetectDecodingConfig{},
+			},
+			Features: &speechpb.RecognitionFeatures{
+				EnableAutomaticPunctuation: true,
+				MaxAlternatives:            int32(s.config.Transcribe.MaxAlternatives),
+			},
+			LanguageCodes: []string{s.config.Transcribe.LanguageCode},
+			Model:         "long",
+		},
+		AudioSource: &speechpb.RecognizeRequest_Content{
+			Content: audioData,
+		},
+	}
+
+	// Perform transcription
+	resp, err := s.client.Recognize(reqCtx, req)
+	if err != nil {
+		s.logger.WithError(err).WithField("file_path", filePath).Error("Failed to transcribe audio")
+		return nil, fmt.Errorf("failed to transcribe audio: %w", err)
+	}
+
+	// Process results
+	result := s.processRecognitionResponse(resp, start)
 
 	// Add file metadata
 	if result.Metadata == nil {
@@ -274,6 +326,13 @@ func (s *TranscribeService) validateFile(filePath string) error {
 func (s *TranscribeService) transcribeFromMemory(ctx context.Context, audioData []byte) (*TranscriptionResult, error) {
 	start := time.Now()
 
+	// Validate audio data
+	if len(audioData) == 0 {
+		return nil, fmt.Errorf("audio data is empty")
+	}
+
+	s.logger.WithField("audio_size_bytes", len(audioData)).Debug("Starting transcription from memory")
+
 	// Create transcription request with timeout
 	reqCtx, cancel := context.WithTimeout(ctx, s.config.Transcribe.RequestTimeout)
 	defer cancel()
@@ -303,10 +362,22 @@ func (s *TranscribeService) transcribeFromMemory(ctx context.Context, audioData 
 		},
 	}
 
+	// Debug logging
+	s.logger.WithFields(logrus.Fields{
+		"audio_size_bytes": len(audioData),
+		"recognizer":       req.Recognizer,
+		"language_codes":   req.Config.LanguageCodes,
+		"model":           req.Config.Model,
+		"content_set":     req.AudioSource != nil,
+	}).Debug("Sending recognition request")
+
 	// Perform transcription
 	resp, err := s.client.Recognize(reqCtx, req)
 	if err != nil {
-		s.logger.WithError(err).WithField("audio_size_bytes", len(audioData)).Error("Failed to transcribe audio from memory")
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"audio_size_bytes": len(audioData),
+			"recognizer":       req.Recognizer,
+		}).Error("Failed to transcribe audio from memory")
 		return nil, fmt.Errorf("failed to transcribe audio: %w", err)
 	}
 
