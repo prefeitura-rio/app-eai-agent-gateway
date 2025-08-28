@@ -323,7 +323,6 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 			transcribeCtx, transcribeSpan = deps.OTelWorkerWrapper.StartSpan(ctx, "audio_transcription",
 				attribute.String("audio.url", message),
 				attribute.Bool("audio.detected", true),
-				attribute.String("transcription.status", "started"),
 				attribute.String("audio.format", getAudioFormatFromURL(message)))
 			defer transcribeSpan.End()
 		} else {
@@ -337,18 +336,11 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 			message = "Ajuda"
 			if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
 				transcribeSpan.SetAttributes(
-					attribute.String("transcription.status", "failed"),
-					attribute.String("transcription.result", "service_unavailable"),
+					attribute.Bool("transcription.success", false),
 					attribute.String("transcription.error_type", "service_not_available"),
-					attribute.Bool("transcription.fallback_used", true),
-					attribute.String("transcription.fallback_message", "Ajuda"))
+					attribute.Bool("transcription.fallback_used", true))
 			}
 		} else {
-			// Record transcription attempt
-			if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
-				transcribeSpan.SetAttributes(attribute.String("transcription.status", "attempting"))
-			}
-			
 			transcript, err := deps.TranscribeService.TranscribeAudio(transcribeCtx, message)
 			if err != nil {
 				logger.WithError(err).Warn("Failed to transcribe audio, using fallback")
@@ -356,12 +348,10 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 				message = "Ajuda"
 				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
 					transcribeSpan.SetAttributes(
-						attribute.String("transcription.status", "failed"),
-						attribute.String("transcription.result", "error"),
+						attribute.Bool("transcription.success", false),
 						attribute.String("transcription.error_type", classifyTranscriptionError(err)),
 						attribute.String("transcription.error", err.Error()),
-						attribute.Bool("transcription.fallback_used", true),
-						attribute.String("transcription.fallback_message", "Ajuda"))
+						attribute.Bool("transcription.fallback_used", true))
 				}
 			} else if transcript != "" && strings.TrimSpace(transcript) != "" && transcript != "Áudio sem conteúdo reconhecível" {
 				transcriptText = &transcript
@@ -369,23 +359,18 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 				logger.WithField("transcript_length", len(transcript)).Info("Audio transcribed successfully")
 				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
 					transcribeSpan.SetAttributes(
-						attribute.String("transcription.status", "completed"),
-						attribute.String("transcription.result", "success"),
+						attribute.Bool("transcription.success", true),
 						attribute.Int("transcription.transcript_length", len(transcript)),
-						attribute.Bool("transcription.fallback_used", false),
-						attribute.String("transcription.confidence", "high"))
+						attribute.Bool("transcription.fallback_used", false))
 				}
 			} else {
 				logger.Warn("Transcription returned no useful content, using fallback")
 				message = "Ajuda"
 				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
 					transcribeSpan.SetAttributes(
-						attribute.String("transcription.status", "failed"),
-						attribute.String("transcription.result", "empty_content"),
+						attribute.Bool("transcription.success", false),
 						attribute.String("transcription.error_type", "empty_or_invalid_content"),
-						attribute.String("transcription.original_content", transcript),
-						attribute.Bool("transcription.fallback_used", true),
-						attribute.String("transcription.fallback_message", "Ajuda"))
+						attribute.Bool("transcription.fallback_used", true))
 				}
 			}
 		}

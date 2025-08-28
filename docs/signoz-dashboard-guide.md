@@ -27,8 +27,7 @@ The end-to-end trace spans multiple services and includes these key spans:
 - `task.error_type`: `"none"` | `"retriable"` | `"permanent"`
 
 ### Transcription Status
-- `transcription.status`: `"started"` | `"attempting"` | `"completed"` | `"failed"`
-- `transcription.result`: `"success"` | `"error"` | `"service_unavailable"` | `"empty_content"`
+- `transcription.success`: `true` | `false` (main success/failure indicator)
 - `transcription.error_type`: `"network_error"` | `"auth_error"` | `"api_validation_error"` | `"rate_limit_error"` | `"format_error"` | `"download_error"` | `"service_error"` | `"unknown_error"`
 - `transcription.fallback_used`: `true` | `false`
 - `audio.format`: `"oga"` | `"mp3"` | `"m4a"` | etc.
@@ -140,7 +139,7 @@ GROUP BY operation_name
 ```sql
 SELECT 
   audio.format,
-  count(*) FILTER (WHERE transcription.result = 'success') * 100.0 / count(*) as success_rate
+  count(*) FILTER (WHERE transcription.success = true) * 100.0 / count(*) as success_rate
 FROM traces 
 WHERE operation_name = 'audio_transcription'
 GROUP BY audio.format
@@ -159,7 +158,7 @@ SELECT
   count(*) as count
 FROM traces 
 WHERE operation_name = 'audio_transcription'
-  AND transcription.status = 'failed'
+  AND transcription.success = false
 GROUP BY transcription.error_type
 ```
 
