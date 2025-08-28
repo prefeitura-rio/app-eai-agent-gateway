@@ -122,6 +122,11 @@ spec:
           env:
             - name: LOG_FORMAT
               value: "json"
+            - name: TRANSCRIBE_TEMP_DIR
+              value: "/tmp/audio"
+          volumeMounts:
+            - name: temp-audio
+              mountPath: /tmp/audio
           resources:
             requests:
               ephemeral-storage: 1Gi
@@ -137,6 +142,9 @@ spec:
             capabilities:
               drop:
                 - ALL
+      volumes:
+        - name: temp-audio
+          emptyDir: {}
       restartPolicy: Always
 
 ---

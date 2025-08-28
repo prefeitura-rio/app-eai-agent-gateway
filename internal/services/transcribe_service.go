@@ -143,35 +143,21 @@ func (s *TranscribeService) TranscribeFromURL(ctx context.Context, audioURL stri
 		return nil, fmt.Errorf("invalid URL: %w", err)
 	}
 
-	// Try in-memory approach first for read-only filesystem compatibility
-	s.logger.Debug("Attempting in-memory transcription")
-	audioData, err := s.downloadFileToMemory(ctx, audioURL)
+	// Download the file to temp location
+	tempFile, err := s.downloadFile(ctx, audioURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to download file: %w", err)
 	}
+	defer func() {
+		if err := os.Remove(tempFile); err != nil {
+			s.logger.WithError(err).WithField("temp_file", tempFile).Warn("Failed to clean up temporary file")
+		}
+	}()
 
-	result, err := s.transcribeFromMemory(ctx, audioData)
+	// Transcribe the downloaded file
+	result, err := s.TranscribeFromFile(ctx, tempFile)
 	if err != nil {
-		// If in-memory transcription fails, try fallback to temp file approach
-		s.logger.WithError(err).Warn("In-memory transcription failed, falling back to temp file approach")
-		
-		tempFile, tempErr := s.downloadFile(ctx, audioURL)
-		if tempErr != nil {
-			return nil, fmt.Errorf("failed to download file to temp location: %w (original in-memory error: %v)", tempErr, err)
-		}
-		defer func() {
-			if removeErr := os.Remove(tempFile); removeErr != nil {
-				s.logger.WithError(removeErr).WithField("temp_file", tempFile).Warn("Failed to clean up temporary file")
-			}
-		}()
-
-		result, err = s.TranscribeFromFile(ctx, tempFile)
-		if err != nil {
-			return nil, fmt.Errorf("both in-memory and temp file transcription failed: %w", err)
-		}
-		s.logger.Info("Temp file transcription succeeded as fallback")
-	} else {
-		s.logger.Debug("In-memory transcription succeeded")
+		return nil, err
 	}
 
 	// Add download metadata
