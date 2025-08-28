@@ -443,7 +443,7 @@ func parseRetryCount(s string) int {
 
 // isAudioURL checks if the URL appears to be an audio file
 func isAudioURL(url string) bool {
-	audioExtensions := []string{".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".wma"}
+	audioExtensions := []string{".mp3", ".wav", ".m4a", ".aac", ".ogg", ".oga", ".flac", ".wma", ".opus"}
 	for _, ext := range audioExtensions {
 		if len(url) >= len(ext) && url[len(url)-len(ext):] == ext {
 			return true

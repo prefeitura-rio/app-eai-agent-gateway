@@ -65,7 +65,7 @@ func (a *TranscribeServiceAdapter) TranscribeAudio(ctx context.Context, audioURL
 func (a *TranscribeServiceAdapter) IsAudioURL(url string) bool {
 	// Check for audio file extensions regardless of service availability
 	// This allows detection even when transcribe service is not configured
-	audioExtensions := []string{".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".wma"}
+	audioExtensions := []string{".mp3", ".wav", ".m4a", ".aac", ".ogg", ".oga", ".flac", ".wma", ".opus"}
 	for _, ext := range audioExtensions {
 		if strings.HasSuffix(strings.ToLower(url), ext) {
 			return true
@@ -274,7 +274,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 
 // isAudioURL checks if the URL appears to be an audio file (standalone function)
 func isAudioURL(url string) bool {
-	audioExtensions := []string{".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac", ".wma"}
+	audioExtensions := []string{".mp3", ".wav", ".m4a", ".aac", ".ogg", ".oga", ".flac", ".wma", ".opus"}
 	for _, ext := range audioExtensions {
 		if strings.HasSuffix(strings.ToLower(url), ext) {
 			return true
