@@ -19,48 +19,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          python-version: '3.12'
-
-      - name: Install UV
-        run: |
-          curl -LsSf https://astral.sh/uv/install.sh | sh
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-
-      - name: Install dependencies and generate docs
-        run: |
-          uv sync
-          uv run python generate_docs.py
-
-      - name: Commit and push documentation
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add docs/
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "docs: update API documentation [skip ci]"
-            git push
-          fi
-
-      - name: Upload documentation artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: swagger-docs-${{ github.sha }}
-          path: docs/
-          retention-days: 30
-
-      # - if: ${{ github.ref == 'refs/heads/staging' }}
-      #   uses: SonarSource/sonarqube-scan-action@v4
-      #   env:
-      #     SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-      #     SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          go-version: '1.24'
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u $GITHUB_ACTOR --password-stdin
@@ -82,7 +47,7 @@ jobs:
           echo "TAG1=$TAG1" >> $GITHUB_ENV
           echo "TAG2=$TAG2" >> $GITHUB_ENV
 
-      - name: Build and Push Docker Image using Buildx
+      - name: Build and Push Docker Image
         run: |
           docker buildx build \
             --platform linux/amd64 \

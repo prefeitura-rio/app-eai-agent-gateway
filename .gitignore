@@ -1,20 +1,100 @@
-# Python-generated files
+# Go build artifacts
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+go.work.sum
+
+# Go mod cache
+/vendor/
+
+# Go coverage files
+coverage.out
+coverage.html
+*.cover
+
+# Go test binary, built with `go test -c`
+*.test
+
+# Go workspace file
+go.work
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+.direnv/
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Python legacy files (can be removed after full migration)
 __pycache__/
 *.py[oc]
-build/
-dist/
-wheels/
 *.egg-info
-
-# Virtual environments
-.venv
-
-.env
-.direnv/
+.venv/
+venv/
 
 # Load test results and charts
 load-tests/results.json
 load-tests/charts/
 
+# Local development
 .claude
 CLAUDE.md
+
+# Docker
+.dockerignore.bak
+
+# Kubernetes temporary files
+k8s/*/kustomization.yaml.bak
+k8s/*/*.yaml.bak
+
+# Binary output from justfile
+/gateway
+/worker
+
+# Certificates and keys
+*.key
+*.crt
+*.pem
+*.p12
+*.pfx
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+sandbox.go
