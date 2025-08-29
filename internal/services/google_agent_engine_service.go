@@ -151,8 +151,8 @@ func (s *GoogleAgentEngineService) CreateThread(ctx context.Context, userID stri
 		return "", fmt.Errorf("rate limit exceeded: %w", err)
 	}
 
-	// Generate a unique thread ID
-	threadID := fmt.Sprintf("thread_%s_%d", userID, time.Now().UnixNano())
+	// Use userID (phone number) directly as thread ID
+	threadID := userID
 
 	// Store thread information in Redis
 	threadInfo := ThreadInfo{
@@ -170,15 +170,9 @@ func (s *GoogleAgentEngineService) CreateThread(ctx context.Context, userID stri
 
 	// Store thread info with TTL
 	threadKey := fmt.Sprintf("thread:%s", threadID)
-	userThreadKey := fmt.Sprintf("user_thread:%s", userID)
 
 	if err := s.redisService.SetValue(ctx, threadKey, string(threadData), s.config.Redis.AgentIDCacheTTL); err != nil {
 		return "", fmt.Errorf("failed to store thread info: %w", err)
-	}
-
-	// Store user -> thread mapping
-	if err := s.redisService.SetValue(ctx, userThreadKey, threadID, s.config.Redis.AgentIDCacheTTL); err != nil {
-		return "", fmt.Errorf("failed to store user thread mapping: %w", err)
 	}
 
 	s.logger.WithFields(logrus.Fields{
@@ -191,30 +185,27 @@ func (s *GoogleAgentEngineService) CreateThread(ctx context.Context, userID stri
 
 // GetOrCreateThread gets an existing thread for a user or creates a new one
 func (s *GoogleAgentEngineService) GetOrCreateThread(ctx context.Context, userID string) (string, error) {
-	// Try to get existing thread for user
-	userThreadKey := fmt.Sprintf("user_thread:%s", userID)
-	existingThreadID, err := s.redisService.Get(ctx, userThreadKey)
+	// Use userID directly as thread ID
+	threadID := userID
+	threadKey := fmt.Sprintf("thread:%s", threadID)
 
-	if err == nil && existingThreadID != "" {
-		// Verify thread still exists and update last used time
-		threadKey := fmt.Sprintf("thread:%s", existingThreadID)
-		threadData, err := s.redisService.Get(ctx, threadKey)
+	// Try to get existing thread
+	threadData, err := s.redisService.Get(ctx, threadKey)
 
-		if err == nil && threadData != "" {
-			var threadInfo ThreadInfo
-			if err := json.Unmarshal([]byte(threadData), &threadInfo); err == nil {
-				// Update last used time
-				threadInfo.LastUsedAt = time.Now()
-				updatedData, _ := json.Marshal(threadInfo)
-				_ = s.redisService.SetValue(ctx, threadKey, string(updatedData), s.config.Redis.AgentIDCacheTTL)
+	if err == nil && threadData != "" {
+		var threadInfo ThreadInfo
+		if err := json.Unmarshal([]byte(threadData), &threadInfo); err == nil {
+			// Update last used time
+			threadInfo.LastUsedAt = time.Now()
+			updatedData, _ := json.Marshal(threadInfo)
+			_ = s.redisService.SetValue(ctx, threadKey, string(updatedData), s.config.Redis.AgentIDCacheTTL)
 
-				s.logger.WithFields(logrus.Fields{
-					"user_id":   userID,
-					"thread_id": existingThreadID,
-				}).Debug("Using existing thread")
+			s.logger.WithFields(logrus.Fields{
+				"user_id":   userID,
+				"thread_id": threadID,
+			}).Debug("Using existing thread")
 
-				return existingThreadID, nil
-			}
+			return threadID, nil
 		}
 	}
 
@@ -298,7 +289,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 // getAccessToken gets an access token using the configured token source or default
 func (s *GoogleAgentEngineService) getAccessToken(ctx context.Context) (string, error) {
 	var ts oauth2.TokenSource
-	
+
 	// Use our stored token source if available, otherwise fall back to default
 	if s.tokenSource != nil {
 		ts = s.tokenSource
