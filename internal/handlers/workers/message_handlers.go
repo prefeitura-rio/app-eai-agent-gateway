@@ -28,7 +28,7 @@ type MessageHandlerDependencies struct {
 	GoogleAgentService *services.GoogleAgentEngineService
 	TranscribeService  TranscribeServiceInterface
 	MessageFormatter   MessageFormatterInterface
-	OTelWorkerWrapper  *middleware.OTelWorkerWrapper        // Optional OTel wrapper
+	OTelWorkerWrapper  *middleware.OTelWorkerWrapper          // Optional OTel wrapper
 	TracePropagator    *middleware.TraceCorrelationPropagator // Optional trace propagator
 }
 
@@ -149,7 +149,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			err = deps.OTelWorkerWrapper.WrapWorkerTask(ctx, "user_message_worker", "process_user_message", func(tracedCtx context.Context) error {
 				// Detect message type early for tracing attributes
 				isAudio := isAudioURL(queueMsg.Message)
-				
+
 				// Add message type attribute to current span if possible
 				if span := trace.SpanFromContext(tracedCtx); span.IsRecording() {
 					span.SetAttributes(
@@ -163,7 +163,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 						attribute.Int("message.length", len(queueMsg.Message)),
 					)
 				}
-				
+
 				response, err = processUserMessage(tracedCtx, &queueMsg, deps)
 				return err
 			})
@@ -183,11 +183,11 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 
 			// Determine if this error should be retried
 			shouldRetry := isRetriableError(err)
-			
+
 			if shouldRetry {
 				logger.WithFields(logrus.Fields{
-					"retriable": true,
-					"error_type": "retriable",
+					"retriable":     true,
+					"error_type":    "retriable",
 					"error_message": err.Error(),
 				}).Warn("Error is retriable, will be retried by RabbitMQ")
 				// Update task status to processing (keep it processing for retry)
@@ -208,8 +208,8 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				return err
 			} else {
 				logger.WithFields(logrus.Fields{
-					"retriable": false,
-					"error_type": "permanent",
+					"retriable":     false,
+					"error_type":    "permanent",
 					"error_message": err.Error(),
 				}).Error("Error is permanent, marking task as failed")
 				// Update task status to failed for permanent errors
@@ -755,16 +755,16 @@ func isRetriableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	errorStr := strings.ToLower(err.Error())
-	
+
 	// Timeout errors - should be retried
 	if strings.Contains(errorStr, "context deadline exceeded") ||
 		strings.Contains(errorStr, "timeout") ||
 		strings.Contains(errorStr, "timed out") {
 		return true
 	}
-	
+
 	// Network errors - should be retried
 	if strings.Contains(errorStr, "connection refused") ||
 		strings.Contains(errorStr, "network unreachable") ||
@@ -777,7 +777,7 @@ func isRetriableError(err error) bool {
 		strings.Contains(errorStr, "connection interrupted") {
 		return true
 	}
-	
+
 	// HTTP 5xx errors - should be retried
 	if strings.Contains(errorStr, "500") ||
 		strings.Contains(errorStr, "502") ||
@@ -789,20 +789,20 @@ func isRetriableError(err error) bool {
 		strings.Contains(errorStr, "gateway timeout") {
 		return true
 	}
-	
+
 	// Rate limiting - should be retried
 	if strings.Contains(errorStr, "rate limit") ||
 		strings.Contains(errorStr, "too many requests") ||
 		strings.Contains(errorStr, "429") {
 		return true
 	}
-	
+
 	// DNS errors - should be retried
 	if strings.Contains(errorStr, "no such host") ||
 		strings.Contains(errorStr, "dns") {
 		return true
 	}
-	
+
 	// Google Reasoning Engine specific errors - check inner error details
 	if strings.Contains(errorStr, "reasoning engine execution failed") {
 		// Look for connection issues in the nested error details
@@ -814,7 +814,7 @@ func isRetriableError(err error) bool {
 			strings.Contains(errorStr, "network") {
 			return true
 		}
-		
+
 		// Check for transient execution failures
 		if strings.Contains(errorStr, "agent engine error") ||
 			strings.Contains(errorStr, "an error occurred during invocation") ||
@@ -823,17 +823,17 @@ func isRetriableError(err error) bool {
 			return true
 		}
 	}
-	
+
 	// Check for network.Error interface
 	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 		return true
 	}
-	
+
 	// Permanent failures - should NOT be retried:
 	// - Authentication errors (401, 403, invalid credentials)
 	// - Client errors (400, 404, malformed requests) WITHOUT underlying connection issues
 	// - Application logic errors (invalid input, etc.)
-	
+
 	return false
 }
 
@@ -890,9 +890,9 @@ func classifyTranscriptionError(err error) string {
 	if err == nil {
 		return "none"
 	}
-	
+
 	errorStr := strings.ToLower(err.Error())
-	
+
 	// Network/connectivity errors
 	if strings.Contains(errorStr, "connection") ||
 		strings.Contains(errorStr, "network") ||
@@ -900,7 +900,7 @@ func classifyTranscriptionError(err error) string {
 		strings.Contains(errorStr, "deadline exceeded") {
 		return "network_error"
 	}
-	
+
 	// Authentication errors
 	if strings.Contains(errorStr, "unauthorized") ||
 		strings.Contains(errorStr, "permission") ||
@@ -908,39 +908,39 @@ func classifyTranscriptionError(err error) string {
 		strings.Contains(errorStr, "authentication") {
 		return "auth_error"
 	}
-	
+
 	// Google API specific errors
 	if strings.Contains(errorStr, "invalid argument") ||
 		strings.Contains(errorStr, "recognitionaudio empty") {
 		return "api_validation_error"
 	}
-	
+
 	// Rate limiting
 	if strings.Contains(errorStr, "rate limit") ||
 		strings.Contains(errorStr, "quota") ||
 		strings.Contains(errorStr, "too many requests") {
 		return "rate_limit_error"
 	}
-	
+
 	// File/format errors
 	if strings.Contains(errorStr, "unsupported") ||
 		strings.Contains(errorStr, "format") ||
 		strings.Contains(errorStr, "invalid file") {
 		return "format_error"
 	}
-	
+
 	// Download errors
 	if strings.Contains(errorStr, "download") ||
 		strings.Contains(errorStr, "failed to get") ||
 		strings.Contains(errorStr, "http") {
 		return "download_error"
 	}
-	
+
 	// Service unavailable
 	if strings.Contains(errorStr, "service") ||
 		strings.Contains(errorStr, "unavailable") {
 		return "service_error"
 	}
-	
+
 	return "unknown_error"
 }

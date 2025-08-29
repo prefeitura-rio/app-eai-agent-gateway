@@ -35,11 +35,11 @@ type RabbitMQServiceInterface interface {
 
 // MessageHandler handles message processing endpoints
 type MessageHandler struct {
-	logger               *logrus.Logger
-	config               *config.Config
-	redisService         RedisServiceInterface
-	rabbitMQService      RabbitMQServiceInterface
-	tracePropagator      *middleware.TraceCorrelationPropagator // Optional for distributed tracing
+	logger          *logrus.Logger
+	config          *config.Config
+	redisService    RedisServiceInterface
+	rabbitMQService RabbitMQServiceInterface
+	tracePropagator *middleware.TraceCorrelationPropagator // Optional for distributed tracing
 }
 
 // NewMessageHandler creates a new message handler
@@ -103,7 +103,7 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	var span trace.Span
 	var traceHeaders map[string]interface{}
 	ctx := c.Request.Context()
-	
+
 	if h.tracePropagator != nil {
 		ctx, span = h.tracePropagator.CreateChildSpan(ctx, "user_message_e2e",
 			attribute.String("message.id", messageID),
@@ -119,7 +119,7 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 			}()),
 		)
 		defer span.End()
-		
+
 		// Inject trace context into headers for RabbitMQ
 		traceHeaders = make(map[string]interface{})
 		for k, v := range h.tracePropagator.InjectTraceContext(ctx) {
@@ -186,7 +186,7 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	} else {
 		err = h.rabbitMQService.PublishMessage(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage)
 	}
-	
+
 	if err != nil {
 		logger.WithError(err).Error("Failed to queue user message")
 
@@ -240,7 +240,7 @@ func (h *MessageHandler) HandleMessageResponse(c *gin.Context) {
 
 	// Start with request context
 	ctx := c.Request.Context()
-	
+
 	// Try to extract trace context from stored result if available
 	if h.tracePropagator != nil {
 		traceKey := "task:trace:" + req.MessageID

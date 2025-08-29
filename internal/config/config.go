@@ -52,17 +52,17 @@ type ServerConfig struct {
 }
 
 type RabbitMQConfig struct {
-	URL               string `mapstructure:"RABBITMQ_URL"`
-	Exchange          string `mapstructure:"RABBITMQ_EXCHANGE"`
-	UserQueue         string `mapstructure:"RABBITMQ_USER_QUEUE"`
-	UserMessagesQueue string `mapstructure:"RABBITMQ_USER_MESSAGES_QUEUE"`
-	DLXExchange       string `mapstructure:"RABBITMQ_DLX_EXCHANGE"`
-	MaxParallel       int    `mapstructure:"MAX_PARALLEL"`
-	MaxRetries           int           `mapstructure:"RABBITMQ_MAX_RETRIES"`
-	RetryDelay           int           `mapstructure:"RABBITMQ_RETRY_DELAY"`
-	MessageTimeout       time.Duration `mapstructure:"RABBITMQ_MESSAGE_TIMEOUT"`
-	SoftTimeLimit        int           `mapstructure:"CELERY_SOFT_TIME_LIMIT"`
-	HardTimeLimit        int           `mapstructure:"CELERY_TIME_LIMIT"`
+	URL               string        `mapstructure:"RABBITMQ_URL"`
+	Exchange          string        `mapstructure:"RABBITMQ_EXCHANGE"`
+	UserQueue         string        `mapstructure:"RABBITMQ_USER_QUEUE"`
+	UserMessagesQueue string        `mapstructure:"RABBITMQ_USER_MESSAGES_QUEUE"`
+	DLXExchange       string        `mapstructure:"RABBITMQ_DLX_EXCHANGE"`
+	MaxParallel       int           `mapstructure:"MAX_PARALLEL"`
+	MaxRetries        int           `mapstructure:"RABBITMQ_MAX_RETRIES"`
+	RetryDelay        int           `mapstructure:"RABBITMQ_RETRY_DELAY"`
+	MessageTimeout    time.Duration `mapstructure:"RABBITMQ_MESSAGE_TIMEOUT"`
+	SoftTimeLimit     int           `mapstructure:"CELERY_SOFT_TIME_LIMIT"`
+	HardTimeLimit     int           `mapstructure:"CELERY_TIME_LIMIT"`
 }
 
 type RedisConfig struct {

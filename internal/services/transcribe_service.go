@@ -353,8 +353,8 @@ func (s *TranscribeService) transcribeFromMemory(ctx context.Context, audioData 
 		"audio_size_bytes": len(audioData),
 		"recognizer":       req.Recognizer,
 		"language_codes":   req.Config.LanguageCodes,
-		"model":           req.Config.Model,
-		"content_set":     req.AudioSource != nil,
+		"model":            req.Config.Model,
+		"content_set":      req.AudioSource != nil,
 	}).Debug("Sending recognition request")
 
 	// Perform transcription
@@ -420,8 +420,8 @@ func (s *TranscribeService) downloadFileToMemory(ctx context.Context, audioURL s
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"audio_url":   audioURL,
-		"size_bytes":  len(audioData),
+		"audio_url":    audioURL,
+		"size_bytes":   len(audioData),
 		"content_type": resp.Header.Get("Content-Type"),
 	}).Debug("Audio file downloaded to memory")
 

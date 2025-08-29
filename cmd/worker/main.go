@@ -116,7 +116,7 @@ func main() {
 		TranscribeService:  transcribeAdapter,
 		MessageFormatter:   messageFormatterService,
 		OTelWorkerWrapper:  otelWorkerWrapper, // Optional OTel wrapper
-		TracePropagator:    func() *middleware.TraceCorrelationPropagator {
+		TracePropagator: func() *middleware.TraceCorrelationPropagator {
 			if otelService != nil {
 				return middleware.NewTraceCorrelationPropagator(otelService)
 			}
@@ -135,7 +135,7 @@ func main() {
 	} else if concurrency > 100 {
 		log.WithField("requested", concurrency).Warn("MAX_PARALLEL is very high, consider if this is intentional")
 	}
-	
+
 	log.WithField("concurrency", concurrency).Info("Setting up user message consumer")
 	if err := consumerManager.AddConsumer(ctx, rabbitMQService, cfg.RabbitMQ.UserMessagesQueue, concurrency, userMessageHandler); err != nil {
 		log.WithError(err).Fatal("Failed to add user message consumer")
