@@ -41,6 +41,9 @@ type Config struct {
 
 	// Security
 	Security SecurityConfig `mapstructure:",squash"`
+
+	// Callback
+	Callback CallbackConfig `mapstructure:",squash"`
 }
 
 type ServerConfig struct {
@@ -185,6 +188,16 @@ type SecurityConfig struct {
 	StrictMode          bool   `mapstructure:"SECURITY_STRICT_MODE"`
 }
 
+type CallbackConfig struct {
+	Enabled       bool   `mapstructure:"CALLBACK_ENABLED"`
+	Timeout       int    `mapstructure:"CALLBACK_TIMEOUT"`
+	MaxRetries    int    `mapstructure:"CALLBACK_MAX_RETRIES"`
+	EnableHMAC    bool   `mapstructure:"CALLBACK_ENABLE_HMAC"`
+	HMACSecret    string `mapstructure:"CALLBACK_HMAC_SECRET"`
+	RequireHTTPS  bool   `mapstructure:"CALLBACK_REQUIRE_HTTPS"`
+	AllowedDomain string `mapstructure:"CALLBACK_ALLOWED_DOMAIN"`
+}
+
 // Load loads configuration from environment variables and files
 func Load() (*Config, error) {
 	viper.AutomaticEnv()
@@ -316,6 +329,15 @@ func setDefaults() {
 	viper.SetDefault("SECURITY_ALLOWED_DOMAINS", "") // Empty = allow all
 	viper.SetDefault("SECURITY_BLOCKED_DOMAINS", "localhost,127.0.0.1,0.0.0.0,192.168.,10.,172.")
 	viper.SetDefault("SECURITY_STRICT_MODE", false)
+
+	// Callback
+	viper.SetDefault("CALLBACK_ENABLED", true)
+	viper.SetDefault("CALLBACK_TIMEOUT", 10)    // 10 seconds
+	viper.SetDefault("CALLBACK_MAX_RETRIES", 3) // 3 retry attempts
+	viper.SetDefault("CALLBACK_ENABLE_HMAC", false)
+	viper.SetDefault("CALLBACK_HMAC_SECRET", "")
+	viper.SetDefault("CALLBACK_REQUIRE_HTTPS", true)
+	viper.SetDefault("CALLBACK_ALLOWED_DOMAIN", "") // Empty = allow all
 }
 
 func validateRequired(config *Config) error {

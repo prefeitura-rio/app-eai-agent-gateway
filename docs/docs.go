@@ -347,6 +347,10 @@ const docTemplate = `{
                 "user_number"
             ],
             "properties": {
+                "callback_url": {
+                    "type": "string",
+                    "example": "https://example.com/webhook/callback"
+                },
                 "message": {
                     "type": "string",
                     "example": "Hello, how can you help me?"

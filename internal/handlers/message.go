@@ -3,7 +3,10 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -23,6 +26,8 @@ type RedisServiceInterface interface {
 	GetTaskResult(ctx context.Context, taskID string, dest interface{}) error
 	Get(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key string, value string, ttl time.Duration) error
+	StoreCallbackURL(ctx context.Context, messageID string, callbackURL string, ttl time.Duration) error
+	GetCallbackURL(ctx context.Context, messageID string) (string, error)
 	Ping(ctx context.Context) error
 }
 
@@ -80,6 +85,18 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 			"message": err.Error(),
 		})
 		return
+	}
+
+	// Validate callback URL if provided
+	if req.CallbackURL != nil && *req.CallbackURL != "" {
+		if err := validateCallbackURL(*req.CallbackURL); err != nil {
+			h.logger.WithError(err).WithField("callback_url", *req.CallbackURL).Error("Invalid callback URL")
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid callback URL",
+				"message": err.Error(),
+			})
+			return
+		}
 	}
 
 	// Generate message ID for tracking
@@ -169,6 +186,15 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	if metadataBytes, err := json.Marshal(metadataForResponse); err == nil {
 		metadataKey := "task:metadata:" + messageID
 		_ = h.redisService.Set(ctxTimeout, metadataKey, string(metadataBytes), h.config.Redis.TaskStatusTTL)
+	}
+
+	// Store callback URL if provided
+	if req.CallbackURL != nil && *req.CallbackURL != "" {
+		if err := h.redisService.StoreCallbackURL(ctxTimeout, messageID, *req.CallbackURL, h.config.Redis.TaskStatusTTL); err != nil {
+			logger.WithError(err).Warn("Failed to store callback URL, continuing with processing")
+		} else {
+			logger.WithField("callback_url", *req.CallbackURL).Debug("Callback URL stored for message")
+		}
 	}
 
 	// Queue message for processing with trace headers
@@ -449,5 +475,59 @@ func isAudioURL(url string) bool {
 			return true
 		}
 	}
+	return false
+}
+
+// validateCallbackURL validates callback URL format and security requirements
+func validateCallbackURL(callbackURL string) error {
+	// Check URL length
+	if len(callbackURL) > 2048 {
+		return fmt.Errorf("callback URL exceeds maximum length of 2048 characters")
+	}
+
+	// Parse URL
+	parsedURL, err := url.Parse(callbackURL)
+	if err != nil {
+		return fmt.Errorf("invalid callback URL format: %w", err)
+	}
+
+	// Validate scheme - only allow http/https
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return fmt.Errorf("callback URL must use HTTP or HTTPS protocol")
+	}
+
+	// Check for localhost and private IP addresses
+	host := parsedURL.Hostname()
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return fmt.Errorf("callback URL cannot use localhost")
+	}
+
+	// Check if host is an IP address and if it's private
+	if ip := net.ParseIP(host); ip != nil {
+		if isPrivateIP(ip) {
+			return fmt.Errorf("callback URL cannot use private IP addresses")
+		}
+	}
+
+	return nil
+}
+
+// isPrivateIP checks if an IP address is in a private range
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []string{
+		"10.0.0.0/8",
+		"172.16.0.0/12",
+		"192.168.0.0/16",
+		"169.254.0.0/16", // Link-local
+		"fc00::/7",       // IPv6 private
+	}
+
+	for _, cidr := range privateRanges {
+		_, network, _ := net.ParseCIDR(cidr)
+		if network.Contains(ip) {
+			return true
+		}
+	}
+
 	return false
 }

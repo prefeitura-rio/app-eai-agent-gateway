@@ -48,6 +48,9 @@ definitions:
     - TaskStatusFailed
   models.UserWebhookRequest:
     properties:
+      callback_url:
+        example: https://example.com/webhook/callback
+        type: string
       message:
         example: Hello, how can you help me?
         type: string

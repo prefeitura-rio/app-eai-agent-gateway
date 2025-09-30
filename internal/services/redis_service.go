@@ -107,6 +107,11 @@ type CacheInterface interface {
 	GetAgentID(ctx context.Context, userID string) (string, error)
 	DeleteAgentID(ctx context.Context, userID string) error
 
+	// Callback URL storage
+	StoreCallbackURL(ctx context.Context, messageID string, callbackURL string, ttl time.Duration) error
+	GetCallbackURL(ctx context.Context, messageID string) (string, error)
+	DeleteCallbackURL(ctx context.Context, messageID string) error
+
 	// Health check
 	Ping(ctx context.Context) error
 	Close() error
@@ -288,6 +293,24 @@ func (r *RedisService) GetAgentID(ctx context.Context, userID string) (string, e
 // DeleteAgentID removes cached agent ID for a user
 func (r *RedisService) DeleteAgentID(ctx context.Context, userID string) error {
 	key := fmt.Sprintf("agent:id:%s", userID)
+	return r.Delete(ctx, key)
+}
+
+// StoreCallbackURL stores callback URL for a message with configured TTL
+func (r *RedisService) StoreCallbackURL(ctx context.Context, messageID string, callbackURL string, ttl time.Duration) error {
+	key := fmt.Sprintf("callback:url:%s", messageID)
+	return r.SetValue(ctx, key, callbackURL, ttl)
+}
+
+// GetCallbackURL retrieves callback URL for a message
+func (r *RedisService) GetCallbackURL(ctx context.Context, messageID string) (string, error) {
+	key := fmt.Sprintf("callback:url:%s", messageID)
+	return r.Get(ctx, key)
+}
+
+// DeleteCallbackURL removes callback URL for a message
+func (r *RedisService) DeleteCallbackURL(ctx context.Context, messageID string) error {
+	key := fmt.Sprintf("callback:url:%s", messageID)
 	return r.Delete(ctx, key)
 }
 

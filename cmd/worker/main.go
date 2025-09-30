@@ -103,6 +103,20 @@ func main() {
 	// Initialize message formatter service
 	messageFormatterService := services.NewMessageFormatterService(cfg, log)
 
+	// Initialize callback service if enabled
+	var callbackService *services.CallbackService
+	if cfg.Callback.Enabled {
+		if otelService != nil {
+			callbackService = services.NewCallbackService(log, cfg, otelService.GetTracer())
+			log.Info("Callback service initialized with tracing")
+		} else {
+			callbackService = services.NewCallbackService(log, cfg, nil)
+			log.Info("Callback service initialized without tracing")
+		}
+	} else {
+		log.Info("Callback service disabled by configuration")
+	}
+
 	// Create transcribe service adapter (always create adapter, but with potentially nil service)
 	transcribeAdapter := workerhandlers.NewTranscribeServiceAdapter(transcribeService)
 
@@ -115,6 +129,7 @@ func main() {
 		GoogleAgentService: googleAgentService,
 		TranscribeService:  transcribeAdapter,
 		MessageFormatter:   messageFormatterService,
+		CallbackService:    callbackService,   // Optional callback service
 		OTelWorkerWrapper:  otelWorkerWrapper, // Optional OTel wrapper
 		TracePropagator: func() *middleware.TraceCorrelationPropagator {
 			if otelService != nil {

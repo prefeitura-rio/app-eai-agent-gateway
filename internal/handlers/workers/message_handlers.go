@@ -28,6 +28,7 @@ type MessageHandlerDependencies struct {
 	GoogleAgentService *services.GoogleAgentEngineService
 	TranscribeService  TranscribeServiceInterface
 	MessageFormatter   MessageFormatterInterface
+	CallbackService    *services.CallbackService              // Optional callback service
 	OTelWorkerWrapper  *middleware.OTelWorkerWrapper          // Optional OTel wrapper
 	TracePropagator    *middleware.TraceCorrelationPropagator // Optional trace propagator
 }
@@ -262,6 +263,15 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 					attribute.Bool("task.success", true),
 					attribute.Int("task.response_length", len(response)),
 				)
+			}
+		}
+
+		// Execute callback if configured
+		if deps.CallbackService != nil {
+			callbackURL, err := deps.RedisService.GetCallbackURL(ctx, queueMsg.ID)
+			if err == nil && callbackURL != "" {
+				// Execute callback asynchronously to avoid blocking worker
+				go executeCallback(context.Background(), deps, queueMsg.ID, callbackURL, response, logger)
 			}
 		}
 
@@ -943,4 +953,44 @@ func classifyTranscriptionError(err error) string {
 	}
 
 	return "unknown_error"
+}
+
+// executeCallback handles the callback execution asynchronously
+func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, messageID string, callbackURL string, response string, logger *logrus.Entry) {
+	callbackLogger := logger.WithFields(logrus.Fields{
+		"callback_url": callbackURL,
+		"message_id":   messageID,
+	})
+
+	callbackLogger.Info("Executing callback for completed task")
+
+	// Parse the response to extract the ProcessedMessageData
+	var processedData models.ProcessedMessageData
+	if err := json.Unmarshal([]byte(response), &processedData); err != nil {
+		callbackLogger.WithError(err).Error("Failed to parse response for callback")
+		return
+	}
+
+	// Create callback payload
+	payload := models.CallbackPayload{
+		MessageID:   messageID,
+		Status:      "completed",
+		Data:        processedData,
+		Error:       nil,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		ProcessedAt: processedData.ProcessedAt,
+	}
+
+	// Execute the callback with retry logic
+	if err := deps.CallbackService.ExecuteCallback(ctx, callbackURL, payload); err != nil {
+		callbackLogger.WithError(err).Error("Failed to execute callback after all retries")
+		// Store callback failure for debugging
+		errorKey := "callback:error:" + messageID
+		errorMsg := fmt.Sprintf("Failed to execute callback: %v", err)
+		_ = deps.RedisService.Set(ctx, errorKey, errorMsg, deps.Config.Redis.TaskStatusTTL)
+	} else {
+		callbackLogger.Info("Callback executed successfully")
+		// Clean up callback URL from Redis
+		_ = deps.RedisService.DeleteCallbackURL(ctx, messageID)
+	}
 }
