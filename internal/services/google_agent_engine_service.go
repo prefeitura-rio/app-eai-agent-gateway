@@ -425,11 +425,16 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 
 	// Add previous message first if provided (matches Python implementation logic)
 	if previousMessage != nil && *previousMessage != "" && len(*previousMessage) > 1 {
+		// Wrap previous message with context to make it clear it was sent by the system
+		wrappedContent := fmt.Sprintf(
+			"Mensagem anterior enviada pelo sistema:\n%s\n---",
+			*previousMessage,
+		)
 		messages = append(messages, map[string]interface{}{
 			"role":    "human",
-			"content": *previousMessage,
+			"content": wrappedContent,
 		})
-		s.logger.WithField("previous_message_length", len(*previousMessage)).Debug("Including previous message in request")
+		s.logger.WithField("previous_message_wrapped_length", len(wrappedContent)).Debug("Including wrapped previous message in request")
 	}
 
 	// Add the current message
