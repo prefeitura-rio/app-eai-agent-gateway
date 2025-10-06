@@ -214,12 +214,13 @@ func (s *GoogleAgentEngineService) GetOrCreateThread(ctx context.Context, userID
 }
 
 // SendMessage sends a message to a thread and returns the agent's response
-func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID string, content string) (*models.AgentResponse, error) {
+func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID string, content string, previousMessage *string) (*models.AgentResponse, error) {
 	start := time.Now()
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":      threadID,
-		"content_length": len(content),
+		"thread_id":            threadID,
+		"content_length":       len(content),
+		"has_previous_message": previousMessage != nil && *previousMessage != "",
 	}).Debug("Sending message to thread")
 
 	// Apply rate limiting
@@ -240,7 +241,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	}
 
 	// Call the reasoning engine via HTTP REST API
-	responseContent, err := s.queryReasoningEngine(ctx, threadID, content)
+	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, previousMessage)
 	if err != nil {
 		s.logger.WithError(err).WithField("thread_id", threadID).Error("Failed to query reasoning engine")
 		return nil, fmt.Errorf("failed to get AI response: %w", err)
@@ -413,20 +414,36 @@ func (s *GoogleAgentEngineService) extractOperationName(resp map[string]interfac
 }
 
 // queryReasoningEngine makes a request to the reasoning engine with proper async handling
-func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, threadID, message string) (string, error) {
+func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, threadID, message string, previousMessage *string) (string, error) {
 	accessToken, err := s.getAccessToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get access token: %w", err)
 	}
+
+	// Build messages array - prepend previous_message if provided
+	messages := []map[string]interface{}{}
+
+	// Add previous message first if provided (matches Python implementation logic)
+	if previousMessage != nil && *previousMessage != "" && len(*previousMessage) > 1 {
+		messages = append(messages, map[string]interface{}{
+			"role":    "human",
+			"content": *previousMessage,
+		})
+		s.logger.WithField("previous_message_length", len(*previousMessage)).Debug("Including previous message in request")
+	}
+
+	// Add the current message
+	messages = append(messages, map[string]interface{}{
+		"role":    "human",
+		"content": message,
+	})
 
 	// Build payload matching the sandbox pattern
 	payload := map[string]interface{}{
 		"classMethod": "async_query",
 		"input": map[string]interface{}{
 			"input": map[string]interface{}{
-				"messages": []map[string]interface{}{
-					{"role": "human", "content": message},
-				},
+				"messages": messages,
 			},
 			"config": map[string]interface{}{
 				"configurable": map[string]interface{}{
@@ -437,8 +454,9 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":      threadID,
-		"message_length": len(message),
+		"thread_id":            threadID,
+		"message_length":       len(message),
+		"total_messages_count": len(messages),
 	}).Debug("Making async_query call to reasoning engine")
 
 	resp, err := s.postQuery(ctx, accessToken, payload)
@@ -544,7 +562,7 @@ func (s *GoogleAgentEngineService) HealthCheck(ctx context.Context) error {
 	defer cancel()
 
 	// Test with a simple health check query to the reasoning engine
-	_, err := s.queryReasoningEngine(ctx, "health-check", "Health check - please respond with 'OK'")
+	_, err := s.queryReasoningEngine(ctx, "health-check", "Health check - please respond with 'OK'", nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "context deadline exceeded") {
 			return fmt.Errorf("google Agent Engine health check timeout")

@@ -439,8 +439,8 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	}
 
 	// Send message to Google Agent Engine
-	// The Google Agent Engine automatically handles previous message context via thread ID
-	agentResponse, err := deps.GoogleAgentService.SendMessage(agentCtx, threadID, message)
+	// Pass previous_message if provided to prepend context before the current message
+	agentResponse, err := deps.GoogleAgentService.SendMessage(agentCtx, threadID, message, msg.PreviousMessage)
 	if err != nil {
 		logger.WithError(err).Error("Failed to send message to Google Agent Engine")
 		if deps.OTelWorkerWrapper != nil && agentSpan != nil {
