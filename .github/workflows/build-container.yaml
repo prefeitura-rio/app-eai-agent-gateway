@@ -1,6 +1,7 @@
 name: Build and Push image
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -54,4 +55,3 @@ jobs:
             --tag $IMAGE_NAME:$TAG1 \
             --tag $IMAGE_NAME:$TAG2 \
             --push .
-
