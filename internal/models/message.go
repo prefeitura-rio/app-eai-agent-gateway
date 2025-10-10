@@ -13,6 +13,7 @@ type UserWebhookRequest struct {
 	Message         string                 `json:"message" binding:"required" example:"Hello, how can you help me?"`
 	Metadata        map[string]interface{} `json:"metadata,omitempty"`
 	Provider        *string                `json:"provider,omitempty" example:"google_agent_engine"`
+	CallbackURL     *string                `json:"callback_url,omitempty" binding:"omitempty,url" example:"https://example.com/webhook/callback"`
 }
 
 // WebhookResponse represents the response for webhook endpoints (matches Python API)
@@ -113,4 +114,23 @@ func GenerateMessageID() string {
 func IsValidUUID(u string) bool {
 	_, err := uuid.Parse(u)
 	return err == nil
+}
+
+// CallbackPayload represents the payload sent to callback URLs
+type CallbackPayload struct {
+	MessageID   string      `json:"message_id"`
+	Status      string      `json:"status"`
+	Data        interface{} `json:"data,omitempty"`
+	Error       *string     `json:"error,omitempty"`
+	Timestamp   string      `json:"timestamp"`
+	ProcessedAt string      `json:"processed_at"`
+}
+
+// CallbackInfo represents callback metadata stored in Redis
+type CallbackInfo struct {
+	URL         string    `json:"url"`
+	MessageID   string    `json:"message_id"`
+	RetryCount  int       `json:"retry_count"`
+	LastAttempt time.Time `json:"last_attempt,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
 }

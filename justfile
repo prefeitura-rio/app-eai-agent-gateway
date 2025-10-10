@@ -3,6 +3,15 @@
 
 # Run the application in development mode with hot reload (requires air)
 dev:
+    @echo "Generating Swagger documentation..."
+    @if command -v swag >/dev/null 2>&1; then \
+        swag init -g cmd/gateway/main.go -o docs --parseDependency --parseInternal; \
+    else \
+        echo "Installing swag..."; \
+        go install github.com/swaggo/swag/cmd/swag@latest; \
+        ~/go/bin/swag init -g cmd/gateway/main.go -o docs --parseDependency --parseInternal; \
+    fi
+    @echo "Starting development server with hot reload..."
     air
 
 # Run the gateway without hot reload
@@ -23,6 +32,12 @@ build:
 
 # Build only the gateway
 build-gateway:
+    @echo "Generating Swagger documentation..."
+    @if command -v swag >/dev/null 2>&1; then \
+        swag init -g cmd/gateway/main.go -o docs --parseDependency --parseInternal; \
+    else \
+        ~/go/bin/swag init -g cmd/gateway/main.go -o docs --parseDependency --parseInternal; \
+    fi
     @echo "Building gateway..."
     @mkdir -p bin
     @CGO_ENABLED=0 go build -o bin/gateway ./cmd/gateway/
@@ -218,7 +233,7 @@ swagger-generate:
     else \
         echo "Installing swag..."; \
         go install github.com/swaggo/swag/cmd/swag@latest; \
-        $(GOPATH)/bin/swag init -g cmd/gateway/main.go -o docs --parseDependency --parseInternal; \
+        ~/go/bin/swag init -g cmd/gateway/main.go -o docs --parseDependency --parseInternal; \
     fi
     @echo "Swagger documentation generated in docs/"
 
