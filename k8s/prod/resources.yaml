@@ -3,17 +3,17 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: eai-agent-gateway
+  name: ai-gateway
   annotations:
     reloader.stakater.com/auto: "true"
 spec:
   selector:
     matchLabels:
-      app: eai-agent-gateway
+      app: ai-gateway
   template:
     metadata:
       labels:
-        app: eai-agent-gateway
+        app: ai-gateway
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: "8080"
@@ -26,12 +26,12 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       containers:
-        - name: eai-agent-gateway
-          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+        - name: ai-gateway
+          image: ghcr.io/prefeitura-rio/ai-gateway:stable
           command: ["/app/gateway"]
           envFrom:
             - secretRef:
-                name: eai-agent-gateway-secrets
+                name: ai-gateway-secrets
           env:
             - name: SERVER_PORT
               value: "8000"
@@ -96,17 +96,17 @@ spec:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: eai-agent-gateway-worker
+  name: ai-gateway-worker
   annotations:
     reloader.stakater.com/auto: "true"
 spec:
   selector:
     matchLabels:
-      app: eai-agent-gateway-worker
+      app: ai-gateway-worker
   template:
     metadata:
       labels:
-        app: eai-agent-gateway-worker
+        app: ai-gateway-worker
     spec:
       automountServiceAccountToken: false
       securityContext:
@@ -115,12 +115,12 @@ spec:
         runAsGroup: 1000
         fsGroup: 1000
       containers:
-        - name: eai-agent-gateway-worker
-          image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
+        - name: ai-gateway-worker
+          image: ghcr.io/prefeitura-rio/ai-gateway:stable
           command: ["/app/worker"]
           envFrom:
             - secretRef:
-                name: eai-agent-gateway-secrets
+                name: ai-gateway-secrets
           env:
             - name: LOG_LEVEL
               value: "info"
@@ -157,8 +157,8 @@ apiVersion: v1
 kind: Service
 metadata:
   labels:
-    app: eai-agent-gateway
-  name: eai-agent-gateway
+    app: ai-gateway
+  name: ai-gateway
   annotations:
     prometheus.io/scrape: "true"
     prometheus.io/port: "8080"
@@ -175,31 +175,31 @@ spec:
       targetPort: 8080
       protocol: TCP
   selector:
-    app: eai-agent-gateway
+    app: ai-gateway
 
 ---
 # Pod Disruption Budget for API
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: eai-agent-gateway-pdb
+  name: ai-gateway-pdb
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: eai-agent-gateway
+      app: ai-gateway
 
 ---
 # Pod Disruption Budget for Workers
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: eai-agent-gateway-worker-pdb
+  name: ai-gateway-worker-pdb
 spec:
   minAvailable: 1
   selector:
     matchLabels:
-      app: eai-agent-gateway-worker
+      app: ai-gateway-worker
 
 ---
 apiVersion: keda.sh/v1alpha1
@@ -223,11 +223,11 @@ spec:
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
 metadata:
-  name: eai-agent-gateway-worker-scaledobject
+  name: ai-gateway-worker-scaledobject
 spec:
   scaleTargetRef:
     kind: Deployment
-    name: eai-agent-gateway-worker
+    name: ai-gateway-worker
   minReplicaCount: 1
   maxReplicaCount: 10
   triggers:
