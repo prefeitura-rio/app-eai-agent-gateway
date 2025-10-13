@@ -506,9 +506,14 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	if messagesArray, exists := outputMap["messages"]; exists {
 		transformedMessages = transformGoogleAgentMessages(deps.Logger, messagesArray)
 	} else {
-		// Fallback to empty messages if no messages field
-		logger.Warn("No 'messages' field found in output, using empty array")
-		transformedMessages = []interface{}{}
+		// Fallback: if no 'messages' field, wrap the entire output as structured data
+		logger.Warn("No 'messages' field found in output, wrapping output as structured data message")
+		structuredMessage := map[string]interface{}{
+			"message_type": "structured_data",
+			"content":      outputMap, // Include all output fields
+			"timestamp":    time.Now().Format(time.RFC3339),
+		}
+		transformedMessages = []interface{}{structuredMessage}
 	}
 
 	// Generate agent ID based on user number
