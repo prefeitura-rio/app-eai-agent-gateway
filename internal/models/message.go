@@ -8,12 +8,13 @@ import (
 
 // UserWebhookRequest represents the request payload for user webhook (matches Python API)
 type UserWebhookRequest struct {
-	UserNumber      string                 `json:"user_number" binding:"required" example:"5521999999999"`
-	PreviousMessage *string                `json:"previous_message,omitempty" example:"Previous message context"`
-	Message         string                 `json:"message" binding:"required" example:"Hello, how can you help me?"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
-	Provider        *string                `json:"provider,omitempty" example:"google_agent_engine"`
-	CallbackURL     *string                `json:"callback_url,omitempty" binding:"omitempty,url" example:"https://example.com/webhook/callback"`
+	UserNumber        string                 `json:"user_number" binding:"required" example:"5521999999999"`
+	PreviousMessage   *string                `json:"previous_message,omitempty" example:"Previous message context"`
+	Message           string                 `json:"message" binding:"required" example:"Hello, how can you help me?"`
+	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	Provider          *string                `json:"provider,omitempty" example:"google_agent_engine"`
+	CallbackURL       *string                `json:"callback_url,omitempty" binding:"omitempty,url" example:"https://example.com/webhook/callback"`
+	ReasoningEngineID *string                `json:"reasoning_engine_id,omitempty" example:"12345678"`
 }
 
 // WebhookResponse represents the response for webhook endpoints (matches Python API)
@@ -68,15 +69,16 @@ type TaskDebugInfo struct {
 
 // QueueMessage represents a message in the queue
 type QueueMessage struct {
-	ID              string                 `json:"id"`
-	Type            string                 `json:"type"`
-	UserNumber      string                 `json:"user_number,omitempty"`
-	AgentID         string                 `json:"agent_id,omitempty"`
-	Message         string                 `json:"message"`
-	PreviousMessage *string                `json:"previous_message,omitempty"`
-	Provider        string                 `json:"provider,omitempty"`
-	Timestamp       time.Time              `json:"timestamp"`
-	Metadata        map[string]interface{} `json:"metadata,omitempty"`
+	ID                string                 `json:"id"`
+	Type              string                 `json:"type"`
+	UserNumber        string                 `json:"user_number,omitempty"`
+	AgentID           string                 `json:"agent_id,omitempty"`
+	Message           string                 `json:"message"`
+	PreviousMessage   *string                `json:"previous_message,omitempty"`
+	Provider          string                 `json:"provider,omitempty"`
+	Timestamp         time.Time              `json:"timestamp"`
+	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	ReasoningEngineID *string                `json:"reasoning_engine_id,omitempty"`
 }
 
 // Note: Agent management models removed - were Letta-specific

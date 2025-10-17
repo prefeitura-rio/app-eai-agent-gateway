@@ -161,14 +161,15 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 
 	// Create queue message with Python API structure
 	queueMessage := models.QueueMessage{
-		ID:              messageID,
-		Type:            "user_message",
-		UserNumber:      req.UserNumber,
-		Message:         req.Message,
-		PreviousMessage: req.PreviousMessage,
-		Provider:        provider,
-		Timestamp:       time.Now(),
-		Metadata:        req.Metadata,
+		ID:                messageID,
+		Type:              "user_message",
+		UserNumber:        req.UserNumber,
+		Message:           req.Message,
+		PreviousMessage:   req.PreviousMessage,
+		Provider:          provider,
+		Timestamp:         time.Now(),
+		Metadata:          req.Metadata,
+		ReasoningEngineID: req.ReasoningEngineID,
 	}
 
 	// Add request metadata
