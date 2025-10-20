@@ -196,8 +196,7 @@ type CallbackConfig struct {
 	HMACSecret    string `mapstructure:"CALLBACK_HMAC_SECRET"`
 	RequireHTTPS  bool   `mapstructure:"CALLBACK_REQUIRE_HTTPS"`
 	AllowedDomain string `mapstructure:"CALLBACK_ALLOWED_DOMAIN"`
-	AuthEmail     string `mapstructure:"CALLBACK_AUTH_EMAIL"`
-	AuthPassword  string `mapstructure:"CALLBACK_AUTH_PASSWORD"`
+	AuthToken     string `mapstructure:"CALLBACK_AUTH_TOKEN"`
 }
 
 // Load loads configuration from environment variables and files
@@ -499,8 +498,7 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("CALLBACK_HMAC_SECRET")
 	_ = viper.BindEnv("CALLBACK_REQUIRE_HTTPS")
 	_ = viper.BindEnv("CALLBACK_ALLOWED_DOMAIN")
-	_ = viper.BindEnv("CALLBACK_AUTH_EMAIL")
-	_ = viper.BindEnv("CALLBACK_AUTH_PASSWORD")
+	_ = viper.BindEnv("CALLBACK_AUTH_TOKEN")
 }
 
 // GetLogLevel returns the logrus log level from config

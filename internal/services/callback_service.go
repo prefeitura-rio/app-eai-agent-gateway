@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -178,10 +177,9 @@ func (s *CallbackService) sendCallbackRequest(ctx context.Context, callbackURL s
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "EAI-Agent-Gateway/1.0")
 
-	if s.config.Callback.AuthEmail != "" && s.config.Callback.AuthPassword != "" {
-		auth := s.config.Callback.AuthEmail + ":" + s.config.Callback.AuthPassword
-		encodedAuth := base64.StdEncoding.EncodeToString([]byte(auth))
-		req.Header.Set("Authorization", "Basic "+encodedAuth)
+	// Add Bearer Token authentication if configured
+	if s.config.Callback.AuthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+s.config.Callback.AuthToken)
 	}
 
 	// Add HMAC signature if enabled
