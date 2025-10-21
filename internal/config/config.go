@@ -488,6 +488,15 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("MAX_AGENT_ID_LENGTH")
 	_ = viper.BindEnv("ENABLE_CONTENT_FILTER")
 	_ = viper.BindEnv("SECURITY_STRICT_MODE")
+
+	// Callback
+	_ = viper.BindEnv("CALLBACK_ENABLED")
+	_ = viper.BindEnv("CALLBACK_TIMEOUT")
+	_ = viper.BindEnv("CALLBACK_MAX_RETRIES")
+	_ = viper.BindEnv("CALLBACK_ENABLE_HMAC")
+	_ = viper.BindEnv("CALLBACK_HMAC_SECRET")
+	_ = viper.BindEnv("CALLBACK_REQUIRE_HTTPS")
+	_ = viper.BindEnv("CALLBACK_ALLOWED_DOMAIN")
 }
 
 // GetLogLevel returns the logrus log level from config

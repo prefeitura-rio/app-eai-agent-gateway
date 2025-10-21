@@ -182,14 +182,66 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				logger.WithError(redisErr).Error("Failed to store error in Redis")
 			}
 
+			// Extract retry count from RabbitMQ headers
+			retryCount := int64(0)
+			if delivery.Headers != nil {
+				if count, ok := delivery.Headers["x-retry-count"].(int64); ok {
+					retryCount = count
+				}
+			}
+			maxRetries := int64(deps.Config.RabbitMQ.MaxRetries)
+
 			// Determine if this error should be retried
 			shouldRetry := isRetriableError(err)
 
 			if shouldRetry {
+				// Check if max retries reached
+				if retryCount >= maxRetries {
+					logger.WithFields(logrus.Fields{
+						"retriable":     true,
+						"error_type":    "retriable_max_retries_exceeded",
+						"error_message": err.Error(),
+						"retry_count":   retryCount,
+						"max_retries":   maxRetries,
+					}).Error("Retriable error but max retries reached, marking as failed")
+
+					// Update task status to failed
+					if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusFailed), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
+						logger.WithError(statusErr).Error("Failed to update task status to failed")
+					}
+
+					// Execute error callback if configured
+					if deps.CallbackService != nil {
+						callbackURL, getErr := deps.RedisService.GetCallbackURL(ctx, queueMsg.ID)
+						if getErr == nil && callbackURL != "" {
+							// Execute error callback asynchronously
+							go executeCallbackOnError(context.Background(), deps, queueMsg.ID, callbackURL, err, logger)
+						}
+					}
+
+					// Add retriable error exceeded attributes to the main span if available
+					if deps.OTelWorkerWrapper != nil {
+						if span := trace.SpanFromContext(ctx); span.IsRecording() {
+							span.SetAttributes(
+								attribute.Bool("task.will_retry", false),
+								attribute.String("task.error_type", "retriable_max_retries_exceeded"),
+								attribute.String("task.error", err.Error()),
+								attribute.Int64("task.retry_count", retryCount),
+								attribute.Int64("task.max_retries", maxRetries),
+							)
+						}
+					}
+
+					// Return nil to prevent further retries
+					return nil
+				}
+
 				logger.WithFields(logrus.Fields{
 					"retriable":     true,
 					"error_type":    "retriable",
 					"error_message": err.Error(),
+					"retry_count":   retryCount,
+					"max_retries":   maxRetries,
 				}).Warn("Error is retriable, will be retried by RabbitMQ")
 				// Update task status to processing (keep it processing for retry)
 				if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusProcessing), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
@@ -202,6 +254,8 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 							attribute.Bool("task.will_retry", true),
 							attribute.String("task.error_type", "retriable"),
 							attribute.String("task.error", err.Error()),
+							attribute.Int64("task.retry_count", retryCount),
+							attribute.Int64("task.max_retries", maxRetries),
 						)
 					}
 				}
@@ -216,6 +270,14 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				// Update task status to failed for permanent errors
 				if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusFailed), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
 					logger.WithError(statusErr).Error("Failed to update task status to failed")
+				}
+				// Execute error callback if configured
+				if deps.CallbackService != nil {
+					callbackURL, getErr := deps.RedisService.GetCallbackURL(ctx, queueMsg.ID)
+					if getErr == nil && callbackURL != "" {
+						// Execute error callback asynchronously
+						go executeCallbackOnError(context.Background(), deps, queueMsg.ID, callbackURL, err, logger)
+					}
 				}
 				// Add permanent error attributes to the main span if available
 				if deps.OTelWorkerWrapper != nil {
@@ -995,6 +1057,48 @@ func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, mess
 		_ = deps.RedisService.Set(ctx, errorKey, errorMsg, deps.Config.Redis.TaskStatusTTL)
 	} else {
 		callbackLogger.Info("Callback executed successfully")
+		// Clean up callback URL from Redis
+		_ = deps.RedisService.DeleteCallbackURL(ctx, messageID)
+	}
+}
+
+// executeCallbackOnError handles the callback execution for failed tasks
+func executeCallbackOnError(ctx context.Context, deps *MessageHandlerDependencies, messageID string, callbackURL string, processErr error, logger *logrus.Entry) {
+	callbackLogger := logger.WithFields(logrus.Fields{
+		"callback_url": callbackURL,
+		"message_id":   messageID,
+		"error_type":   "failure",
+	})
+
+	callbackLogger.Info("Executing error callback for failed task")
+
+	// Create error message
+	errorMessage := processErr.Error()
+
+	// Create callback payload with error information
+	payload := models.CallbackPayload{
+		MessageID: messageID,
+		Status:    "failed", // Status indicates failure
+		Data: models.ProcessedMessageData{
+			Messages:    []string{errorMessage}, // Error message in messages array
+			AgentID:     "",                     // No agent_id for errors
+			ProcessedAt: messageID,
+			Status:      "error",
+		},
+		Error:       &errorMessage, // Error description
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		ProcessedAt: messageID,
+	}
+
+	// Execute the callback with retry logic
+	if err := deps.CallbackService.ExecuteCallback(ctx, callbackURL, payload); err != nil {
+		callbackLogger.WithError(err).Error("Failed to execute error callback after all retries")
+		// Store callback failure for debugging
+		errorKey := "callback:error:" + messageID
+		errorMsg := fmt.Sprintf("Failed to execute error callback: %v", err)
+		_ = deps.RedisService.Set(ctx, errorKey, errorMsg, deps.Config.Redis.TaskStatusTTL)
+	} else {
+		callbackLogger.Info("Error callback executed successfully")
 		// Clean up callback URL from Redis
 		_ = deps.RedisService.DeleteCallbackURL(ctx, messageID)
 	}
