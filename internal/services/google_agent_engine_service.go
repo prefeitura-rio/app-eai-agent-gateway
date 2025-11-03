@@ -214,13 +214,14 @@ func (s *GoogleAgentEngineService) GetOrCreateThread(ctx context.Context, userID
 }
 
 // SendMessage sends a message to a thread and returns the agent's response
-func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID string, content string, previousMessage *string) (*models.AgentResponse, error) {
+func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID string, content string, previousMessage *string, reasoningEngineID *string) (*models.AgentResponse, error) {
 	start := time.Now()
 
 	s.logger.WithFields(logrus.Fields{
 		"thread_id":            threadID,
 		"content_length":       len(content),
 		"has_previous_message": previousMessage != nil && *previousMessage != "",
+		"custom_engine_id":     reasoningEngineID != nil && *reasoningEngineID != "",
 	}).Debug("Sending message to thread")
 
 	// Apply rate limiting
@@ -241,7 +242,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	}
 
 	// Call the reasoning engine via HTTP REST API
-	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, previousMessage)
+	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, previousMessage, reasoningEngineID)
 	if err != nil {
 		s.logger.WithError(err).WithField("thread_id", threadID).Error("Failed to query reasoning engine")
 		return nil, fmt.Errorf("failed to get AI response: %w", err)
@@ -312,12 +313,12 @@ func (s *GoogleAgentEngineService) getAccessToken(ctx context.Context) (string, 
 }
 
 // postQuery makes a POST request to the reasoning engine query endpoint
-func (s *GoogleAgentEngineService) postQuery(ctx context.Context, accessToken string, payload map[string]interface{}) (map[string]interface{}, error) {
+func (s *GoogleAgentEngineService) postQuery(ctx context.Context, accessToken string, payload map[string]interface{}, reasoningEngineID string) (map[string]interface{}, error) {
 	url := fmt.Sprintf("https://%s-aiplatform.googleapis.com/v1beta1/projects/%s/locations/%s/reasoningEngines/%s:query",
 		s.config.GoogleAgentEngine.Location,
 		s.config.GoogleAgentEngine.ProjectID,
 		s.config.GoogleAgentEngine.Location,
-		s.config.GoogleAgentEngine.ReasoningEngineID)
+		reasoningEngineID)
 
 	jsonData, err := json.Marshal(payload)
 	if err != nil {
@@ -414,10 +415,20 @@ func (s *GoogleAgentEngineService) extractOperationName(resp map[string]interfac
 }
 
 // queryReasoningEngine makes a request to the reasoning engine with proper async handling
-func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, threadID, message string, previousMessage *string) (string, error) {
+func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, threadID, message string, previousMessage *string, reasoningEngineID *string) (string, error) {
 	accessToken, err := s.getAccessToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get access token: %w", err)
+	}
+
+	// Use custom reasoning engine ID if provided, otherwise use config default
+	engineID := s.config.GoogleAgentEngine.ReasoningEngineID
+	if reasoningEngineID != nil && *reasoningEngineID != "" {
+		engineID = *reasoningEngineID
+		s.logger.WithFields(logrus.Fields{
+			"custom_engine_id": engineID,
+			"default_engine_id": s.config.GoogleAgentEngine.ReasoningEngineID,
+		}).Info("Using custom reasoning engine ID from request")
 	}
 
 	// Build messages array - prepend previous_message if provided
@@ -462,9 +473,10 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 		"thread_id":            threadID,
 		"message_length":       len(message),
 		"total_messages_count": len(messages),
+		"reasoning_engine_id":  engineID,
 	}).Debug("Making async_query call to reasoning engine")
 
-	resp, err := s.postQuery(ctx, accessToken, payload)
+	resp, err := s.postQuery(ctx, accessToken, payload, engineID)
 	if err != nil {
 		return "", fmt.Errorf("failed to post query: %w", err)
 	}
@@ -567,7 +579,8 @@ func (s *GoogleAgentEngineService) HealthCheck(ctx context.Context) error {
 	defer cancel()
 
 	// Test with a simple health check query to the reasoning engine
-	_, err := s.queryReasoningEngine(ctx, "health-check", "Health check - please respond with 'OK'", nil)
+	// Use nil for reasoningEngineID to use the default configured engine
+	_, err := s.queryReasoningEngine(ctx, "health-check", "Health check - please respond with 'OK'", nil, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "context deadline exceeded") {
 			return fmt.Errorf("google Agent Engine health check timeout")
