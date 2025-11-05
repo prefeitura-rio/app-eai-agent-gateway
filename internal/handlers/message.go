@@ -317,7 +317,8 @@ func (h *MessageHandler) HandleHistoryUpdateWebhook(c *gin.Context) {
 	logger.Debug("Thread obtained for history update")
 
 	// Send history update to Google Agent Engine
-	resp, err := h.googleAgentService.SendHistoryUpdate(ctxTimeout, threadID, req.Messages, nil)
+	// Pass custom reasoning_engine_id if provided in the request
+	resp, err := h.googleAgentService.SendHistoryUpdate(ctxTimeout, threadID, req.Messages, req.ReasoningEngineID)
 	if err != nil {
 		logger.WithError(err).Error("Failed to send history update")
 		c.JSON(http.StatusInternalServerError, gin.H{

@@ -22,6 +22,9 @@ definitions:
       metadata:
         additionalProperties: true
         type: object
+      reasoning_engine_id:
+        example: "12345678"
+        type: string
       user_number:
         example: "5521999999999"
         type: string

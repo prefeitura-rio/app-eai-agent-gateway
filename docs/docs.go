@@ -359,6 +359,10 @@ const docTemplate = `{
                     "type": "object",
                     "additionalProperties": true
                 },
+                "reasoning_engine_id": {
+                    "type": "string",
+                    "example": "12345678"
+                },
                 "user_number": {
                     "type": "string",
                     "example": "5521999999999"

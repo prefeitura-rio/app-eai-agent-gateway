@@ -14,9 +14,10 @@ type HistoryMessage struct {
 
 // HistoryUpdateWebhookRequest represents the request payload for history update webhook
 type HistoryUpdateWebhookRequest struct {
-	UserNumber string                 `json:"user_number" binding:"required" example:"5521999999999"`
-	Messages   []HistoryMessage       `json:"messages" binding:"required,min=1"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	UserNumber        string                 `json:"user_number" binding:"required" example:"5521999999999"`
+	Messages          []HistoryMessage       `json:"messages" binding:"required,min=1"`
+	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	ReasoningEngineID *string                `json:"reasoning_engine_id,omitempty" example:"12345678"`
 }
 
 // UserWebhookRequest represents the request payload for user webhook (matches Python API)
