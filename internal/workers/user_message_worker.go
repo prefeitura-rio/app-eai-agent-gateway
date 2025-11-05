@@ -101,12 +101,6 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 	procCtx.ThreadID = threadID
 	procCtx.Logger = procCtx.Logger.WithField("thread_id", threadID)
 
-	// Debug logging for previous_message
-	procCtx.Logger.WithFields(logrus.Fields{
-		"previous_message_is_nil": queueMessage.PreviousMessage == nil,
-		"previous_message_value":  fmt.Sprintf("%v", queueMessage.PreviousMessage),
-	}).Info("DEBUG: Checking previous_message before condition")
-
 	// If there's a previous_message, send it as history update first with role="ai"
 	if queueMessage.PreviousMessage != nil && *queueMessage.PreviousMessage != "" {
 		procCtx.Logger.WithField("previous_message_length", len(*queueMessage.PreviousMessage)).Info("Sending previous message as history update")
