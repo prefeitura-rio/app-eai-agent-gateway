@@ -237,6 +237,131 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	})
 }
 
+// HandleHistoryUpdateWebhook processes history update messages and sends them to Google Agent Engine
+//
+//	@Summary		Process history update webhook
+//	@Description	Accepts multiple messages to update conversation history
+//	@Tags			Messages
+//	@Accept			json
+//	@Produce		json
+//	@Param			request	body		models.HistoryUpdateWebhookRequest	true	"History update request"
+//	@Success		200		{object}	map[string]interface{}				"History updated successfully"
+//	@Failure		400		{object}	map[string]interface{}				"Invalid request"
+//	@Failure		500		{object}	map[string]interface{}				"Internal server error"
+//	@Router			/api/v1/message/webhook/update_history [post]
+func (h *MessageHandler) HandleHistoryUpdateWebhook(c *gin.Context) {
+	var req models.HistoryUpdateWebhookRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.WithError(err).Error("Invalid history update webhook request")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid request",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	// Generate message ID for tracking
+	messageID := models.GenerateMessageID()
+
+	logger := h.logger.WithFields(logrus.Fields{
+		"message_id":     messageID,
+		"user_number":    req.UserNumber,
+		"messages_count": len(req.Messages),
+	})
+
+	logger.Info("Processing history update webhook request")
+
+	// Create distributed tracing span for end-to-end tracking
+	var span trace.Span
+	var traceHeaders map[string]interface{}
+	ctx := c.Request.Context()
+
+	if h.tracePropagator != nil {
+		ctx, span = h.tracePropagator.CreateChildSpan(ctx, "history_update_e2e",
+			attribute.String("message.id", messageID),
+			attribute.String("user.number", req.UserNumber),
+			attribute.Int("messages.count", len(req.Messages)),
+		)
+		defer span.End()
+
+		// Inject trace context into headers for RabbitMQ
+		traceHeaders = make(map[string]interface{})
+		for k, v := range h.tracePropagator.InjectTraceContext(ctx) {
+			traceHeaders[k] = v
+		}
+	}
+
+	// Store initial status
+	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := h.redisService.SetTaskStatus(ctxTimeout, messageID, string(models.TaskStatusProcessing), h.config.Redis.TaskStatusTTL); err != nil {
+		logger.WithError(err).Error("Failed to set initial task status")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Internal server error",
+			"message": "Failed to initialize task tracking",
+		})
+		return
+	}
+
+	// Create queue message for history update
+	queueMessage := models.QueueMessage{
+		ID:         messageID,
+		Type:       "history_update",
+		UserNumber: req.UserNumber,
+		Messages:   req.Messages,
+		Provider:   "google_agent_engine", // History updates only work with Google Agent Engine
+		Timestamp:  time.Now(),
+		Metadata:   req.Metadata,
+	}
+
+	// Add request metadata
+	if queueMessage.Metadata == nil {
+		queueMessage.Metadata = make(map[string]interface{})
+	}
+	queueMessage.Metadata["request_id"] = c.GetString("request_id")
+	queueMessage.Metadata["source"] = "webhook"
+
+	// Queue message for processing with trace headers
+	var err error
+	if traceHeaders != nil && h.rabbitMQService != nil {
+		// Use interface that supports headers if tracing is enabled
+		if publisherWithHeaders, ok := h.rabbitMQService.(interface {
+			PublishMessageWithHeaders(ctx context.Context, queueName string, message interface{}, headers map[string]interface{}) error
+		}); ok {
+			err = publisherWithHeaders.PublishMessageWithHeaders(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage, traceHeaders)
+		} else {
+			// Fallback to regular publish
+			err = h.rabbitMQService.PublishMessage(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage)
+		}
+	} else {
+		err = h.rabbitMQService.PublishMessage(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage)
+	}
+
+	if err != nil {
+		logger.WithError(err).Error("Failed to queue history update message")
+
+		// Update task status to failed
+		_ = h.redisService.SetTaskStatus(ctxTimeout, messageID, string(models.TaskStatusFailed), h.config.Redis.TaskStatusTTL)
+
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Internal server error",
+			"message": "Failed to queue message for processing",
+		})
+		return
+	}
+
+	logger.Info("History update message queued successfully")
+
+	// For history updates, we'll return the polling endpoint since the worker will process it async
+	// The worker will return the sync response from Google Agent Engine
+	c.JSON(http.StatusAccepted, models.WebhookResponse{
+		MessageID:       messageID,
+		Status:          string(models.TaskStatusProcessing),
+		PollingEndpoint: "/api/v1/message/response?message_id=" + messageID,
+	})
+}
+
 // HandleMessageResponse handles polling for message processing results
 //
 //	@Summary		Get message response

@@ -174,6 +174,7 @@ func (s *Server) setupRoutes() {
 			message := v1.Group("/message")
 			{
 				message.POST("/webhook/user", s.messageHandler.HandleUserWebhook)
+				message.POST("/webhook/update_history", s.messageHandler.HandleHistoryUpdateWebhook)
 				message.GET("/response", s.messageHandler.HandleMessageResponse)
 				message.GET("/debug/task-status", s.messageHandler.HandleDebugTaskStatus)
 			}

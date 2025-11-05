@@ -139,6 +139,55 @@ const docTemplate = `{
                 }
             }
         },
+        "/api/v1/message/webhook/update_history": {
+            "post": {
+                "description": "Accepts multiple messages to update conversation history",
+                "consumes": [
+                    "application/json"
+                ],
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "Messages"
+                ],
+                "summary": "Process history update webhook",
+                "parameters": [
+                    {
+                        "description": "History update request",
+                        "name": "request",
+                        "in": "body",
+                        "required": true,
+                        "schema": {
+                            "$ref": "#/definitions/models.HistoryUpdateWebhookRequest"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "History updated successfully",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "500": {
+                        "description": "Internal server error",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    }
+                }
+            }
+        },
         "/api/v1/message/webhook/user": {
             "post": {
                 "description": "Accepts a user message and queues it for processing by AI agents",
@@ -275,6 +324,47 @@ const docTemplate = `{
         }
     },
     "definitions": {
+        "models.HistoryMessage": {
+            "type": "object",
+            "required": [
+                "content",
+                "role"
+            ],
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "example": "Hello, World!"
+                },
+                "role": {
+                    "type": "string",
+                    "example": "ai"
+                }
+            }
+        },
+        "models.HistoryUpdateWebhookRequest": {
+            "type": "object",
+            "required": [
+                "messages",
+                "user_number"
+            ],
+            "properties": {
+                "messages": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "$ref": "#/definitions/models.HistoryMessage"
+                    }
+                },
+                "metadata": {
+                    "type": "object",
+                    "additionalProperties": true
+                },
+                "user_number": {
+                    "type": "string",
+                    "example": "5521999999999"
+                }
+            }
+        },
         "models.MessageResponse": {
             "description": "Message processing response",
             "type": "object",
@@ -366,6 +456,10 @@ const docTemplate = `{
                 "provider": {
                     "type": "string",
                     "example": "google_agent_engine"
+                },
+                "reasoning_engine_id": {
+                    "type": "string",
+                    "example": "12345678"
                 },
                 "user_number": {
                     "type": "string",

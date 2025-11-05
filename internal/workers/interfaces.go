@@ -95,6 +95,9 @@ type AgentClientInterface interface {
 
 	// SendMessage sends a message to a thread and gets response
 	SendMessage(ctx context.Context, threadID string, content string) (*models.AgentResponse, error)
+
+	// SendHistoryUpdate sends multiple messages to update conversation history
+	SendHistoryUpdate(ctx context.Context, threadID string, messages []models.HistoryMessage, reasoningEngineID *string) (map[string]interface{}, error)
 }
 
 // MessageFormatterInterface defines message formatting operations

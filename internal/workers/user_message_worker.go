@@ -56,6 +56,11 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 	// Create processing context
 	procCtx := NewProcessingContext(queueMessage, w.deps.Logger)
 
+	// Check if this is a history update message
+	if queueMessage.Type == "history_update" {
+		return w.processHistoryUpdate(ctx, queueMessage, procCtx, start)
+	}
+
 	procCtx.Logger.Info("Processing user message")
 
 	// Parse the user webhook request from the queue message content
@@ -246,4 +251,108 @@ func (w *UserMessageWorker) processMessageContent(ctx context.Context, req *mode
 	}
 
 	return content, nil
+}
+
+// processHistoryUpdate handles history update messages
+func (w *UserMessageWorker) processHistoryUpdate(ctx context.Context, queueMessage *models.QueueMessage, procCtx *ProcessingContext, start time.Time) MessageProcessingResult {
+	procCtx.Logger.Info("Processing history update message")
+
+	// Validate that we have messages
+	if len(queueMessage.Messages) == 0 {
+		procCtx.Logger.Error("History update message has no messages")
+		return MessageProcessingResult{
+			Success:  false,
+			Error:    fmt.Errorf("history update message has no messages"),
+			Duration: time.Since(start),
+		}
+	}
+
+	// Process audio URLs in messages if needed
+	processedMessages := make([]models.HistoryMessage, len(queueMessage.Messages))
+	for i, msg := range queueMessage.Messages {
+		content := msg.Content
+
+		// Check if content is an audio URL and transcribe if needed
+		if w.deps.TranscribeService != nil && w.deps.TranscribeService.IsAudioURL(content) {
+			procCtx.Logger.WithFields(logrus.Fields{
+				"message_index": i,
+				"audio_url":     content,
+			}).Debug("Detected audio URL in history message, transcribing")
+
+			transcribedText, err := w.deps.TranscribeService.TranscribeAudio(ctx, content)
+			if err != nil {
+				procCtx.Logger.WithError(err).WithField("message_index", i).Error("Failed to transcribe audio in history message")
+				return MessageProcessingResult{
+					Success:  false,
+					Error:    fmt.Errorf("failed to transcribe audio in message %d: %w", i, err),
+					Duration: time.Since(start),
+				}
+			}
+
+			procCtx.Logger.WithFields(logrus.Fields{
+				"message_index":    i,
+				"original_url":     content,
+				"transcribed_text": transcribedText,
+				"text_length":      len(transcribedText),
+			}).Info("Audio in history message transcribed successfully")
+
+			content = transcribedText
+		}
+
+		processedMessages[i] = models.HistoryMessage{
+			Content: content,
+			Role:    msg.Role,
+		}
+	}
+
+	// Get or create thread for the user
+	threadID, err := w.deps.AgentClient.GetOrCreateThread(ctx, queueMessage.UserNumber)
+	if err != nil {
+		procCtx.Logger.WithError(err).Error("Failed to get or create thread for history update")
+		return MessageProcessingResult{
+			Success:  false,
+			Error:    fmt.Errorf("failed to get or create thread: %w", err),
+			Duration: time.Since(start),
+		}
+	}
+
+	procCtx.ThreadID = threadID
+	procCtx.Logger = procCtx.Logger.WithField("thread_id", threadID)
+
+	// Send history update to Google Agent Engine
+	resp, err := w.deps.AgentClient.SendHistoryUpdate(ctx, threadID, processedMessages, queueMessage.ReasoningEngineID)
+	if err != nil {
+		procCtx.Logger.WithError(err).Error("Failed to send history update to agent")
+		return MessageProcessingResult{
+			Success:  false,
+			Error:    fmt.Errorf("failed to send history update to agent: %w", err),
+			Duration: time.Since(start),
+		}
+	}
+
+	// Marshal the response to JSON
+	responseBytes, err := json.Marshal(resp)
+	if err != nil {
+		procCtx.Logger.WithError(err).Error("Failed to marshal history update response")
+		return MessageProcessingResult{
+			Success:  false,
+			Error:    fmt.Errorf("failed to marshal response: %w", err),
+			Duration: time.Since(start),
+		}
+	}
+
+	responseString := string(responseBytes)
+
+	procCtx.Logger.WithFields(logrus.Fields{
+		"thread_id":      threadID,
+		"messages_count": len(processedMessages),
+		"duration_ms":    time.Since(start).Milliseconds(),
+		"response":       responseString,
+	}).Info("History update processed successfully")
+
+	return MessageProcessingResult{
+		Success:  true,
+		Content:  &responseString,
+		Duration: time.Since(start),
+	}
 }

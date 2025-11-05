@@ -1,5 +1,34 @@
 basePath: /
 definitions:
+  models.HistoryMessage:
+    properties:
+      content:
+        example: Hello, World!
+        type: string
+      role:
+        example: ai
+        type: string
+    required:
+    - content
+    - role
+    type: object
+  models.HistoryUpdateWebhookRequest:
+    properties:
+      messages:
+        items:
+          $ref: '#/definitions/models.HistoryMessage'
+        minItems: 1
+        type: array
+      metadata:
+        additionalProperties: true
+        type: object
+      user_number:
+        example: "5521999999999"
+        type: string
+    required:
+    - messages
+    - user_number
+    type: object
   models.MessageResponse:
     description: Message processing response
     properties:
@@ -62,6 +91,9 @@ definitions:
         type: string
       provider:
         example: google_agent_engine
+        type: string
+      reasoning_engine_id:
+        example: "12345678"
         type: string
       user_number:
         example: "5521999999999"
@@ -170,6 +202,39 @@ paths:
             additionalProperties: true
             type: object
       summary: Get message response
+      tags:
+      - Messages
+  /api/v1/message/webhook/update_history:
+    post:
+      consumes:
+      - application/json
+      description: Accepts multiple messages to update conversation history
+      parameters:
+      - description: History update request
+        in: body
+        name: request
+        required: true
+        schema:
+          $ref: '#/definitions/models.HistoryUpdateWebhookRequest'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: History updated successfully
+          schema:
+            additionalProperties: true
+            type: object
+        "400":
+          description: Invalid request
+          schema:
+            additionalProperties: true
+            type: object
+        "500":
+          description: Internal server error
+          schema:
+            additionalProperties: true
+            type: object
+      summary: Process history update webhook
       tags:
       - Messages
   /api/v1/message/webhook/user:
