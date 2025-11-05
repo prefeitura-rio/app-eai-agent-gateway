@@ -94,7 +94,7 @@ type AgentClientInterface interface {
 	GetOrCreateThread(ctx context.Context, userID string) (string, error)
 
 	// SendMessage sends a message to a thread and gets response
-	SendMessage(ctx context.Context, threadID string, content string) (*models.AgentResponse, error)
+	SendMessage(ctx context.Context, threadID string, content string, reasoningEngineID *string, messageType *string) (*models.AgentResponse, error)
 
 	// SendHistoryUpdate sends multiple messages to update conversation history
 	SendHistoryUpdate(ctx context.Context, threadID string, messages []models.HistoryMessage, reasoningEngineID *string) (map[string]interface{}, error)
