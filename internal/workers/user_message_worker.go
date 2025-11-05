@@ -63,40 +63,32 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 
 	procCtx.Logger.Info("Processing user message")
 
-	// Parse the user webhook request from the queue message content
-	var userRequest models.UserWebhookRequest
-	if err := json.Unmarshal([]byte(queueMessage.Message), &userRequest); err != nil {
-		procCtx.Logger.WithError(err).Error("Failed to unmarshal user webhook request")
-		return MessageProcessingResult{
-			Success:  false,
-			Error:    fmt.Errorf("failed to unmarshal user webhook request: %w", err),
-			Duration: time.Since(start),
-		}
-	}
-
-	// Validate user request
-	if err := w.validateUserRequest(&userRequest); err != nil {
-		procCtx.Logger.WithError(err).Error("User request validation failed")
-		return MessageProcessingResult{
-			Success:  false,
-			Error:    fmt.Errorf("user request validation failed: %w", err),
-			Duration: time.Since(start),
-		}
-	}
-
 	// Process the message content (handle audio if needed)
-	content, err := w.processMessageContent(ctx, &userRequest, procCtx)
-	if err != nil {
-		procCtx.Logger.WithError(err).Error("Failed to process message content")
-		return MessageProcessingResult{
-			Success:  false,
-			Error:    fmt.Errorf("failed to process message content: %w", err),
-			Duration: time.Since(start),
+	content := queueMessage.Message
+	if w.deps.TranscribeService != nil && w.deps.TranscribeService.IsAudioURL(content) {
+		procCtx.Logger.WithField("audio_url", content).Debug("Detected audio message, transcribing")
+
+		transcribedText, err := w.deps.TranscribeService.TranscribeAudio(ctx, content)
+		if err != nil {
+			procCtx.Logger.WithError(err).Error("Failed to transcribe audio")
+			return MessageProcessingResult{
+				Success:  false,
+				Error:    fmt.Errorf("failed to transcribe audio: %w", err),
+				Duration: time.Since(start),
+			}
 		}
+
+		procCtx.Logger.WithFields(logrus.Fields{
+			"original_url":     content,
+			"transcribed_text": transcribedText,
+			"text_length":      len(transcribedText),
+		}).Info("Audio transcribed successfully")
+
+		content = transcribedText
 	}
 
 	// Get or create thread for the user
-	threadID, err := w.deps.AgentClient.GetOrCreateThread(ctx, userRequest.UserNumber)
+	threadID, err := w.deps.AgentClient.GetOrCreateThread(ctx, queueMessage.UserNumber)
 	if err != nil {
 		procCtx.Logger.WithError(err).Error("Failed to get or create thread")
 		return MessageProcessingResult{
@@ -110,17 +102,17 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 	procCtx.Logger = procCtx.Logger.WithField("thread_id", threadID)
 
 	// If there's a previous_message, send it as history update first with role="ai"
-	if userRequest.PreviousMessage != nil && *userRequest.PreviousMessage != "" {
-		procCtx.Logger.WithField("previous_message_length", len(*userRequest.PreviousMessage)).Debug("Sending previous message as history update")
+	if queueMessage.PreviousMessage != nil && *queueMessage.PreviousMessage != "" {
+		procCtx.Logger.WithField("previous_message_length", len(*queueMessage.PreviousMessage)).Debug("Sending previous message as history update")
 
 		historyMessages := []models.HistoryMessage{
 			{
-				Content: *userRequest.PreviousMessage,
+				Content: *queueMessage.PreviousMessage,
 				Role:    "ai",
 			},
 		}
 
-		_, err := w.deps.AgentClient.SendHistoryUpdate(ctx, threadID, historyMessages, userRequest.ReasoningEngineID)
+		_, err := w.deps.AgentClient.SendHistoryUpdate(ctx, threadID, historyMessages, queueMessage.ReasoningEngineID)
 		if err != nil {
 			procCtx.Logger.WithError(err).Error("Failed to send previous message as history update")
 			return MessageProcessingResult{
@@ -226,55 +218,6 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 		Content:  &responseString,
 		Duration: time.Since(start),
 	}
-}
-
-// validateUserRequest validates the user webhook request
-func (w *UserMessageWorker) validateUserRequest(req *models.UserWebhookRequest) error {
-	if req.UserNumber == "" {
-		return fmt.Errorf("user_id is required")
-	}
-
-	if req.Message == "" {
-		return fmt.Errorf("content is required")
-	}
-
-	// Validate message content
-	if err := w.deps.MessageFormatter.ValidateMessageContent(req.Message); err != nil {
-		return fmt.Errorf("invalid message content: %w", err)
-	}
-
-	return nil
-}
-
-// processMessageContent processes the message content, handling audio transcription if needed
-func (w *UserMessageWorker) processMessageContent(ctx context.Context, req *models.UserWebhookRequest, procCtx *ProcessingContext) (string, error) {
-	content := req.Message
-
-	// Check if content is an audio URL
-	if w.deps.TranscribeService.IsAudioURL(content) {
-		procCtx.Logger.WithField("audio_url", content).Info("Processing audio message")
-
-		// Validate audio URL
-		if err := w.deps.TranscribeService.ValidateAudioURL(content); err != nil {
-			return "", fmt.Errorf("invalid audio URL: %w", err)
-		}
-
-		// Transcribe audio
-		transcribedText, err := w.deps.TranscribeService.TranscribeAudio(ctx, content)
-		if err != nil {
-			return "", fmt.Errorf("failed to transcribe audio: %w", err)
-		}
-
-		procCtx.Logger.WithFields(logrus.Fields{
-			"original_url":     content,
-			"transcribed_text": transcribedText,
-			"text_length":      len(transcribedText),
-		}).Info("Audio transcribed successfully")
-
-		content = transcribedText
-	}
-
-	return content, nil
 }
 
 // processHistoryUpdate handles history update messages
