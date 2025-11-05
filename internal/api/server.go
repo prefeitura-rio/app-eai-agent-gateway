@@ -51,6 +51,15 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 		return nil, fmt.Errorf("failed to initialize RabbitMQ service: %w", err)
 	}
 
+	// Initialize Google Agent Engine service (for sync history updates)
+	var googleAgentService *services.GoogleAgentEngineService
+	rateLimiter := services.NewRateLimiterService(cfg, logger, redisService)
+	googleAgentService, err = services.NewGoogleAgentEngineService(cfg, logger, rateLimiter, redisService)
+	if err != nil {
+		logger.WithError(err).Warn("Failed to initialize Google Agent Engine service, sync history updates will not be available")
+		googleAgentService = nil
+	}
+
 	server := &Server{
 		config:          cfg,
 		logger:          logger,
@@ -63,12 +72,17 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			cfg.Observability.ReadinessCheckTimeout,
 			logger,
 		),
-		messageHandler: handlers.NewMessageHandler(logger, cfg, redisService, rabbitMQService, func() *middleware.TraceCorrelationPropagator {
+		messageHandler: handlers.NewMessageHandler(logger, cfg, redisService, rabbitMQService, googleAgentService, func() *middleware.TraceCorrelationPropagator {
 			if otelService != nil {
 				return middleware.NewTraceCorrelationPropagator(otelService)
 			}
 			return nil
 		}()),
+	}
+
+	// Add Google Agent Engine to health checks if available
+	if googleAgentService != nil {
+		server.healthHandler.AddChecker("google_agent_engine", googleAgentService)
 	}
 
 	// Add services to health checks

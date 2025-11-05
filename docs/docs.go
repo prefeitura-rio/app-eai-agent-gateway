@@ -141,7 +141,7 @@ const docTemplate = `{
         },
         "/api/v1/message/webhook/update_history": {
             "post": {
-                "description": "Accepts multiple messages to update conversation history",
+                "description": "Accepts multiple messages to update conversation history synchronously",
                 "consumes": [
                     "application/json"
                 ],

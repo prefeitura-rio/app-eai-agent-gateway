@@ -208,7 +208,7 @@ paths:
     post:
       consumes:
       - application/json
-      description: Accepts multiple messages to update conversation history
+      description: Accepts multiple messages to update conversation history synchronously
       parameters:
       - description: History update request
         in: body
