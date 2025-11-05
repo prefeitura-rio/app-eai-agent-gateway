@@ -50,7 +50,7 @@ type MessageHandler struct {
 	config             *config.Config
 	redisService       RedisServiceInterface
 	rabbitMQService    RabbitMQServiceInterface
-	googleAgentService GoogleAgentServiceInterface // Optional for sync history updates
+	googleAgentService GoogleAgentServiceInterface            // Optional for sync history updates
 	tracePropagator    *middleware.TraceCorrelationPropagator // Optional for distributed tracing
 }
 
