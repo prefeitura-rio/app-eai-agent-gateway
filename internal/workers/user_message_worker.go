@@ -109,6 +109,30 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 	procCtx.ThreadID = threadID
 	procCtx.Logger = procCtx.Logger.WithField("thread_id", threadID)
 
+	// If there's a previous_message, send it as history update first with role="ai"
+	if userRequest.PreviousMessage != nil && *userRequest.PreviousMessage != "" {
+		procCtx.Logger.WithField("previous_message_length", len(*userRequest.PreviousMessage)).Debug("Sending previous message as history update")
+
+		historyMessages := []models.HistoryMessage{
+			{
+				Content: *userRequest.PreviousMessage,
+				Role:    "ai",
+			},
+		}
+
+		_, err := w.deps.AgentClient.SendHistoryUpdate(ctx, threadID, historyMessages, userRequest.ReasoningEngineID)
+		if err != nil {
+			procCtx.Logger.WithError(err).Error("Failed to send previous message as history update")
+			return MessageProcessingResult{
+				Success:  false,
+				Error:    fmt.Errorf("failed to send previous message as history: %w", err),
+				Duration: time.Since(start),
+			}
+		}
+
+		procCtx.Logger.Info("Previous message added to history successfully")
+	}
+
 	// Send message to Google Agent Engine
 	agentResponse, err := w.deps.AgentClient.SendMessage(ctx, threadID, content)
 	if err != nil {

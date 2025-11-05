@@ -215,14 +215,13 @@ func (s *GoogleAgentEngineService) GetOrCreateThread(ctx context.Context, userID
 
 // SendMessage sends a message to a thread and returns the agent's response
 // messageType is optional - if nil, no type parameter is sent; if "history", updates history without response
-func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID string, content string, previousMessage *string, reasoningEngineID *string, messageType *string) (*models.AgentResponse, error) {
+func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID string, content string, reasoningEngineID *string, messageType *string) (*models.AgentResponse, error) {
 	start := time.Now()
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":            threadID,
-		"content_length":       len(content),
-		"has_previous_message": previousMessage != nil && *previousMessage != "",
-		"custom_engine_id":     reasoningEngineID != nil && *reasoningEngineID != "",
+		"thread_id":        threadID,
+		"content_length":   len(content),
+		"custom_engine_id": reasoningEngineID != nil && *reasoningEngineID != "",
 	}).Debug("Sending message to thread")
 
 	// Apply rate limiting
@@ -243,7 +242,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	}
 
 	// Call the reasoning engine via HTTP REST API
-	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, previousMessage, reasoningEngineID, messageType)
+	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, reasoningEngineID, messageType)
 	if err != nil {
 		s.logger.WithError(err).WithField("thread_id", threadID).Error("Failed to query reasoning engine")
 		return nil, fmt.Errorf("failed to get AI response: %w", err)
@@ -417,7 +416,7 @@ func (s *GoogleAgentEngineService) extractOperationName(resp map[string]interfac
 
 // queryReasoningEngine makes a request to the reasoning engine with proper async handling
 // messageType is optional - if nil, no type parameter is sent; if "history", updates history without response
-func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, threadID, message string, previousMessage *string, reasoningEngineID *string, messageType *string) (string, error) {
+func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, threadID, message string, reasoningEngineID *string, messageType *string) (string, error) {
 	accessToken, err := s.getAccessToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get access token: %w", err)
@@ -433,28 +432,13 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 		}).Info("Using custom reasoning engine ID from request")
 	}
 
-	// Build messages array - prepend previous_message if provided
-	messages := []map[string]interface{}{}
-
-	// Add previous message first if provided (matches Python implementation logic)
-	if previousMessage != nil && *previousMessage != "" && len(*previousMessage) > 1 {
-		// Wrap previous message with context to make it clear it was sent by the system
-		wrappedContent := fmt.Sprintf(
-			"Mensagem anterior enviada pelo sistema:\n%s\n---",
-			*previousMessage,
-		)
-		messages = append(messages, map[string]interface{}{
+	// Build messages array with the current message
+	messages := []map[string]interface{}{
+		{
 			"role":    "human",
-			"content": wrappedContent,
-		})
-		s.logger.WithField("previous_message_wrapped_length", len(wrappedContent)).Debug("Including wrapped previous message in request")
+			"content": message,
+		},
 	}
-
-	// Add the current message
-	messages = append(messages, map[string]interface{}{
-		"role":    "human",
-		"content": message,
-	})
 
 	// Build payload matching the sandbox pattern
 	inputPayload := map[string]interface{}{
@@ -589,7 +573,7 @@ func (s *GoogleAgentEngineService) HealthCheck(ctx context.Context) error {
 
 	// Test with a simple health check query to the reasoning engine
 	// Use nil for reasoningEngineID and messageType to use defaults
-	_, err := s.queryReasoningEngine(ctx, "health-check", "Health check - please respond with 'OK'", nil, nil, nil)
+	_, err := s.queryReasoningEngine(ctx, "health-check", "Health check - please respond with 'OK'", nil, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "context deadline exceeded") {
 			return fmt.Errorf("google Agent Engine health check timeout")
