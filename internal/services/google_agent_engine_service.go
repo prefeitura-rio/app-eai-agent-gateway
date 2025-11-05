@@ -214,14 +214,14 @@ func (s *GoogleAgentEngineService) GetOrCreateThread(ctx context.Context, userID
 }
 
 // SendMessage sends a message to a thread and returns the agent's response
-func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID string, content string, previousMessage *string, reasoningEngineID *string) (*models.AgentResponse, error) {
+// messageType is optional - if nil, no type parameter is sent; if "history", updates history without response
+func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID string, content string, reasoningEngineID *string, messageType *string) (*models.AgentResponse, error) {
 	start := time.Now()
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":            threadID,
-		"content_length":       len(content),
-		"has_previous_message": previousMessage != nil && *previousMessage != "",
-		"custom_engine_id":     reasoningEngineID != nil && *reasoningEngineID != "",
+		"thread_id":        threadID,
+		"content_length":   len(content),
+		"custom_engine_id": reasoningEngineID != nil && *reasoningEngineID != "",
 	}).Debug("Sending message to thread")
 
 	// Apply rate limiting
@@ -242,7 +242,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	}
 
 	// Call the reasoning engine via HTTP REST API
-	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, previousMessage, reasoningEngineID)
+	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, reasoningEngineID, messageType)
 	if err != nil {
 		s.logger.WithError(err).WithField("thread_id", threadID).Error("Failed to query reasoning engine")
 		return nil, fmt.Errorf("failed to get AI response: %w", err)
@@ -415,7 +415,8 @@ func (s *GoogleAgentEngineService) extractOperationName(resp map[string]interfac
 }
 
 // queryReasoningEngine makes a request to the reasoning engine with proper async handling
-func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, threadID, message string, previousMessage *string, reasoningEngineID *string) (string, error) {
+// messageType is optional - if nil, no type parameter is sent; if "history", updates history without response
+func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, threadID, message string, reasoningEngineID *string, messageType *string) (string, error) {
 	accessToken, err := s.getAccessToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get access token: %w", err)
@@ -426,47 +427,39 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 	if reasoningEngineID != nil && *reasoningEngineID != "" {
 		engineID = *reasoningEngineID
 		s.logger.WithFields(logrus.Fields{
-			"custom_engine_id": engineID,
+			"custom_engine_id":  engineID,
 			"default_engine_id": s.config.GoogleAgentEngine.ReasoningEngineID,
 		}).Info("Using custom reasoning engine ID from request")
 	}
 
-	// Build messages array - prepend previous_message if provided
-	messages := []map[string]interface{}{}
-
-	// Add previous message first if provided (matches Python implementation logic)
-	if previousMessage != nil && *previousMessage != "" && len(*previousMessage) > 1 {
-		// Wrap previous message with context to make it clear it was sent by the system
-		wrappedContent := fmt.Sprintf(
-			"Mensagem anterior enviada pelo sistema:\n%s\n---",
-			*previousMessage,
-		)
-		messages = append(messages, map[string]interface{}{
+	// Build messages array with the current message
+	messages := []map[string]interface{}{
+		{
 			"role":    "human",
-			"content": wrappedContent,
-		})
-		s.logger.WithField("previous_message_wrapped_length", len(wrappedContent)).Debug("Including wrapped previous message in request")
+			"content": message,
+		},
 	}
 
-	// Add the current message
-	messages = append(messages, map[string]interface{}{
-		"role":    "human",
-		"content": message,
-	})
-
 	// Build payload matching the sandbox pattern
-	payload := map[string]interface{}{
-		"classMethod": "async_query",
+	inputPayload := map[string]interface{}{
 		"input": map[string]interface{}{
-			"input": map[string]interface{}{
-				"messages": messages,
-			},
-			"config": map[string]interface{}{
-				"configurable": map[string]interface{}{
-					"thread_id": threadID,
-				},
+			"messages": messages,
+		},
+		"config": map[string]interface{}{
+			"configurable": map[string]interface{}{
+				"thread_id": threadID,
 			},
 		},
+	}
+
+	// Add type parameter only if specified (e.g., "history" for history updates)
+	if messageType != nil && *messageType != "" {
+		inputPayload["type"] = *messageType
+	}
+
+	payload := map[string]interface{}{
+		"classMethod": "async_query",
+		"input":       inputPayload,
 	}
 
 	s.logger.WithFields(logrus.Fields{
@@ -579,7 +572,7 @@ func (s *GoogleAgentEngineService) HealthCheck(ctx context.Context) error {
 	defer cancel()
 
 	// Test with a simple health check query to the reasoning engine
-	// Use nil for reasoningEngineID to use the default configured engine
+	// Use nil for reasoningEngineID and messageType to use defaults
 	_, err := s.queryReasoningEngine(ctx, "health-check", "Health check - please respond with 'OK'", nil, nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "context deadline exceeded") {
@@ -589,4 +582,104 @@ func (s *GoogleAgentEngineService) HealthCheck(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// SendHistoryUpdate sends multiple messages to update conversation history
+// Returns a simple status response without waiting for agent reply
+func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, threadID string, messages []models.HistoryMessage, reasoningEngineID *string) (map[string]interface{}, error) {
+	start := time.Now()
+
+	s.logger.WithFields(logrus.Fields{
+		"thread_id":        threadID,
+		"messages_count":   len(messages),
+		"custom_engine_id": reasoningEngineID != nil && *reasoningEngineID != "",
+	}).Debug("Sending history update to thread")
+
+	// Apply rate limiting
+	if err := s.rateLimiter.Wait(ctx, "google_agent_engine"); err != nil {
+		return nil, fmt.Errorf("rate limit exceeded: %w", err)
+	}
+
+	// Get thread info and validate
+	threadKey := fmt.Sprintf("thread:%s", threadID)
+	threadData, err := s.redisService.Get(ctx, threadKey)
+	if err != nil {
+		return nil, fmt.Errorf("thread not found: %w", err)
+	}
+
+	var threadInfo ThreadInfo
+	if err := json.Unmarshal([]byte(threadData), &threadInfo); err != nil {
+		return nil, fmt.Errorf("failed to parse thread info: %w", err)
+	}
+
+	// Get access token
+	accessToken, err := s.getAccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get access token: %w", err)
+	}
+
+	// Use custom reasoning engine ID if provided
+	engineID := s.config.GoogleAgentEngine.ReasoningEngineID
+	if reasoningEngineID != nil && *reasoningEngineID != "" {
+		engineID = *reasoningEngineID
+		s.logger.WithFields(logrus.Fields{
+			"custom_engine_id":  engineID,
+			"default_engine_id": s.config.GoogleAgentEngine.ReasoningEngineID,
+		}).Info("Using custom reasoning engine ID for history update")
+	}
+
+	// Build messages array from the input messages
+	formattedMessages := make([]map[string]interface{}, len(messages))
+	for i, msg := range messages {
+		formattedMessages[i] = map[string]interface{}{
+			"role":    msg.Role,
+			"content": msg.Content,
+		}
+	}
+
+	// Build payload for history update with type="history"
+	historyType := "history"
+	inputPayload := map[string]interface{}{
+		"input": map[string]interface{}{
+			"messages": formattedMessages,
+		},
+		"config": map[string]interface{}{
+			"configurable": map[string]interface{}{
+				"thread_id": threadID,
+			},
+		},
+		"type": historyType,
+	}
+
+	payload := map[string]interface{}{
+		"classMethod": "async_query",
+		"input":       inputPayload,
+	}
+
+	s.logger.WithFields(logrus.Fields{
+		"thread_id":           threadID,
+		"messages_count":      len(formattedMessages),
+		"reasoning_engine_id": engineID,
+	}).Debug("Making async_query call with type=history to reasoning engine")
+
+	resp, err := s.postQuery(ctx, accessToken, payload, engineID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to post query: %w", err)
+	}
+
+	// Update thread info
+	threadInfo.LastUsedAt = time.Now()
+	threadInfo.MessageCount += len(messages)
+	updatedData, _ := json.Marshal(threadInfo)
+	_ = s.redisService.SetValue(ctx, threadKey, string(updatedData), s.config.Redis.AgentIDCacheTTL)
+
+	duration := time.Since(start)
+
+	s.logger.WithFields(logrus.Fields{
+		"thread_id":     threadID,
+		"duration_ms":   duration.Milliseconds(),
+		"message_count": threadInfo.MessageCount,
+	}).Info("History update processed successfully")
+
+	return resp, nil
 }

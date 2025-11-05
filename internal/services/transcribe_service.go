@@ -16,7 +16,7 @@ import (
 	speech "cloud.google.com/go/speech/apiv2"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/api/option"
-	speechpb "google.golang.org/genproto/googleapis/cloud/speech/v2"
+	speechpb "google.golang.org/genproto/googleapis/cloud/speech/v2" //nolint:staticcheck // Using Speech v2 API as required
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 )
@@ -210,12 +210,17 @@ func (s *TranscribeService) TranscribeFromFile(ctx context.Context, filePath str
 	}
 
 	// Build recognition request using Speech v2 API (original working pattern)
+	//nolint:staticcheck // Using Speech v2 API as required
 	req := &speechpb.RecognizeRequest{
 		Recognizer: fmt.Sprintf("projects/%s/locations/global/recognizers/_", projectID),
+		//nolint:staticcheck // Using Speech v2 API as required
 		Config: &speechpb.RecognitionConfig{
+			//nolint:staticcheck // Using Speech v2 API as required
 			DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{
+				//nolint:staticcheck // Using Speech v2 API as required
 				AutoDecodingConfig: &speechpb.AutoDetectDecodingConfig{},
 			},
+			//nolint:staticcheck // Using Speech v2 API as required
 			Features: &speechpb.RecognitionFeatures{
 				EnableAutomaticPunctuation: true,
 				MaxAlternatives:            int32(s.config.Transcribe.MaxAlternatives),
@@ -308,126 +313,6 @@ func (s *TranscribeService) validateFile(filePath string) error {
 	return fmt.Errorf("unsupported file format: %s (supported: %v)", ext, supportedFormats)
 }
 
-// transcribeFromMemory transcribes audio data from memory
-func (s *TranscribeService) transcribeFromMemory(ctx context.Context, audioData []byte) (*TranscriptionResult, error) {
-	start := time.Now()
-
-	// Validate audio data
-	if len(audioData) == 0 {
-		return nil, fmt.Errorf("audio data is empty")
-	}
-
-	s.logger.WithField("audio_size_bytes", len(audioData)).Debug("Starting transcription from memory")
-
-	// Create transcription request with timeout
-	reqCtx, cancel := context.WithTimeout(ctx, s.config.Transcribe.RequestTimeout)
-	defer cancel()
-
-	// Get project ID from config
-	projectID := s.config.GoogleCloud.ProjectID
-	if projectID == "" {
-		return nil, fmt.Errorf("PROJECT_ID is required for Speech v2 API")
-	}
-
-	// Build recognition request using Speech v2 API
-	req := &speechpb.RecognizeRequest{
-		Recognizer: fmt.Sprintf("projects/%s/locations/global/recognizers/_", projectID),
-		Config: &speechpb.RecognitionConfig{
-			DecodingConfig: &speechpb.RecognitionConfig_AutoDecodingConfig{
-				AutoDecodingConfig: &speechpb.AutoDetectDecodingConfig{},
-			},
-			Features: &speechpb.RecognitionFeatures{
-				EnableAutomaticPunctuation: true,
-				MaxAlternatives:            int32(s.config.Transcribe.MaxAlternatives),
-			},
-			LanguageCodes: []string{s.config.Transcribe.LanguageCode},
-			Model:         "long",
-		},
-		AudioSource: &speechpb.RecognizeRequest_Content{
-			Content: audioData,
-		},
-	}
-
-	// Debug logging
-	s.logger.WithFields(logrus.Fields{
-		"audio_size_bytes": len(audioData),
-		"recognizer":       req.Recognizer,
-		"language_codes":   req.Config.LanguageCodes,
-		"model":            req.Config.Model,
-		"content_set":      req.AudioSource != nil,
-	}).Debug("Sending recognition request")
-
-	// Perform transcription
-	resp, err := s.client.Recognize(reqCtx, req)
-	if err != nil {
-		s.logger.WithError(err).WithFields(logrus.Fields{
-			"audio_size_bytes": len(audioData),
-			"recognizer":       req.Recognizer,
-		}).Error("Failed to transcribe audio from memory")
-		return nil, fmt.Errorf("failed to transcribe audio: %w", err)
-	}
-
-	// Process results
-	result := s.processRecognitionResponse(resp, start)
-
-	// Add metadata
-	if result.Metadata == nil {
-		result.Metadata = make(map[string]interface{})
-	}
-	result.Metadata["audio_size_bytes"] = len(audioData)
-	result.Metadata["transcription_duration_ms"] = time.Since(start).Milliseconds()
-
-	return result, nil
-}
-
-// downloadFileToMemory downloads an audio file from URL directly into memory
-func (s *TranscribeService) downloadFileToMemory(ctx context.Context, audioURL string) ([]byte, error) {
-	// Create download context with timeout
-	dlCtx, cancel := context.WithTimeout(ctx, s.config.Transcribe.DownloadTimeout)
-	defer cancel()
-
-	// Create HTTP request
-	req, err := http.NewRequestWithContext(dlCtx, "GET", audioURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-	}
-
-	// Perform request
-	client := &http.Client{
-		Timeout: s.config.Transcribe.DownloadTimeout,
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to download file: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download failed with status: %d", resp.StatusCode)
-	}
-
-	// Read content with size limit directly into memory
-	maxSizeBytes := int64(s.config.Transcribe.MaxFileSizeMB) * 1024 * 1024
-	limited := io.LimitReader(resp.Body, maxSizeBytes+1) // +1 to detect oversized files
-
-	audioData, err := io.ReadAll(limited)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read audio data: %w", err)
-	}
-
-	if int64(len(audioData)) > maxSizeBytes {
-		return nil, fmt.Errorf("downloaded file size %d bytes exceeds maximum %d bytes", len(audioData), maxSizeBytes)
-	}
-
-	s.logger.WithFields(logrus.Fields{
-		"audio_url":    audioURL,
-		"size_bytes":   len(audioData),
-		"content_type": resp.Header.Get("Content-Type"),
-	}).Debug("Audio file downloaded to memory")
-
-	return audioData, nil
-}
-
 // downloadFile downloads an audio file from URL to a temporary file
 func (s *TranscribeService) downloadFile(ctx context.Context, audioURL string) (string, error) {
 	// Create download context with timeout
@@ -505,6 +390,8 @@ func (s *TranscribeService) getFileExtension(resp *http.Response, audioURL strin
 // Note: detectEncoding function removed - Speech v2 API uses auto-detection
 
 // processRecognitionResponse processes the Google Speech v2 API response (matching sandbox.go pattern)
+//
+//nolint:staticcheck // Using Speech v2 API as required
 func (s *TranscribeService) processRecognitionResponse(resp *speechpb.RecognizeResponse, start time.Time) *TranscriptionResult {
 	result := &TranscriptionResult{
 		Duration: time.Since(start),

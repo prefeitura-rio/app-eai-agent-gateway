@@ -425,6 +425,26 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 
 	logger.WithField("thread_id", threadID).Info("Using thread for conversation")
 
+	// If there's a previous_message, send it as history update first with role="ai"
+	if msg.PreviousMessage != nil && *msg.PreviousMessage != "" {
+		logger.WithField("previous_message_length", len(*msg.PreviousMessage)).Info("Sending previous message as history update")
+
+		historyMessages := []models.HistoryMessage{
+			{
+				Content: *msg.PreviousMessage,
+				Role:    "ai",
+			},
+		}
+
+		_, err := deps.GoogleAgentService.SendHistoryUpdate(ctx, threadID, historyMessages, msg.ReasoningEngineID)
+		if err != nil {
+			logger.WithError(err).Error("Failed to send previous message as history update")
+			return "", fmt.Errorf("failed to send previous message as history: %w", err)
+		}
+
+		logger.Info("Previous message added to history successfully")
+	}
+
 	// Trace Google Agent Engine call
 	var agentCtx context.Context
 	var agentSpan trace.Span
@@ -439,9 +459,9 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	}
 
 	// Send message to Google Agent Engine
-	// Pass previous_message if provided to prepend context before the current message
 	// Pass custom reasoning_engine_id if provided in the request
-	agentResponse, err := deps.GoogleAgentService.SendMessage(agentCtx, threadID, message, msg.PreviousMessage, msg.ReasoningEngineID)
+	// Pass nil for messageType (normal user messages don't need type parameter)
+	agentResponse, err := deps.GoogleAgentService.SendMessage(agentCtx, threadID, message, msg.ReasoningEngineID, nil)
 	if err != nil {
 		logger.WithError(err).Error("Failed to send message to Google Agent Engine")
 		if deps.OTelWorkerWrapper != nil && agentSpan != nil {

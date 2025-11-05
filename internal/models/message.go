@@ -6,6 +6,20 @@ import (
 	"github.com/google/uuid"
 )
 
+// HistoryMessage represents a single message in the history update
+type HistoryMessage struct {
+	Content string `json:"content" binding:"required" example:"Hello, World!"`
+	Role    string `json:"role" binding:"required" example:"ai"`
+}
+
+// HistoryUpdateWebhookRequest represents the request payload for history update webhook
+type HistoryUpdateWebhookRequest struct {
+	UserNumber        string                 `json:"user_number" binding:"required" example:"5521999999999"`
+	Messages          []HistoryMessage       `json:"messages" binding:"required,min=1"`
+	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+	ReasoningEngineID *string                `json:"reasoning_engine_id,omitempty" example:"12345678"`
+}
+
 // UserWebhookRequest represents the request payload for user webhook (matches Python API)
 type UserWebhookRequest struct {
 	UserNumber        string                 `json:"user_number" binding:"required" example:"5521999999999"`
@@ -70,10 +84,11 @@ type TaskDebugInfo struct {
 // QueueMessage represents a message in the queue
 type QueueMessage struct {
 	ID                string                 `json:"id"`
-	Type              string                 `json:"type"`
+	Type              string                 `json:"type"` // "user_message" or "history_update"
 	UserNumber        string                 `json:"user_number,omitempty"`
 	AgentID           string                 `json:"agent_id,omitempty"`
-	Message           string                 `json:"message"`
+	Message           string                 `json:"message,omitempty"`  // For user_message type
+	Messages          []HistoryMessage       `json:"messages,omitempty"` // For history_update type
 	PreviousMessage   *string                `json:"previous_message,omitempty"`
 	Provider          string                 `json:"provider,omitempty"`
 	Timestamp         time.Time              `json:"timestamp"`

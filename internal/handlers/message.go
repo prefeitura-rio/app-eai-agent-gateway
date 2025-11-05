@@ -38,13 +38,20 @@ type RabbitMQServiceInterface interface {
 	IsConnected() bool
 }
 
+// GoogleAgentServiceInterface defines Google Agent Engine operations needed by MessageHandler
+type GoogleAgentServiceInterface interface {
+	GetOrCreateThread(ctx context.Context, userID string) (string, error)
+	SendHistoryUpdate(ctx context.Context, threadID string, messages []models.HistoryMessage, reasoningEngineID *string) (map[string]interface{}, error)
+}
+
 // MessageHandler handles message processing endpoints
 type MessageHandler struct {
-	logger          *logrus.Logger
-	config          *config.Config
-	redisService    RedisServiceInterface
-	rabbitMQService RabbitMQServiceInterface
-	tracePropagator *middleware.TraceCorrelationPropagator // Optional for distributed tracing
+	logger             *logrus.Logger
+	config             *config.Config
+	redisService       RedisServiceInterface
+	rabbitMQService    RabbitMQServiceInterface
+	googleAgentService GoogleAgentServiceInterface            // Optional for sync history updates
+	tracePropagator    *middleware.TraceCorrelationPropagator // Optional for distributed tracing
 }
 
 // NewMessageHandler creates a new message handler
@@ -53,14 +60,16 @@ func NewMessageHandler(
 	config *config.Config,
 	redisService RedisServiceInterface,
 	rabbitMQService RabbitMQServiceInterface,
+	googleAgentService GoogleAgentServiceInterface,
 	tracePropagator *middleware.TraceCorrelationPropagator,
 ) *MessageHandler {
 	return &MessageHandler{
-		logger:          logger,
-		config:          config,
-		redisService:    redisService,
-		rabbitMQService: rabbitMQService,
-		tracePropagator: tracePropagator,
+		logger:             logger,
+		config:             config,
+		redisService:       redisService,
+		rabbitMQService:    rabbitMQService,
+		googleAgentService: googleAgentService,
+		tracePropagator:    tracePropagator,
 	}
 }
 
@@ -235,6 +244,94 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 		Status:          string(models.TaskStatusProcessing),
 		PollingEndpoint: "/api/v1/message/response?message_id=" + messageID,
 	})
+}
+
+// HandleHistoryUpdateWebhook processes history update messages synchronously
+//
+//	@Summary		Process history update webhook
+//	@Description	Accepts multiple messages to update conversation history synchronously
+//	@Tags			Messages
+//	@Accept			json
+//	@Produce		json
+//	@Param			request	body		models.HistoryUpdateWebhookRequest	true	"History update request"
+//	@Success		200		{object}	map[string]interface{}				"History updated successfully"
+//	@Failure		400		{object}	map[string]interface{}				"Invalid request"
+//	@Failure		500		{object}	map[string]interface{}				"Internal server error"
+//	@Router			/api/v1/message/webhook/update_history [post]
+func (h *MessageHandler) HandleHistoryUpdateWebhook(c *gin.Context) {
+	var req models.HistoryUpdateWebhookRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		h.logger.WithError(err).Error("Invalid history update webhook request")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid request",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	logger := h.logger.WithFields(logrus.Fields{
+		"user_number":    req.UserNumber,
+		"messages_count": len(req.Messages),
+		"request_id":     c.GetString("request_id"),
+	})
+
+	logger.Info("Processing history update webhook request synchronously")
+
+	// Create distributed tracing span for end-to-end tracking
+	var span trace.Span
+	ctx := c.Request.Context()
+
+	if h.tracePropagator != nil {
+		ctx, span = h.tracePropagator.CreateChildSpan(ctx, "history_update_sync",
+			attribute.String("user.number", req.UserNumber),
+			attribute.Int("messages.count", len(req.Messages)),
+		)
+		defer span.End()
+	}
+
+	// Check if Google Agent Service is available
+	if h.googleAgentService == nil {
+		logger.Error("Google Agent Service not configured")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Service unavailable",
+			"message": "History update service is not configured",
+		})
+		return
+	}
+
+	// Get or create thread for the user
+	ctxTimeout, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	threadID, err := h.googleAgentService.GetOrCreateThread(ctxTimeout, req.UserNumber)
+	if err != nil {
+		logger.WithError(err).Error("Failed to get or create thread")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to get or create thread",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	logger = logger.WithField("thread_id", threadID)
+	logger.Debug("Thread obtained for history update")
+
+	// Send history update to Google Agent Engine
+	// Pass custom reasoning_engine_id if provided in the request
+	resp, err := h.googleAgentService.SendHistoryUpdate(ctxTimeout, threadID, req.Messages, req.ReasoningEngineID)
+	if err != nil {
+		logger.WithError(err).Error("Failed to send history update")
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "Failed to update history",
+			"message": err.Error(),
+		})
+		return
+	}
+
+	logger.WithField("response", resp).Info("History update processed successfully")
+
+	// Return the response directly from Google Agent Engine
+	c.JSON(http.StatusOK, resp)
 }
 
 // HandleMessageResponse handles polling for message processing results
