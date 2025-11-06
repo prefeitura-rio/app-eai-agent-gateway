@@ -539,17 +539,60 @@ func (s *GoogleAgentEngineService) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("rate limit exceeded for health check")
 	}
 
-	// Simple test query to verify the service is accessible
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	// Use configured health check timeout, default to 5s if not set
+	timeout := s.config.Observability.HealthCheckTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Test with a simple health check query to the reasoning engine
-	_, err := s.queryReasoningEngine(ctx, "health-check", "Health check - please respond with 'OK'")
+	// Use lightweight GET request to check reasoning engine existence
+	// This is much faster than making a full query
+	reasoningEngineID := s.config.GoogleAgentEngine.ReasoningEngineID
+	url := fmt.Sprintf(
+		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/reasoningEngines/%s",
+		s.config.GoogleAgentEngine.Location,
+		s.config.GoogleAgentEngine.ProjectID,
+		s.config.GoogleAgentEngine.Location,
+		reasoningEngineID,
+	)
+
+	// Get OAuth token
+	token, err := s.tokenSource.Token()
 	if err != nil {
-		if strings.Contains(err.Error(), "context deadline exceeded") {
+		return fmt.Errorf("failed to get OAuth token: %w", err)
+	}
+
+	// Create GET request
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create health check request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	// Create dedicated HTTP client for health checks with shorter timeout
+	// Don't use s.httpClient because it may have a longer request timeout
+	healthClient := &http.Client{
+		Timeout: timeout,
+	}
+
+	// Make request
+	resp, err := healthClient.Do(req)
+	if err != nil {
+		if strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "context canceled") {
 			return fmt.Errorf("google Agent Engine health check timeout")
 		}
 		return fmt.Errorf("google Agent Engine health check failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("google Agent Engine health check returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	return nil
