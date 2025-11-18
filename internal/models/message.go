@@ -38,10 +38,11 @@ type MessageResponse struct {
 
 // ProcessedMessageData represents the data structure inside the response (matches Python API)
 type ProcessedMessageData struct {
-	Messages    interface{} `json:"messages" swaggertype:"array"`
-	AgentID     string      `json:"agent_id" example:"user_12345"`
-	ProcessedAt string      `json:"processed_at" example:"task-uuid-or-timestamp"`
-	Status      string      `json:"status" example:"done"`
+	Messages    interface{}            `json:"messages" swaggertype:"array"`
+	AgentID     string                 `json:"agent_id" example:"user_12345"`
+	ProcessedAt string                 `json:"processed_at" example:"task-uuid-or-timestamp"`
+	Status      string                 `json:"status" example:"done"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"` // Original metadata from webhook request
 }
 
 // TaskStatus represents the status of a message processing task

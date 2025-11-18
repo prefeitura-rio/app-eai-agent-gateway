@@ -215,7 +215,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 						callbackURL, getErr := deps.RedisService.GetCallbackURL(ctx, queueMsg.ID)
 						if getErr == nil && callbackURL != "" {
 							// Execute error callback asynchronously
-							go executeCallbackOnError(context.Background(), deps, queueMsg.ID, callbackURL, err, logger)
+							go executeCallbackOnError(context.Background(), deps, queueMsg.ID, callbackURL, err, &queueMsg, logger)
 						}
 					}
 
@@ -276,7 +276,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 					callbackURL, getErr := deps.RedisService.GetCallbackURL(ctx, queueMsg.ID)
 					if getErr == nil && callbackURL != "" {
 						// Execute error callback asynchronously
-						go executeCallbackOnError(context.Background(), deps, queueMsg.ID, callbackURL, err, logger)
+						go executeCallbackOnError(context.Background(), deps, queueMsg.ID, callbackURL, err, &queueMsg, logger)
 					}
 				}
 				// Add permanent error attributes to the main span if available
@@ -333,7 +333,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			callbackURL, err := deps.RedisService.GetCallbackURL(ctx, queueMsg.ID)
 			if err == nil && callbackURL != "" {
 				// Execute callback asynchronously to avoid blocking worker
-				go executeCallback(context.Background(), deps, queueMsg.ID, callbackURL, response, logger)
+				go executeCallback(context.Background(), deps, queueMsg.ID, callbackURL, response, &queueMsg, logger)
 			}
 		}
 
@@ -1023,7 +1023,7 @@ func classifyTranscriptionError(err error) string {
 }
 
 // executeCallback handles the callback execution asynchronously
-func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, messageID string, callbackURL string, response string, logger *logrus.Entry) {
+func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, messageID string, callbackURL string, response string, queueMsg *models.QueueMessage, logger *logrus.Entry) {
 	callbackLogger := logger.WithFields(logrus.Fields{
 		"callback_url": callbackURL,
 		"message_id":   messageID,
@@ -1036,6 +1036,12 @@ func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, mess
 	if err := json.Unmarshal([]byte(response), &processedData); err != nil {
 		callbackLogger.WithError(err).Error("Failed to parse response for callback")
 		return
+	}
+
+	// Include original metadata from queue message
+	if queueMsg != nil && queueMsg.Metadata != nil {
+		processedData.Metadata = queueMsg.Metadata
+		callbackLogger.WithField("metadata_keys", len(queueMsg.Metadata)).Debug("Including original metadata in callback")
 	}
 
 	// Create callback payload
@@ -1063,7 +1069,7 @@ func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, mess
 }
 
 // executeCallbackOnError handles the callback execution for failed tasks
-func executeCallbackOnError(ctx context.Context, deps *MessageHandlerDependencies, messageID string, callbackURL string, processErr error, logger *logrus.Entry) {
+func executeCallbackOnError(ctx context.Context, deps *MessageHandlerDependencies, messageID string, callbackURL string, processErr error, queueMsg *models.QueueMessage, logger *logrus.Entry) {
 	callbackLogger := logger.WithFields(logrus.Fields{
 		"callback_url": callbackURL,
 		"message_id":   messageID,
@@ -1084,10 +1090,20 @@ func executeCallbackOnError(ctx context.Context, deps *MessageHandlerDependencie
 			AgentID:     "",                     // No agent_id for errors
 			ProcessedAt: messageID,
 			Status:      "error",
+			Metadata:    nil, // Will be set below
 		},
 		Error:       &errorMessage, // Error description
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 		ProcessedAt: messageID,
+	}
+
+	// Include original metadata even on error
+	if queueMsg != nil && queueMsg.Metadata != nil {
+		if data, ok := payload.Data.(models.ProcessedMessageData); ok {
+			data.Metadata = queueMsg.Metadata
+			payload.Data = data
+			callbackLogger.WithField("metadata_keys", len(queueMsg.Metadata)).Debug("Including original metadata in error callback")
+		}
 	}
 
 	// Execute the callback with retry logic
