@@ -5,7 +5,7 @@ kind: Deployment
 metadata:
   name: eai-agent-gateway
   annotations:
-    reloader.stakater.com/auto: "true"
+    secrets.infisical.com/auto-reload: "true"
 spec:
   selector:
     matchLabels:
@@ -98,7 +98,7 @@ kind: Deployment
 metadata:
   name: eai-agent-gateway-worker
   annotations:
-    reloader.stakater.com/auto: "true"
+    secrets.infisical.com/auto-reload: "true"
 spec:
   selector:
     matchLabels:
