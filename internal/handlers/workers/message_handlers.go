@@ -602,44 +602,53 @@ func transformGoogleAgentMessages(logger *logrus.Logger, messagesData interface{
 		return transformedMessages
 	}
 
+	// Track tool_call_id to name mapping for tool return messages
+	toolCallToName := make(map[string]string)
+
+	// Keep original messages for usage statistics calculation (avoid double counting)
+	var originalMessages []map[string]interface{}
+
 	for _, msgData := range messagesList {
 		msgMap, ok := msgData.(map[string]interface{})
 		if !ok {
 			continue
 		}
 
+		// Store original message for usage calculation
+		originalMessages = append(originalMessages, msgMap)
+
+		msgType := mapMessageType(msgMap)
+		stepID := "step-" + generateStepID()
+		msgID := msgMap["id"]
+
+		// Process AI messages with potential reasoning/thinking content
+		if msgType == "assistant_message" || msgType == "tool_call_message" {
+			aiMessages := processAIMessage(logger, msgMap, stepID, toolCallToName)
+			transformedMessages = append(transformedMessages, aiMessages...)
+			continue
+		}
+
 		// Transform Google Agent Engine message to Python API format
 		transformedMsg := map[string]interface{}{
-			"id":                      msgMap["id"],
+			"id":                      msgID,
 			"date":                    nil,
 			"session_id":              nil,
 			"time_since_last_message": nil,
 			"name":                    msgMap["name"],
-			"otid":                    msgMap["id"], // Use same ID as otid
+			"otid":                    msgID,
 			"sender_id":               nil,
-			"step_id":                 "step-" + generateStepID(), // Generate step ID
+			"step_id":                 stepID,
 			"is_err":                  nil,
 			"model_name":              extractModelName(msgMap),
 			"finish_reason":           extractFinishReason(msgMap),
 			"avg_logprobs":            extractAvgLogprobs(msgMap),
 			"usage_metadata":          extractUsageMetadata(msgMap),
-			"message_type":            mapMessageType(msgMap),
+			"message_type":            msgType,
 			"content":                 msgMap["content"],
 		}
 
-		// Add type-specific fields
-		if msgType := mapMessageType(msgMap); msgType == "tool_call_message" {
-			if toolCalls, exists := msgMap["tool_calls"].([]interface{}); exists && len(toolCalls) > 0 {
-				if toolCall, ok := toolCalls[0].(map[string]interface{}); ok {
-					transformedMsg["tool_call"] = map[string]interface{}{
-						"name":         toolCall["name"],
-						"arguments":    toolCall["args"],
-						"tool_call_id": toolCall["id"],
-					}
-				}
-			}
-		} else if msgType == "tool_return_message" {
-			// For tool messages, extract tool return information
+		// For tool return messages, extract tool return information
+		if msgType == "tool_return_message" {
 			if name, exists := msgMap["name"]; exists {
 				transformedMsg["tool_return"] = msgMap["content"]
 				transformedMsg["status"] = "success"
@@ -653,23 +662,242 @@ func transformGoogleAgentMessages(logger *logrus.Logger, messagesData interface{
 		transformedMessages = append(transformedMessages, transformedMsg)
 	}
 
-	// Add usage statistics message at the end (matching Python API)
-	usageStats := map[string]interface{}{
-		"message_type":      "usage_statistics",
-		"completion_tokens": 0,
-		"prompt_tokens":     0,
-		"total_tokens":      0,
-		"step_count":        len(transformedMessages),
-		"steps_messages":    nil,
-		"run_ids":           nil,
-		"agent_id":          "", // Will be filled by calling function
-		"processed_at":      time.Now().Format(time.RFC3339),
-		"status":            "done",
-		"model_names":       []string{},
-	}
+	// Calculate aggregated usage statistics from ORIGINAL messages (avoid double counting)
+	usageStats := calculateUsageStatistics(originalMessages, transformedMessages)
 	transformedMessages = append(transformedMessages, usageStats)
 
 	return transformedMessages
+}
+
+// processAIMessage processes AI messages, extracting thinking/reasoning content and tool calls
+func processAIMessage(logger *logrus.Logger, msgMap map[string]interface{}, stepID string, toolCallToName map[string]string) []interface{} {
+	var messages []interface{}
+
+	msgID := msgMap["id"]
+	rawContent := msgMap["content"]
+	toolCalls, _ := msgMap["tool_calls"].([]interface{})
+	responseMetadata, _ := msgMap["response_metadata"].(map[string]interface{})
+	usageMD, _ := responseMetadata["usage_metadata"].(map[string]interface{})
+
+	// Extract reasoning tokens from output_token_details
+	var reasoningTokens int
+	if outputDetails, ok := usageMD["output_token_details"].(map[string]interface{}); ok {
+		if reasoning, exists := outputDetails["reasoning"]; exists {
+			reasoningTokens = toInt(reasoning)
+		}
+	}
+
+	var finalContent string
+	var thinkingContent string
+
+	// Process content (can be string or list)
+	switch content := rawContent.(type) {
+	case []interface{}:
+		for _, item := range content {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				itemType, _ := itemMap["type"].(string)
+				if itemType == "thinking" {
+					if thinking, ok := itemMap["thinking"].(string); ok {
+						thinkingContent += thinking
+					}
+				} else if itemType == "text" {
+					if text, ok := itemMap["text"].(string); ok {
+						finalContent += text
+					}
+				}
+			} else if str, ok := item.(string); ok {
+				finalContent += str
+			}
+		}
+	case string:
+		finalContent = content
+	}
+
+	baseDict := map[string]interface{}{
+		"id":                      msgID,
+		"date":                    nil,
+		"session_id":              nil,
+		"time_since_last_message": nil,
+		"name":                    msgMap["name"],
+		"otid":                    msgID,
+		"sender_id":               nil,
+		"step_id":                 stepID,
+		"is_err":                  nil,
+		"model_name":              extractModelName(msgMap),
+		"finish_reason":           extractFinishReason(msgMap),
+		"avg_logprobs":            extractAvgLogprobs(msgMap),
+		"usage_metadata":          extractUsageMetadata(msgMap),
+	}
+
+	// Add reasoning message if there's explicit thinking content or reasoning tokens
+	if thinkingContent != "" {
+		reasoningMsg := copyMap(baseDict)
+		reasoningMsg["id"] = fmt.Sprintf("thinking-%v", msgID)
+		reasoningMsg["message_type"] = "reasoning_message"
+		reasoningMsg["source"] = "reasoner_model"
+		reasoningMsg["reasoning"] = thinkingContent
+		reasoningMsg["signature"] = nil
+		messages = append(messages, reasoningMsg)
+	} else if reasoningTokens > 0 {
+		// Fallback for implicit reasoning (no textual content exposed)
+		reasoningText := "Processando..."
+		if len(toolCalls) > 0 {
+			if tc, ok := toolCalls[0].(map[string]interface{}); ok {
+				toolName, _ := tc["name"].(string)
+				if toolName == "" {
+					toolName = "unknown"
+				}
+				reasoningText = fmt.Sprintf("Processando chamada para ferramenta %s", toolName)
+			}
+		} else if finalContent != "" {
+			reasoningText = "Processando resposta para o usuário"
+		}
+
+		reasoningMsg := copyMap(baseDict)
+		reasoningMsg["id"] = fmt.Sprintf("reasoning-%v", msgID)
+		reasoningMsg["message_type"] = "reasoning_message"
+		reasoningMsg["source"] = "reasoner_model"
+		reasoningMsg["reasoning"] = reasoningText
+		reasoningMsg["signature"] = nil
+		messages = append(messages, reasoningMsg)
+	}
+
+	// Process tool calls
+	if len(toolCalls) > 0 {
+		for _, tc := range toolCalls {
+			if toolCall, ok := tc.(map[string]interface{}); ok {
+				toolCallID, _ := toolCall["id"].(string)
+				toolName, _ := toolCall["name"].(string)
+				if toolCallID != "" {
+					toolCallToName[toolCallID] = toolName
+				}
+
+				toolMsg := copyMap(baseDict)
+				toolMsg["id"] = fmt.Sprintf("tool-%v", toolCallID)
+				toolMsg["message_type"] = "tool_call_message"
+				toolMsg["content"] = nil
+				toolMsg["tool_call"] = map[string]interface{}{
+					"name":         toolName,
+					"arguments":    toolCall["args"],
+					"tool_call_id": toolCallID,
+				}
+				messages = append(messages, toolMsg)
+			}
+		}
+	}
+
+	// Add assistant message if there's final text content
+	if finalContent != "" {
+		assistantMsg := copyMap(baseDict)
+		assistantMsg["message_type"] = "assistant_message"
+		assistantMsg["content"] = finalContent
+		messages = append(messages, assistantMsg)
+	}
+
+	return messages
+}
+
+// calculateUsageStatistics aggregates usage statistics from original messages
+// originalMessages: raw messages from Google Agent Engine (for token counting - avoids double counting)
+// transformedMessages: processed messages (for step_id counting)
+func calculateUsageStatistics(originalMessages []map[string]interface{}, transformedMessages []interface{}) map[string]interface{} {
+	var inputTokens, outputTokens, totalTokens, thoughtsTokens int
+	modelNames := make(map[string]bool)
+	stepIDs := make(map[string]bool)
+
+	// Calculate tokens from ORIGINAL messages (avoid double counting from derived messages)
+	for _, msgMap := range originalMessages {
+		// Extract response_metadata.usage_metadata from original message
+		responseMetadata, _ := msgMap["response_metadata"].(map[string]interface{})
+		usageMD, _ := responseMetadata["usage_metadata"].(map[string]interface{})
+
+		if usageMD != nil {
+			// Input tokens
+			inputTokens += toInt(usageMD["input_tokens"])
+
+			// Output tokens
+			outputTokens += toInt(usageMD["output_tokens"])
+
+			// Thoughts tokens from output_token_details.reasoning
+			if outputDetails, ok := usageMD["output_token_details"].(map[string]interface{}); ok {
+				thoughtsTokens += toInt(outputDetails["reasoning"])
+			}
+
+			// Total tokens
+			msgTotal := toInt(usageMD["total_tokens"])
+			if msgTotal == 0 {
+				msgTotal = toInt(usageMD["input_tokens"]) +
+					toInt(usageMD["output_tokens"])
+				if outputDetails, ok := usageMD["output_token_details"].(map[string]interface{}); ok {
+					msgTotal += toInt(outputDetails["reasoning"])
+				}
+			}
+			totalTokens += msgTotal
+		}
+
+		// Collect model names from original messages
+		if modelName, ok := responseMetadata["model_name"].(string); ok && modelName != "" {
+			modelNames[modelName] = true
+		}
+	}
+
+	// Count unique step_ids from transformed messages
+	for _, msgInterface := range transformedMessages {
+		if msgMap, ok := msgInterface.(map[string]interface{}); ok {
+			if stepID, ok := msgMap["step_id"].(string); ok && stepID != "" {
+				stepIDs[stepID] = true
+			}
+		}
+	}
+
+	// Total output includes thoughts (Gemini charges thoughts as output)
+	totalOutputTokens := outputTokens + thoughtsTokens
+
+	// Convert model names map to slice
+	modelNamesList := make([]string, 0, len(modelNames))
+	for name := range modelNames {
+		modelNamesList = append(modelNamesList, name)
+	}
+
+	return map[string]interface{}{
+		"message_type":      "usage_statistics",
+		"completion_tokens": totalOutputTokens,
+		"thoughts_tokens":   thoughtsTokens,
+		"prompt_tokens":     inputTokens,
+		"total_tokens":      totalTokens,
+		"step_count":        len(stepIDs),
+		"steps_messages":    nil,
+		"run_ids":           nil,
+		"agent_id":          "",
+		"processed_at":      time.Now().Format(time.RFC3339),
+		"status":            "done",
+		"model_names":       modelNamesList,
+	}
+}
+
+// copyMap creates a shallow copy of a map
+func copyMap(original map[string]interface{}) map[string]interface{} {
+	copy := make(map[string]interface{})
+	for k, v := range original {
+		copy[k] = v
+	}
+	return copy
+}
+
+// toInt safely converts an interface to int
+func toInt(v interface{}) int {
+	switch val := v.(type) {
+	case int:
+		return val
+	case int64:
+		return int(val)
+	case float64:
+		return int(val)
+	case float32:
+		return int(val)
+	default:
+		return 0
+	}
 }
 
 // Helper functions for message transformation
@@ -703,45 +931,24 @@ func extractAvgLogprobs(msgMap map[string]interface{}) interface{} {
 func extractUsageMetadata(msgMap map[string]interface{}) interface{} {
 	if responseMetadata, exists := msgMap["response_metadata"].(map[string]interface{}); exists {
 		if usageMetadata, exists := responseMetadata["usage_metadata"]; exists {
-			// Transform to Python API format
 			if usageMap, ok := usageMetadata.(map[string]interface{}); ok {
 				result := map[string]interface{}{
-					"prompt_token_count":     usageMap["input_tokens"],
-					"candidates_token_count": usageMap["output_tokens"],
-					"total_token_count":      usageMap["total_tokens"],
+					"prompt_token_count":     toInt(usageMap["input_tokens"]),
+					"candidates_token_count": toInt(usageMap["output_tokens"]),
+					"total_token_count":      toInt(usageMap["total_tokens"]),
 				}
 
-				// Safely extract nested fields with proper type conversion
+				// Extract thoughts_token_count from output_token_details.reasoning
 				if outputDetails, exists := usageMap["output_token_details"].(map[string]interface{}); exists {
 					if reasoning, exists := outputDetails["reasoning"]; exists {
-						if reasoningInt, ok := reasoning.(int); ok {
-							result["thoughts_token_count"] = float64(reasoningInt)
-						}
+						result["thoughts_token_count"] = toInt(reasoning)
 					}
 				}
 
+				// Extract cached_content_token_count from input_token_details.cache_read
 				if inputDetails, exists := usageMap["input_token_details"].(map[string]interface{}); exists {
 					if cacheRead, exists := inputDetails["cache_read"]; exists {
-						if cacheReadInt, ok := cacheRead.(int); ok {
-							result["cached_content_token_count"] = float64(cacheReadInt)
-						}
-					}
-				}
-
-				// Convert other fields to float64 to match Python API
-				if inputTokens, exists := usageMap["input_tokens"]; exists {
-					if inputInt, ok := inputTokens.(int); ok {
-						result["prompt_token_count"] = float64(inputInt)
-					}
-				}
-				if outputTokens, exists := usageMap["output_tokens"]; exists {
-					if outputInt, ok := outputTokens.(int); ok {
-						result["candidates_token_count"] = float64(outputInt)
-					}
-				}
-				if totalTokens, exists := usageMap["total_tokens"]; exists {
-					if totalInt, ok := totalTokens.(int); ok {
-						result["total_token_count"] = float64(totalInt)
+						result["cached_content_token_count"] = toInt(cacheRead)
 					}
 				}
 

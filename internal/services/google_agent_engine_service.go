@@ -488,8 +488,8 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 
 	s.logger.WithField("operation_name", opName).Debug("Polling operation until completion")
 
-	// Poll with reasonable intervals and timeout
-	op, err := s.pollOperation(ctx, accessToken, opName, 2*time.Second, 120*time.Second)
+	// Poll with reasonable intervals using configured timeout
+	op, err := s.pollOperation(ctx, accessToken, opName, 2*time.Second, s.config.GoogleAgentEngine.RequestTimeout)
 	if err != nil {
 		return "", fmt.Errorf("failed to poll operation: %w", err)
 	}
