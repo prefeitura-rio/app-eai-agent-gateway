@@ -96,6 +96,7 @@ func (s *OTelService) initTracing(ctx context.Context, res *resource.Resource, c
 		otlptracegrpc.WithEndpoint(config.OTLPEndpoint),
 		otlptracegrpc.WithInsecure(),
 		otlptracegrpc.WithHeaders(config.Headers),
+		otlptracegrpc.WithTimeout(30*time.Second), // Increase timeout for trace exports
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create trace exporter: %w", err)
