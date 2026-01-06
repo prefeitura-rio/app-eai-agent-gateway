@@ -7,6 +7,7 @@ metadata:
   annotations:
     secrets.infisical.com/auto-reload: "true"
 spec:
+  replicas: 2  # High availability - minimum 2 replicas
   selector:
     matchLabels:
       app: eai-agent-gateway
@@ -54,10 +55,11 @@ spec:
             httpGet:
               path: /ready
               port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            initialDelaySeconds: 10  # Give app time to initialize
+            periodSeconds: 5         # Check more frequently (was 10s)
+            timeoutSeconds: 4        # Must be < health check timeout (3s + retries)
+            failureThreshold: 4      # 4 failures * 5s = 20s before removal (was 30s)
+            successThreshold: 1      # Back to healthy after 1 success
           livenessProbe:
             httpGet:
               path: /live
