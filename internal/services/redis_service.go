@@ -141,12 +141,41 @@ func NewRedisService(cfg *config.Config, logger *logrus.Logger) (*RedisService, 
 
 	client := redis.NewClient(opts)
 
-	// Test connection
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// Test connection with retry logic
+	const maxRetries = 5
+	const baseBackoff = 2 * time.Second
 
-	if err := client.Ping(ctx).Err(); err != nil {
-		return nil, fmt.Errorf("failed to connect to Redis: %w", err)
+	var lastErr error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := client.Ping(ctx).Err()
+		cancel()
+
+		if err == nil {
+			// Connection successful
+			break
+		}
+
+		lastErr = err
+
+		// If this was the last attempt, return error
+		if attempt == maxRetries {
+			if closeErr := client.Close(); closeErr != nil {
+				logger.WithError(closeErr).Error("Failed to close Redis client after connection failure")
+			}
+			return nil, fmt.Errorf("failed to connect to Redis after %d attempts: %w", maxRetries, lastErr)
+		}
+
+		// Calculate exponential backoff
+		backoff := time.Duration(attempt) * baseBackoff
+		logger.WithFields(logrus.Fields{
+			"attempt":     attempt,
+			"max_retries": maxRetries,
+			"backoff":     backoff,
+			"error":       err,
+		}).Warn("Redis connection attempt failed, retrying...")
+
+		time.Sleep(backoff)
 	}
 
 	logger.WithFields(logrus.Fields{
