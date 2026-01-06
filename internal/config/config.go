@@ -117,6 +117,17 @@ type GoogleAgentEngineConfig struct {
 	MaxMessageLength int           `mapstructure:"GOOGLE_AGENT_ENGINE_MAX_MESSAGE_LENGTH"`
 	MaxRetries       int           `mapstructure:"GOOGLE_AGENT_ENGINE_MAX_RETRIES"`
 	RetryBackoff     time.Duration `mapstructure:"GOOGLE_AGENT_ENGINE_RETRY_BACKOFF"`
+
+	// Health Check Configuration
+	HealthCheckCacheTTL   time.Duration `mapstructure:"GOOGLE_AGENT_ENGINE_HEALTH_CHECK_CACHE_TTL"`
+	HealthCheckTimeout    time.Duration `mapstructure:"GOOGLE_AGENT_ENGINE_HEALTH_CHECK_TIMEOUT"`
+	HealthCheckMaxRetries int           `mapstructure:"GOOGLE_AGENT_ENGINE_HEALTH_CHECK_MAX_RETRIES"`
+	HealthCheckRetryDelay time.Duration `mapstructure:"GOOGLE_AGENT_ENGINE_HEALTH_CHECK_RETRY_DELAY"`
+
+	// Graceful Error Messages
+	ErrorMessageTemporarilyUnavailable string `mapstructure:"GOOGLE_AGENT_ENGINE_ERROR_MSG_UNAVAILABLE"`
+	ErrorMessageTimeout                string `mapstructure:"GOOGLE_AGENT_ENGINE_ERROR_MSG_TIMEOUT"`
+	ErrorMessageDefault                string `mapstructure:"GOOGLE_AGENT_ENGINE_ERROR_MSG_DEFAULT"`
 }
 
 type EAIAgentConfig struct {
@@ -279,6 +290,17 @@ func setDefaults() {
 	viper.SetDefault("GOOGLE_AGENT_ENGINE_MAX_RETRIES", 3)
 	viper.SetDefault("GOOGLE_AGENT_ENGINE_RETRY_BACKOFF", "1s")
 
+	// Google Agent Engine Health Check Configuration
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_CACHE_TTL", "30s")
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_TIMEOUT", "3s")
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_MAX_RETRIES", 2)
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_RETRY_DELAY", "500ms")
+
+	// Google Agent Engine Graceful Error Messages
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_UNAVAILABLE", "🤖 Nosso serviço de IA está temporariamente indisponível. Por favor, tente novamente em alguns instantes.")
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_TIMEOUT", "⏱️ A resposta está demorando mais do que o esperado. Por favor, tente novamente.")
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_DEFAULT", "❌ Desculpe, ocorreu um erro ao processar sua mensagem. Por favor, tente novamente.")
+
 	// Audio Transcription
 	viper.SetDefault("TRANSCRIBE_MAX_DURATION", 60)
 	viper.SetDefault("TRANSCRIBE_MAX_DURATION_MINUTES", 10)
@@ -437,6 +459,13 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_MAX_MESSAGE_LENGTH")
 	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_MAX_RETRIES")
 	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_RETRY_BACKOFF")
+	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_CACHE_TTL")
+	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_TIMEOUT")
+	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_MAX_RETRIES")
+	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_RETRY_DELAY")
+	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_ERROR_MSG_UNAVAILABLE")
+	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_ERROR_MSG_TIMEOUT")
+	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_ERROR_MSG_DEFAULT")
 
 	// EAI Agent
 	_ = viper.BindEnv("EAI_AGENT_URL")

@@ -7,6 +7,7 @@ metadata:
   annotations:
     secrets.infisical.com/auto-reload: "true"
 spec:
+  replicas: 3  # Production - minimum 3 replicas for high availability
   selector:
     matchLabels:
       app: eai-agent-gateway
@@ -25,6 +26,18 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
+      initContainers:
+        - name: wait-for-redis
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z redis-master 6379; do echo "waiting for redis..."; sleep 2; done; echo "redis is ready"']
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 1000
+            capabilities:
+              drop:
+                - ALL
       containers:
         - name: eai-agent-gateway
           image: ghcr.io/prefeitura-rio/app-eai-agent-gateway:stable
@@ -56,10 +69,11 @@ spec:
             httpGet:
               path: /ready
               port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
+            initialDelaySeconds: 10  # Give app time to initialize
+            periodSeconds: 5         # Check more frequently (was 10s)
+            timeoutSeconds: 4        # Must be < health check timeout (3s + retries)
+            failureThreshold: 4      # 4 failures * 5s = 20s before removal (was 30s)
+            successThreshold: 1      # Back to healthy after 1 success
           livenessProbe:
             httpGet:
               path: /live
@@ -72,10 +86,10 @@ spec:
             httpGet:
               path: /health
               port: 8000
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15  # Increased to allow for Redis connection retries
             periodSeconds: 5
             timeoutSeconds: 5
-            failureThreshold: 12
+            failureThreshold: 18     # 18 × 5s = 90s total startup window (vs 60s)
           ports:
             - containerPort: 8000
               name: http
@@ -179,12 +193,13 @@ spec:
 
 ---
 # Pod Disruption Budget for API
+# With 3 replicas, allow max 1 disruption, ensuring 2 pods always available
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: eai-agent-gateway-pdb
 spec:
-  minAvailable: 1
+  maxUnavailable: 1  # At most 1 pod can be unavailable (2 always running)
   selector:
     matchLabels:
       app: eai-agent-gateway

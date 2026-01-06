@@ -9,8 +9,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -27,6 +30,12 @@ type GoogleAgentEngineService struct {
 	redisService RedisServiceInterface
 	httpClient   *http.Client
 	tokenSource  oauth2.TokenSource // Direct token source, no temp files
+
+	// Health check caching
+	healthCheckMu           sync.RWMutex
+	lastHealthCheckTime     time.Time
+	lastHealthCheckResult   error
+	lastHealthCheckEngineID string
 }
 
 // ReasoningEngineRequest represents the request structure for reasoning engine queries
@@ -49,6 +58,49 @@ type RateLimiterInterface interface {
 	Allow(ctx context.Context, key string) (bool, error)
 	Wait(ctx context.Context, key string) error
 }
+
+// Prometheus metrics for Google Agent Engine health checks
+var (
+	googleAgentEngineHealthCheckDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "eai_gateway",
+			Subsystem: "google_agent_engine",
+			Name:      "health_check_duration_seconds",
+			Help:      "Duration of Google Agent Engine health checks in seconds",
+			Buckets:   []float64{0.5, 1, 2, 3, 5, 10},
+		},
+		[]string{"status", "source"}, // status: success/failure, source: redis/memory/fresh
+	)
+
+	googleAgentEngineHealthCheckTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "eai_gateway",
+			Subsystem: "google_agent_engine",
+			Name:      "health_check_total",
+			Help:      "Total number of Google Agent Engine health checks performed",
+		},
+		[]string{"status", "source"},
+	)
+
+	googleAgentEngineHealthCheckRetries = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: "eai_gateway",
+			Subsystem: "google_agent_engine",
+			Name:      "health_check_retries_total",
+			Help:      "Total number of health check retries performed",
+		},
+	)
+
+	googleAgentEngineHealthCheckCacheHits = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "eai_gateway",
+			Subsystem: "google_agent_engine",
+			Name:      "health_check_cache_hits_total",
+			Help:      "Total number of health check cache hits",
+		},
+		[]string{"source"}, // source: redis/memory
+	)
+)
 
 // RedisServiceInterface is the interface for Redis operations needed by this service
 type RedisServiceInterface interface {
@@ -245,11 +297,22 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, reasoningEngineID, messageType)
 	if err != nil {
 		s.logger.WithError(err).WithField("thread_id", threadID).Error("Failed to query reasoning engine")
-		return nil, fmt.Errorf("failed to get AI response: %w", err)
+
+		// Return graceful error message instead of returning error
+		// This prevents raw error propagation to the user
+		errorMsg := s.getGracefulErrorMessage(err)
+		responseContent = errorMsg
+
+		// Log the actual error but don't fail the request
+		s.logger.WithFields(logrus.Fields{
+			"thread_id":        threadID,
+			"error":            err.Error(),
+			"graceful_message": errorMsg,
+		}).Warn("Returning graceful error message to user")
 	}
 
 	if responseContent == "" {
-		responseContent = "I apologize, but I couldn't generate a response. Please try again."
+		responseContent = s.config.GoogleAgentEngine.ErrorMessageDefault
 	}
 
 	// Usage metadata is not available from reasoning engine API
@@ -560,23 +623,156 @@ func (s *GoogleAgentEngineService) Close() error {
 
 // HealthCheck performs a health check on the Google Agent Engine service
 func (s *GoogleAgentEngineService) HealthCheck(ctx context.Context) error {
+	start := time.Now()
+	currentEngineID := s.config.GoogleAgentEngine.ReasoningEngineID
+	cacheTTL := s.config.GoogleAgentEngine.HealthCheckCacheTTL
+
+	// FIRST: Try Redis shared cache (best case - avoid duplicate checks across pods)
+	// If Redis is down, fall back to in-memory cache
+	redisCacheKey := fmt.Sprintf("health_check:google_agent_engine:%s", currentEngineID)
+	if s.redisService != nil {
+		cachedStatus, err := s.redisService.Get(ctx, redisCacheKey)
+		if err == nil && cachedStatus != "" {
+			s.logger.WithField("source", "redis").Debug("Using Redis cached health check result")
+
+			// Record cache hit
+			googleAgentEngineHealthCheckCacheHits.WithLabelValues("redis").Inc()
+
+			status := "success"
+			if cachedStatus != "healthy" {
+				status = "failure"
+			}
+			googleAgentEngineHealthCheckDuration.WithLabelValues(status, "redis").Observe(time.Since(start).Seconds())
+			googleAgentEngineHealthCheckTotal.WithLabelValues(status, "redis").Inc()
+
+			if cachedStatus == "healthy" {
+				return nil
+			}
+			return fmt.Errorf("cached unhealthy status from Redis")
+		}
+		// Redis error or miss - fall through to in-memory cache
+		if err != nil {
+			s.logger.WithError(err).Debug("Redis cache miss or error, falling back to in-memory cache")
+		}
+	}
+
+	// SECOND: Check in-memory cache (fallback when Redis unavailable)
+	s.healthCheckMu.RLock()
+	cacheValid := time.Since(s.lastHealthCheckTime) < cacheTTL &&
+		s.lastHealthCheckEngineID == currentEngineID
+	cachedResult := s.lastHealthCheckResult
+	s.healthCheckMu.RUnlock()
+
+	if cacheValid {
+		s.logger.WithFields(logrus.Fields{
+			"cached_result": cachedResult == nil,
+			"age":           time.Since(s.lastHealthCheckTime).String(),
+			"source":        "memory",
+		}).Debug("Using in-memory cached health check result")
+
+		// Record cache hit
+		googleAgentEngineHealthCheckCacheHits.WithLabelValues("memory").Inc()
+
+		status := "success"
+		if cachedResult != nil {
+			status = "failure"
+		}
+		googleAgentEngineHealthCheckDuration.WithLabelValues(status, "memory").Observe(time.Since(start).Seconds())
+		googleAgentEngineHealthCheckTotal.WithLabelValues(status, "memory").Inc()
+
+		return cachedResult
+	}
+
 	// Apply rate limiting for health check
 	if allowed, err := s.rateLimiter.Allow(ctx, "google_agent_engine_health"); err != nil {
 		return fmt.Errorf("rate limiter error during health check: %w", err)
 	} else if !allowed {
+		// If rate limited, return last cached result if available
+		s.healthCheckMu.RLock()
+		lastResult := s.lastHealthCheckResult
+		s.healthCheckMu.RUnlock()
+		if lastResult == nil {
+			return nil // Last check was successful
+		}
 		return fmt.Errorf("rate limit exceeded for health check")
 	}
 
-	// Use configured health check timeout, default to 5s if not set
-	timeout := s.config.Observability.HealthCheckTimeout
+	// Perform health check with retries
+	maxRetries := s.config.GoogleAgentEngine.HealthCheckMaxRetries
+	retryDelay := s.config.GoogleAgentEngine.HealthCheckRetryDelay
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			s.logger.WithFields(logrus.Fields{
+				"attempt":     attempt,
+				"max_retries": maxRetries,
+			}).Debug("Retrying Google Agent Engine health check")
+			googleAgentEngineHealthCheckRetries.Inc()
+			time.Sleep(retryDelay)
+		}
+
+		err := s.performHealthCheck(ctx)
+		if err == nil {
+			// Success - cache the result in BOTH locations
+			s.healthCheckMu.Lock()
+			s.lastHealthCheckTime = time.Now()
+			s.lastHealthCheckResult = nil
+			s.lastHealthCheckEngineID = currentEngineID
+			s.healthCheckMu.Unlock()
+
+			// Also cache in Redis (best-effort, don't fail if Redis is down)
+			if s.redisService != nil {
+				_ = s.redisService.Set(ctx, redisCacheKey, "healthy", cacheTTL)
+			}
+
+			// Record successful fresh health check
+			googleAgentEngineHealthCheckDuration.WithLabelValues("success", "fresh").Observe(time.Since(start).Seconds())
+			googleAgentEngineHealthCheckTotal.WithLabelValues("success", "fresh").Inc()
+
+			return nil
+		}
+
+		lastErr = err
+
+		// Don't retry on auth errors or non-timeout errors
+		if !strings.Contains(err.Error(), "timeout") &&
+			!strings.Contains(err.Error(), "deadline") &&
+			!strings.Contains(err.Error(), "connection refused") {
+			break
+		}
+	}
+
+	// Cache the failure result in BOTH locations
+	s.healthCheckMu.Lock()
+	s.lastHealthCheckTime = time.Now()
+	s.lastHealthCheckResult = lastErr
+	s.lastHealthCheckEngineID = currentEngineID
+	s.healthCheckMu.Unlock()
+
+	// Also cache failure in Redis (best-effort)
+	if s.redisService != nil {
+		_ = s.redisService.Set(ctx, redisCacheKey, "unhealthy", cacheTTL)
+	}
+
+	// Record failed fresh health check
+	googleAgentEngineHealthCheckDuration.WithLabelValues("failure", "fresh").Observe(time.Since(start).Seconds())
+	googleAgentEngineHealthCheckTotal.WithLabelValues("failure", "fresh").Inc()
+
+	return lastErr
+}
+
+// performHealthCheck executes a single health check attempt
+func (s *GoogleAgentEngineService) performHealthCheck(ctx context.Context) error {
+	// Use configured health check timeout
+	timeout := s.config.GoogleAgentEngine.HealthCheckTimeout
 	if timeout == 0 {
-		timeout = 5 * time.Second
+		timeout = 3 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	// Use lightweight GET request to check reasoning engine existence
-	// This is much faster than making a full query
 	reasoningEngineID := s.config.GoogleAgentEngine.ReasoningEngineID
 	url := fmt.Sprintf(
 		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/reasoningEngines/%s",
@@ -602,7 +798,6 @@ func (s *GoogleAgentEngineService) HealthCheck(ctx context.Context) error {
 	req.Header.Set("Content-Type", "application/json")
 
 	// Create dedicated HTTP client for health checks with shorter timeout
-	// Don't use s.httpClient because it may have a longer request timeout
 	healthClient := &http.Client{
 		Timeout: timeout,
 	}
@@ -624,6 +819,30 @@ func (s *GoogleAgentEngineService) HealthCheck(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// getGracefulErrorMessage returns a user-friendly error message based on the error type
+func (s *GoogleAgentEngineService) getGracefulErrorMessage(err error) string {
+	errStr := err.Error()
+
+	// Check for timeout errors
+	if strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "deadline exceeded") ||
+		strings.Contains(errStr, "context canceled") {
+		return s.config.GoogleAgentEngine.ErrorMessageTimeout
+	}
+
+	// Check for availability errors
+	if strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "unavailable") ||
+		strings.Contains(errStr, "503") ||
+		strings.Contains(errStr, "502") ||
+		strings.Contains(errStr, "504") {
+		return s.config.GoogleAgentEngine.ErrorMessageTemporarilyUnavailable
+	}
+
+	// Default error message for unknown errors
+	return s.config.GoogleAgentEngine.ErrorMessageDefault
 }
 
 // SendHistoryUpdate sends multiple messages to update conversation history
