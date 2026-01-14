@@ -489,17 +489,37 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	// Parse Google's raw JSON response immediately after getting it from Google Agent Engine
 	logger.WithField("raw_response_length", len(agentResponse.Content)).Debug("Processing Google Agent Engine response")
 
-	// Clean the JSON string first to handle newlines and other whitespace issues
-	cleanedResponse := strings.ReplaceAll(agentResponse.Content, "\n", "")
+	// Clean the JSON string first to handle newlines, whitespace, and BOM issues
+	cleanedResponse := strings.TrimSpace(agentResponse.Content)
+	cleanedBytes := []byte(cleanedResponse)
+
+	// Strip BOM if present (fixes "invalid character 'â'" errors)
+	cleanedBytes, hadBOM := stripBOM(cleanedBytes)
+	if hadBOM {
+		logger.WithField("bom_type", "detected").Debug("Stripped BOM from Google Agent Engine response")
+	}
+
+	cleanedResponse = string(cleanedBytes)
+	cleanedResponse = strings.ReplaceAll(cleanedResponse, "\n", "")
 	cleanedResponse = strings.ReplaceAll(cleanedResponse, "\r", "")
-	cleanedResponse = strings.TrimSpace(cleanedResponse)
 
 	var parsedResponse map[string]interface{}
 	if err := json.Unmarshal([]byte(cleanedResponse), &parsedResponse); err != nil {
+		// Log first 100 bytes in hex for debugging encoding issues
+		hexDump := ""
+		if len(cleanedResponse) > 0 {
+			dumpLen := 100
+			if len(cleanedResponse) < dumpLen {
+				dumpLen = len(cleanedResponse)
+			}
+			hexDump = fmt.Sprintf("%x", cleanedResponse[:dumpLen])
+		}
+
 		logger.WithFields(logrus.Fields{
 			"error":       err.Error(),
 			"raw_json":    cleanedResponse,
 			"json_length": len(cleanedResponse),
+			"hex_prefix":  hexDump,
 		}).Error("Failed to parse Google Agent Engine JSON response")
 		if deps.OTelWorkerWrapper != nil && responseSpan != nil {
 			responseSpan.SetAttributes(
@@ -873,6 +893,33 @@ func calculateUsageStatistics(originalMessages []map[string]interface{}, transfo
 		"status":            "done",
 		"model_names":       modelNamesList,
 	}
+}
+
+// stripBOM removes Byte Order Mark (BOM) from the beginning of a byte slice
+// Returns the cleaned bytes and a boolean indicating if BOM was found
+func stripBOM(data []byte) ([]byte, bool) {
+	// UTF-8 BOM (0xEF 0xBB 0xBF)
+	// This is the most common cause of "invalid character 'â'" errors
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		return data[3:], true
+	}
+	// UTF-32 BE BOM (0x00 0x00 0xFE 0xFF) - check before UTF-16
+	if len(data) >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0xFE && data[3] == 0xFF {
+		return data[4:], true
+	}
+	// UTF-32 LE BOM (0xFF 0xFE 0x00 0x00) - check before UTF-16
+	if len(data) >= 4 && data[0] == 0xFF && data[1] == 0xFE && data[2] == 0x00 && data[3] == 0x00 {
+		return data[4:], true
+	}
+	// UTF-16 BE BOM (0xFE 0xFF)
+	if len(data) >= 2 && data[0] == 0xFE && data[1] == 0xFF {
+		return data[2:], true
+	}
+	// UTF-16 LE BOM (0xFF 0xFE)
+	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
+		return data[2:], true
+	}
+	return data, false
 }
 
 // copyMap creates a shallow copy of a map
