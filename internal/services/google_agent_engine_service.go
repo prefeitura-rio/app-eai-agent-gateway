@@ -407,6 +407,12 @@ func (s *GoogleAgentEngineService) postQuery(ctx context.Context, accessToken st
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	// Strip BOM if present to prevent JSON parsing errors
+	bodyBytes, hadBOM := stripBOM(bodyBytes)
+	if hadBOM {
+		s.logger.Debug("Stripped BOM from Google API response")
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("non-2xx response: %d - %s", resp.StatusCode, string(bodyBytes))
 	}
@@ -445,6 +451,12 @@ func (s *GoogleAgentEngineService) pollOperation(ctx context.Context, accessToke
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read poll response: %w", err)
+		}
+
+		// Strip BOM if present to prevent JSON parsing errors
+		bodyBytes, hadBOM := stripBOM(bodyBytes)
+		if hadBOM {
+			s.logger.Debug("Stripped BOM from Google API poll response")
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -943,4 +955,32 @@ func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, thread
 	}).Info("History update processed successfully")
 
 	return resp, nil
+}
+
+// stripBOM removes Byte Order Mark (BOM) from the beginning of a byte slice
+// Returns the cleaned bytes and a boolean indicating if BOM was found
+// This prevents "invalid character 'â' looking for beginning of value" errors
+func stripBOM(data []byte) ([]byte, bool) {
+	// UTF-8 BOM (0xEF 0xBB 0xBF)
+	// This is the most common cause of JSON parsing errors
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		return data[3:], true
+	}
+	// UTF-32 BE BOM (0x00 0x00 0xFE 0xFF) - check before UTF-16
+	if len(data) >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0xFE && data[3] == 0xFF {
+		return data[4:], true
+	}
+	// UTF-32 LE BOM (0xFF 0xFE 0x00 0x00) - check before UTF-16
+	if len(data) >= 4 && data[0] == 0xFF && data[1] == 0xFE && data[2] == 0x00 && data[3] == 0x00 {
+		return data[4:], true
+	}
+	// UTF-16 BE BOM (0xFE 0xFF)
+	if len(data) >= 2 && data[0] == 0xFE && data[1] == 0xFF {
+		return data[2:], true
+	}
+	// UTF-16 LE BOM (0xFF 0xFE)
+	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
+		return data[2:], true
+	}
+	return data, false
 }
