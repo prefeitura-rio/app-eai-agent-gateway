@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -601,7 +602,9 @@ func (s *GoogleAgentEngineService) extractContentFromResponse(response interface
 	for _, field := range contentFields {
 		if content, ok := responseMap[field]; ok {
 			if str, ok := content.(string); ok {
-				return str, nil
+				// Unescape Unicode escape sequences like \u00e3 -> ã
+				unescaped := unescapeUnicode(str)
+				return unescaped, nil
 			}
 		}
 	}
@@ -619,12 +622,17 @@ func (s *GoogleAgentEngineService) extractContentFromResponse(response interface
 		}
 	}
 
-	// Fallback to JSON marshaling
-	responseBytes, err := json.Marshal(response)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal response: %w", err)
+	// Fallback to JSON marshaling with UTF-8 preservation
+	// Use encoder with SetEscapeHTML(false) to preserve UTF-8 and avoid HTML escaping
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(response); err != nil {
+		return "", fmt.Errorf("failed to encode response: %w", err)
 	}
-	return string(responseBytes), nil
+	// Encoder adds a trailing newline, remove it
+	result := buf.String()
+	return strings.TrimSuffix(result, "\n"), nil
 }
 
 // Close closes the Google Agent Engine client
@@ -955,6 +963,19 @@ func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, thread
 	}).Info("History update processed successfully")
 
 	return resp, nil
+}
+
+// unescapeUnicode converts Unicode escape sequences like \u00e3 to actual UTF-8 characters
+func unescapeUnicode(s string) string {
+	// Use strconv.Unquote which handles \uXXXX escape sequences
+	// We need to wrap the string in quotes for Unquote to work
+	quoted := `"` + s + `"`
+	unquoted, err := strconv.Unquote(quoted)
+	if err != nil {
+		// If unquoting fails, return original string
+		return s
+	}
+	return unquoted
 }
 
 // stripBOM removes Byte Order Mark (BOM) from the beginning of a byte slice
