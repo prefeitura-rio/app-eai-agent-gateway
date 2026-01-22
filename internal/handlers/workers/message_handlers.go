@@ -505,21 +505,32 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 
 	var parsedResponse map[string]interface{}
 	if err := json.Unmarshal([]byte(cleanedResponse), &parsedResponse); err != nil {
-		// Log first 100 bytes in hex for debugging encoding issues
+		// Log first 200 bytes in hex for debugging encoding issues
 		hexDump := ""
+		firstBytes := ""
 		if len(cleanedResponse) > 0 {
-			dumpLen := 100
+			dumpLen := 200
 			if len(cleanedResponse) < dumpLen {
 				dumpLen = len(cleanedResponse)
 			}
 			hexDump = fmt.Sprintf("%x", cleanedResponse[:dumpLen])
+			// Also log the first 10 bytes individually
+			byteCount := 10
+			if len(cleanedResponse) < byteCount {
+				byteCount = len(cleanedResponse)
+			}
+			for i := 0; i < byteCount; i++ {
+				firstBytes += fmt.Sprintf("[%d]=0x%02X ", i, cleanedResponse[i])
+			}
 		}
 
 		logger.WithFields(logrus.Fields{
-			"error":       err.Error(),
-			"raw_json":    cleanedResponse,
-			"json_length": len(cleanedResponse),
-			"hex_prefix":  hexDump,
+			"error":        err.Error(),
+			"raw_json":     cleanedResponse,
+			"json_length":  len(cleanedResponse),
+			"hex_prefix":   hexDump,
+			"first_bytes":  firstBytes,
+			"had_bom":      hadBOM,
 		}).Error("Failed to parse Google Agent Engine JSON response")
 		if deps.OTelWorkerWrapper != nil && responseSpan != nil {
 			responseSpan.SetAttributes(
