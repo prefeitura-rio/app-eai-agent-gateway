@@ -505,39 +505,38 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 
 	var parsedResponse map[string]interface{}
 	if err := json.Unmarshal([]byte(cleanedResponse), &parsedResponse); err != nil {
-		// Log first 200 bytes in hex for debugging encoding issues
-		hexDump := ""
-		firstBytes := ""
-		if len(cleanedResponse) > 0 {
-			dumpLen := 200
-			if len(cleanedResponse) < dumpLen {
-				dumpLen = len(cleanedResponse)
-			}
-			hexDump = fmt.Sprintf("%x", cleanedResponse[:dumpLen])
-			// Also log the first 10 bytes individually
-			byteCount := 10
-			if len(cleanedResponse) < byteCount {
-				byteCount = len(cleanedResponse)
-			}
-			for i := 0; i < byteCount; i++ {
-				firstBytes += fmt.Sprintf("[%d]=0x%02X ", i, cleanedResponse[i])
-			}
+		// Response might be a plain text error message (e.g., timeout graceful error)
+		// Convert it to the expected JSON structure
+		// Get preview of response (first 100 chars or full string if shorter)
+		previewLen := 100
+		if len(cleanedResponse) < previewLen {
+			previewLen = len(cleanedResponse)
 		}
 
 		logger.WithFields(logrus.Fields{
-			"error":        err.Error(),
-			"raw_json":     cleanedResponse,
-			"json_length":  len(cleanedResponse),
-			"hex_prefix":   hexDump,
-			"first_bytes":  firstBytes,
-			"had_bom":      hadBOM,
-		}).Error("Failed to parse Google Agent Engine JSON response")
+			"error":              err.Error(),
+			"response_length":    len(cleanedResponse),
+			"response_preview":   cleanedResponse[:previewLen],
+		}).Warn("Response is not valid JSON, treating as plain text error message")
+
+		// Create a simple message structure with the error text
+		parsedResponse = map[string]interface{}{
+			"output": map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"type":    "ai",
+						"content": cleanedResponse,
+						"id":      fmt.Sprintf("error-%d", time.Now().UnixNano()),
+					},
+				},
+			},
+		}
+
 		if deps.OTelWorkerWrapper != nil && responseSpan != nil {
 			responseSpan.SetAttributes(
-				attribute.String("response.result", "json_parse_error"),
-				attribute.String("response.error", err.Error()))
+				attribute.String("response.result", "plain_text_fallback"),
+				attribute.String("response.type", "error_message"))
 		}
-		return "", fmt.Errorf("failed to parse AI response JSON: %w", err)
 	}
 
 	// Extract the 'output' field which contains the messages
