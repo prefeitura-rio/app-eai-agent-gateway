@@ -623,11 +623,14 @@ func (s *GoogleAgentEngineService) extractContentFromResponse(response interface
 	}
 
 	// Fallback to JSON marshaling with UTF-8 preservation
-	// Use encoder with SetEscapeHTML(false) to preserve UTF-8 and avoid HTML escaping
+	// First unescape all Unicode sequences in the response object recursively
+	unescapedResponse := unescapeJSONStrings(response)
+
+	// Then marshal with SetEscapeHTML(false) to preserve UTF-8
 	var buf bytes.Buffer
 	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(response); err != nil {
+	if err := encoder.Encode(unescapedResponse); err != nil {
 		return "", fmt.Errorf("failed to encode response: %w", err)
 	}
 	// Encoder adds a trailing newline, remove it
@@ -976,6 +979,32 @@ func unescapeUnicode(s string) string {
 		return s
 	}
 	return unquoted
+}
+
+// unescapeJSONStrings recursively unescapes all string values in a JSON object
+func unescapeJSONStrings(obj interface{}) interface{} {
+	switch v := obj.(type) {
+	case string:
+		// Unescape string values
+		return unescapeUnicode(v)
+	case map[string]interface{}:
+		// Recursively process maps
+		result := make(map[string]interface{})
+		for key, value := range v {
+			result[key] = unescapeJSONStrings(value)
+		}
+		return result
+	case []interface{}:
+		// Recursively process arrays
+		result := make([]interface{}, len(v))
+		for i, value := range v {
+			result[i] = unescapeJSONStrings(value)
+		}
+		return result
+	default:
+		// Return other types as-is (numbers, booleans, nil)
+		return obj
+	}
 }
 
 // stripBOM removes Byte Order Mark (BOM) from the beginning of a byte slice
