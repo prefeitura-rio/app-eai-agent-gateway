@@ -489,24 +489,54 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	// Parse Google's raw JSON response immediately after getting it from Google Agent Engine
 	logger.WithField("raw_response_length", len(agentResponse.Content)).Debug("Processing Google Agent Engine response")
 
-	// Clean the JSON string first to handle newlines and other whitespace issues
-	cleanedResponse := strings.ReplaceAll(agentResponse.Content, "\n", "")
+	// Clean the JSON string first to handle newlines, whitespace, and BOM issues
+	cleanedResponse := strings.TrimSpace(agentResponse.Content)
+	cleanedBytes := []byte(cleanedResponse)
+
+	// Strip BOM if present (fixes "invalid character 'â'" errors)
+	cleanedBytes, hadBOM := stripBOM(cleanedBytes)
+	if hadBOM {
+		logger.WithField("bom_type", "detected").Debug("Stripped BOM from Google Agent Engine response")
+	}
+
+	cleanedResponse = string(cleanedBytes)
+	cleanedResponse = strings.ReplaceAll(cleanedResponse, "\n", "")
 	cleanedResponse = strings.ReplaceAll(cleanedResponse, "\r", "")
-	cleanedResponse = strings.TrimSpace(cleanedResponse)
 
 	var parsedResponse map[string]interface{}
 	if err := json.Unmarshal([]byte(cleanedResponse), &parsedResponse); err != nil {
+		// Response might be a plain text error message (e.g., timeout graceful error)
+		// Convert it to the expected JSON structure
+		// Get preview of response (first 100 chars or full string if shorter)
+		previewLen := 100
+		if len(cleanedResponse) < previewLen {
+			previewLen = len(cleanedResponse)
+		}
+
 		logger.WithFields(logrus.Fields{
-			"error":       err.Error(),
-			"raw_json":    cleanedResponse,
-			"json_length": len(cleanedResponse),
-		}).Error("Failed to parse Google Agent Engine JSON response")
+			"error":              err.Error(),
+			"response_length":    len(cleanedResponse),
+			"response_preview":   cleanedResponse[:previewLen],
+		}).Warn("Response is not valid JSON, treating as plain text error message")
+
+		// Create a simple message structure with the error text
+		parsedResponse = map[string]interface{}{
+			"output": map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{
+						"type":    "ai",
+						"content": cleanedResponse,
+						"id":      fmt.Sprintf("error-%d", time.Now().UnixNano()),
+					},
+				},
+			},
+		}
+
 		if deps.OTelWorkerWrapper != nil && responseSpan != nil {
 			responseSpan.SetAttributes(
-				attribute.String("response.result", "json_parse_error"),
-				attribute.String("response.error", err.Error()))
+				attribute.String("response.result", "plain_text_fallback"),
+				attribute.String("response.type", "error_message"))
 		}
-		return "", fmt.Errorf("failed to parse AI response JSON: %w", err)
 	}
 
 	// Extract the 'output' field which contains the messages
@@ -873,6 +903,33 @@ func calculateUsageStatistics(originalMessages []map[string]interface{}, transfo
 		"status":            "done",
 		"model_names":       modelNamesList,
 	}
+}
+
+// stripBOM removes Byte Order Mark (BOM) from the beginning of a byte slice
+// Returns the cleaned bytes and a boolean indicating if BOM was found
+func stripBOM(data []byte) ([]byte, bool) {
+	// UTF-8 BOM (0xEF 0xBB 0xBF)
+	// This is the most common cause of "invalid character 'â'" errors
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		return data[3:], true
+	}
+	// UTF-32 BE BOM (0x00 0x00 0xFE 0xFF) - check before UTF-16
+	if len(data) >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0xFE && data[3] == 0xFF {
+		return data[4:], true
+	}
+	// UTF-32 LE BOM (0xFF 0xFE 0x00 0x00) - check before UTF-16
+	if len(data) >= 4 && data[0] == 0xFF && data[1] == 0xFE && data[2] == 0x00 && data[3] == 0x00 {
+		return data[4:], true
+	}
+	// UTF-16 BE BOM (0xFE 0xFF)
+	if len(data) >= 2 && data[0] == 0xFE && data[1] == 0xFF {
+		return data[2:], true
+	}
+	// UTF-16 LE BOM (0xFF 0xFE)
+	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
+		return data[2:], true
+	}
+	return data, false
 }
 
 // copyMap creates a shallow copy of a map

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -407,6 +408,12 @@ func (s *GoogleAgentEngineService) postQuery(ctx context.Context, accessToken st
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
+	// Strip BOM if present to prevent JSON parsing errors
+	bodyBytes, hadBOM := stripBOM(bodyBytes)
+	if hadBOM {
+		s.logger.Debug("Stripped BOM from Google API response")
+	}
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("non-2xx response: %d - %s", resp.StatusCode, string(bodyBytes))
 	}
@@ -445,6 +452,12 @@ func (s *GoogleAgentEngineService) pollOperation(ctx context.Context, accessToke
 		_ = resp.Body.Close()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read poll response: %w", err)
+		}
+
+		// Strip BOM if present to prevent JSON parsing errors
+		bodyBytes, hadBOM := stripBOM(bodyBytes)
+		if hadBOM {
+			s.logger.Debug("Stripped BOM from Google API poll response")
 		}
 
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -589,7 +602,9 @@ func (s *GoogleAgentEngineService) extractContentFromResponse(response interface
 	for _, field := range contentFields {
 		if content, ok := responseMap[field]; ok {
 			if str, ok := content.(string); ok {
-				return str, nil
+				// Unescape Unicode escape sequences like \u00e3 -> ã
+				unescaped := unescapeUnicode(str)
+				return unescaped, nil
 			}
 		}
 	}
@@ -607,12 +622,20 @@ func (s *GoogleAgentEngineService) extractContentFromResponse(response interface
 		}
 	}
 
-	// Fallback to JSON marshaling
-	responseBytes, err := json.Marshal(response)
-	if err != nil {
-		return "", fmt.Errorf("failed to marshal response: %w", err)
+	// Fallback to JSON marshaling with UTF-8 preservation
+	// First unescape all Unicode sequences in the response object recursively
+	unescapedResponse := unescapeJSONStrings(response)
+
+	// Then marshal with SetEscapeHTML(false) to preserve UTF-8
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(unescapedResponse); err != nil {
+		return "", fmt.Errorf("failed to encode response: %w", err)
 	}
-	return string(responseBytes), nil
+	// Encoder adds a trailing newline, remove it
+	result := buf.String()
+	return strings.TrimSuffix(result, "\n"), nil
 }
 
 // Close closes the Google Agent Engine client
@@ -943,4 +966,71 @@ func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, thread
 	}).Info("History update processed successfully")
 
 	return resp, nil
+}
+
+// unescapeUnicode converts Unicode escape sequences like \u00e3 to actual UTF-8 characters
+func unescapeUnicode(s string) string {
+	// Use strconv.Unquote which handles \uXXXX escape sequences
+	// We need to wrap the string in quotes for Unquote to work
+	quoted := `"` + s + `"`
+	unquoted, err := strconv.Unquote(quoted)
+	if err != nil {
+		// If unquoting fails, return original string
+		return s
+	}
+	return unquoted
+}
+
+// unescapeJSONStrings recursively unescapes all string values in a JSON object
+func unescapeJSONStrings(obj interface{}) interface{} {
+	switch v := obj.(type) {
+	case string:
+		// Unescape string values
+		return unescapeUnicode(v)
+	case map[string]interface{}:
+		// Recursively process maps
+		result := make(map[string]interface{})
+		for key, value := range v {
+			result[key] = unescapeJSONStrings(value)
+		}
+		return result
+	case []interface{}:
+		// Recursively process arrays
+		result := make([]interface{}, len(v))
+		for i, value := range v {
+			result[i] = unescapeJSONStrings(value)
+		}
+		return result
+	default:
+		// Return other types as-is (numbers, booleans, nil)
+		return obj
+	}
+}
+
+// stripBOM removes Byte Order Mark (BOM) from the beginning of a byte slice
+// Returns the cleaned bytes and a boolean indicating if BOM was found
+// This prevents "invalid character 'â' looking for beginning of value" errors
+func stripBOM(data []byte) ([]byte, bool) {
+	// UTF-8 BOM (0xEF 0xBB 0xBF)
+	// This is the most common cause of JSON parsing errors
+	if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+		return data[3:], true
+	}
+	// UTF-32 BE BOM (0x00 0x00 0xFE 0xFF) - check before UTF-16
+	if len(data) >= 4 && data[0] == 0x00 && data[1] == 0x00 && data[2] == 0xFE && data[3] == 0xFF {
+		return data[4:], true
+	}
+	// UTF-32 LE BOM (0xFF 0xFE 0x00 0x00) - check before UTF-16
+	if len(data) >= 4 && data[0] == 0xFF && data[1] == 0xFE && data[2] == 0x00 && data[3] == 0x00 {
+		return data[4:], true
+	}
+	// UTF-16 BE BOM (0xFE 0xFF)
+	if len(data) >= 2 && data[0] == 0xFE && data[1] == 0xFF {
+		return data[2:], true
+	}
+	// UTF-16 LE BOM (0xFF 0xFE)
+	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0xFE {
+		return data[2:], true
+	}
+	return data, false
 }
