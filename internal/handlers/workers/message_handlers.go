@@ -514,9 +514,9 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		}
 
 		logger.WithFields(logrus.Fields{
-			"error":              err.Error(),
-			"response_length":    len(cleanedResponse),
-			"response_preview":   cleanedResponse[:previewLen],
+			"error":            err.Error(),
+			"response_length":  len(cleanedResponse),
+			"response_preview": cleanedResponse[:previewLen],
 		}).Warn("Response is not valid JSON, treating as plain text error message")
 
 		// Create a simple message structure with the error text

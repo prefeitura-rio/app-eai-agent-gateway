@@ -288,9 +288,9 @@ func generateHMACSignature(payload []byte, secret string) string {
 // This runs asynchronously and doesn't block the callback flow
 func (s *CallbackService) sendErrorInterceptor(ctx context.Context, callbackURL string, payload models.CallbackPayload, userNumber string, callbackErr error) {
 	logger := s.logger.WithFields(logrus.Fields{
-		"callback_url":  callbackURL,
-		"message_id":    payload.MessageID,
-		"user_number":   userNumber,
+		"callback_url":   callbackURL,
+		"message_id":     payload.MessageID,
+		"user_number":    userNumber,
 		"callback_error": callbackErr.Error(),
 	})
 
