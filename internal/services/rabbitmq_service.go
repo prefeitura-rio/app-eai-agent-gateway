@@ -446,19 +446,31 @@ func (r *RabbitMQService) handleReconnect() {
 func (r *RabbitMQService) reconnect() {
 	retryCount := 0
 	maxRetries := r.config.RabbitMQ.MaxRetries
+	maxDelay := 60 * time.Second // Cap backoff at 60 seconds
 
-	for retryCount < maxRetries {
+	// -1 means infinite retries
+	infiniteRetries := maxRetries < 0
+
+	for infiniteRetries || retryCount < maxRetries {
 		if r.isShutdown {
 			return
 		}
 
-		// Exponential backoff
+		// Exponential backoff with cap
 		delay := time.Duration(retryCount*retryCount+1) * time.Second
-		r.logger.WithFields(logrus.Fields{
+		if delay > maxDelay {
+			delay = maxDelay
+		}
+
+		logFields := logrus.Fields{
 			"retry_count": retryCount + 1,
-			"max_retries": maxRetries,
 			"delay":       delay,
-		}).Info("Attempting to reconnect to RabbitMQ")
+		}
+		if !infiniteRetries {
+			logFields["max_retries"] = maxRetries
+		}
+
+		r.logger.WithFields(logFields).Info("Attempting to reconnect to RabbitMQ")
 
 		time.Sleep(delay)
 
@@ -472,7 +484,8 @@ func (r *RabbitMQService) reconnect() {
 		return
 	}
 
-	r.logger.WithField("max_retries", maxRetries).Error("Failed to reconnect to RabbitMQ after maximum retries")
+	// Only reached if maxRetries is set and exceeded
+	r.logger.WithField("max_retries", maxRetries).Fatal("Failed to reconnect to RabbitMQ after maximum retries, exiting to trigger pod restart")
 }
 
 // HealthCheck implements the HealthChecker interface
