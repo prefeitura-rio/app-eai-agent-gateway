@@ -255,7 +255,7 @@ func setDefaults() {
 	viper.SetDefault("RABBITMQ_USER_MESSAGES_QUEUE", "user_messages")
 	viper.SetDefault("RABBITMQ_AGENT_MESSAGES_QUEUE", "agent_messages")
 	viper.SetDefault("RABBITMQ_DLX_EXCHANGE", "eai_gateway_dlx")
-	viper.SetDefault("RABBITMQ_MAX_RETRIES", 3)
+	viper.SetDefault("RABBITMQ_MAX_RETRIES", -1) // -1 = infinite retries with exponential backoff
 	viper.SetDefault("RABBITMQ_RETRY_DELAY", 30)
 	viper.SetDefault("RABBITMQ_MESSAGE_TIMEOUT", "2000s") // 33+ minutes to allow Google API calls
 	viper.SetDefault("CELERY_SOFT_TIME_LIMIT", 90)
