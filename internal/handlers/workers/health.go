@@ -103,7 +103,9 @@ func (h *WorkerHealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		h.logger.WithError(err).Error("Failed to encode health response")
+	}
 }
 
 // Ready handles the /ready endpoint (readiness probe)
@@ -168,7 +170,9 @@ func (h *WorkerHealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		h.logger.WithError(err).Error("Failed to encode ready response")
+	}
 }
 
 // Live handles the /live endpoint (liveness probe)
@@ -183,5 +187,7 @@ func (h *WorkerHealthHandler) Live(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		h.logger.WithError(err).Error("Failed to encode live response")
+	}
 }
