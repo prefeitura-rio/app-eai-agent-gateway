@@ -24,14 +24,15 @@ import (
 
 // CallbackService handles callback URL execution with retry logic
 type CallbackService struct {
-	logger     *logrus.Logger
-	config     *config.Config
-	httpClient *http.Client
-	tracer     trace.Tracer
+	logger           *logrus.Logger
+	config           *config.Config
+	httpClient       *http.Client
+	tracer           trace.Tracer
+	dataRelayService *DataRelayService
 }
 
 // NewCallbackService creates a new callback service
-func NewCallbackService(logger *logrus.Logger, cfg *config.Config, tracer trace.Tracer) *CallbackService {
+func NewCallbackService(logger *logrus.Logger, cfg *config.Config, tracer trace.Tracer, dataRelayService *DataRelayService) *CallbackService {
 	return &CallbackService{
 		logger: logger,
 		config: cfg,
@@ -43,7 +44,8 @@ func NewCallbackService(logger *logrus.Logger, cfg *config.Config, tracer trace.
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		tracer: tracer,
+		tracer:           tracer,
+		dataRelayService: dataRelayService,
 	}
 }
 
@@ -87,7 +89,7 @@ func (s *CallbackService) ValidateCallbackURL(callbackURL string) error {
 }
 
 // ExecuteCallback sends a POST request to the callback URL with retry logic
-func (s *CallbackService) ExecuteCallback(ctx context.Context, callbackURL string, payload models.CallbackPayload) error {
+func (s *CallbackService) ExecuteCallback(ctx context.Context, callbackURL string, payload models.CallbackPayload, userNumber string) error {
 	logger := s.logger.WithFields(logrus.Fields{
 		"callback_url": callbackURL,
 		"message_id":   payload.MessageID,
@@ -162,6 +164,12 @@ func (s *CallbackService) ExecuteCallback(ctx context.Context, callbackURL strin
 			attribute.Int("callback.attempts", maxRetries+1),
 		)
 	}
+
+	// Send error to Data Relay error interceptor (async, non-blocking)
+	if s.config.DataRelay.Enabled && s.dataRelayService != nil {
+		go s.sendErrorInterceptor(ctx, callbackURL, payload, userNumber, err)
+	}
+
 	return fmt.Errorf("callback failed after %d attempts: %w", maxRetries+1, err)
 }
 
@@ -274,4 +282,55 @@ func generateHMACSignature(payload []byte, secret string) string {
 	h := hmac.New(sha256.New, []byte(secret))
 	h.Write(payload)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// sendErrorInterceptor sends callback failure details to Data Relay
+// This runs asynchronously and doesn't block the callback flow
+func (s *CallbackService) sendErrorInterceptor(ctx context.Context, callbackURL string, payload models.CallbackPayload, userNumber string, callbackErr error) {
+	logger := s.logger.WithFields(logrus.Fields{
+		"callback_url":  callbackURL,
+		"message_id":    payload.MessageID,
+		"user_number":   userNumber,
+		"callback_error": callbackErr.Error(),
+	})
+
+	// Serialize the callback payload that failed
+	inputBodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		logger.WithError(err).Error("Failed to serialize callback payload for Data Relay")
+		return
+	}
+
+	// Extract HTTP status code and error response from the callback error
+	httpStatusCode := 0
+	errorResponse := callbackErr.Error()
+
+	if httpErr, ok := callbackErr.(*HTTPError); ok {
+		httpStatusCode = httpErr.StatusCode
+		errorResponse = httpErr.Body
+	}
+
+	// Build Data Relay error interceptor payload
+	errorPayload := ErrorInterceptorPayload{
+		CustomerWhatsappNumber: userNumber,
+		Source:                 s.config.DataRelay.Source,
+		FlowName:               s.config.DataRelay.FlowName,
+		APIEndpoint:            callbackURL,
+		InputBody:              string(inputBodyBytes),
+		HTTPStatusCode:         httpStatusCode,
+		ErrorResponse:          errorResponse,
+	}
+
+	// Send to Data Relay (with a separate timeout context)
+	relayCtx, cancel := context.WithTimeout(context.Background(), time.Duration(s.config.DataRelay.Timeout)*time.Second)
+	defer cancel()
+
+	err = s.dataRelayService.SendErrorInterceptor(relayCtx, errorPayload)
+	if err != nil {
+		// Log but don't propagate - Data Relay is non-critical
+		logger.WithError(err).Warn("Failed to send error interceptor to Data Relay")
+		return
+	}
+
+	logger.Info("Successfully sent callback error to Data Relay error interceptor")
 }
