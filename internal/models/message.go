@@ -147,6 +147,7 @@ type CallbackPayload struct {
 type CallbackInfo struct {
 	URL         string    `json:"url"`
 	MessageID   string    `json:"message_id"`
+	UserNumber  string    `json:"user_number"` // WhatsApp number for error tracking
 	RetryCount  int       `json:"retry_count"`
 	LastAttempt time.Time `json:"last_attempt,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`

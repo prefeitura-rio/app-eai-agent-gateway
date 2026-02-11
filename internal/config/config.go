@@ -44,6 +44,9 @@ type Config struct {
 
 	// Callback
 	Callback CallbackConfig `mapstructure:",squash"`
+
+	// Data Relay
+	DataRelay DataRelayConfig `mapstructure:",squash"`
 }
 
 type ServerConfig struct {
@@ -210,6 +213,15 @@ type CallbackConfig struct {
 	AuthToken     string `mapstructure:"CALLBACK_AUTH_TOKEN"`
 }
 
+type DataRelayConfig struct {
+	Enabled  bool   `mapstructure:"DATA_RELAY_ENABLED"`
+	BaseURL  string `mapstructure:"DATA_RELAY_BASE_URL"`
+	APIKey   string `mapstructure:"DATA_RELAY_API_KEY"`
+	Timeout  int    `mapstructure:"DATA_RELAY_TIMEOUT"`
+	Source   string `mapstructure:"DATA_RELAY_SOURCE"`
+	FlowName string `mapstructure:"DATA_RELAY_FLOW_NAME"`
+}
+
 // Load loads configuration from environment variables and files
 func Load() (*Config, error) {
 	viper.AutomaticEnv()
@@ -255,7 +267,7 @@ func setDefaults() {
 	viper.SetDefault("RABBITMQ_USER_MESSAGES_QUEUE", "user_messages")
 	viper.SetDefault("RABBITMQ_AGENT_MESSAGES_QUEUE", "agent_messages")
 	viper.SetDefault("RABBITMQ_DLX_EXCHANGE", "eai_gateway_dlx")
-	viper.SetDefault("RABBITMQ_MAX_RETRIES", 3)
+	viper.SetDefault("RABBITMQ_MAX_RETRIES", -1) // -1 = infinite retries with exponential backoff
 	viper.SetDefault("RABBITMQ_RETRY_DELAY", 30)
 	viper.SetDefault("RABBITMQ_MESSAGE_TIMEOUT", "2000s") // 33+ minutes to allow Google API calls
 	viper.SetDefault("CELERY_SOFT_TIME_LIMIT", 90)
@@ -361,6 +373,12 @@ func setDefaults() {
 	viper.SetDefault("CALLBACK_HMAC_SECRET", "")
 	viper.SetDefault("CALLBACK_REQUIRE_HTTPS", true)
 	viper.SetDefault("CALLBACK_ALLOWED_DOMAIN", "") // Empty = allow all
+
+	// Data Relay
+	viper.SetDefault("DATA_RELAY_ENABLED", false)
+	viper.SetDefault("DATA_RELAY_TIMEOUT", 10) // 10 seconds
+	viper.SetDefault("DATA_RELAY_SOURCE", "eai-agent-gateway")
+	viper.SetDefault("DATA_RELAY_FLOW_NAME", "wetalkie_callback")
 }
 
 func validateRequired(config *Config) error {
@@ -528,6 +546,14 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("CALLBACK_REQUIRE_HTTPS")
 	_ = viper.BindEnv("CALLBACK_ALLOWED_DOMAIN")
 	_ = viper.BindEnv("CALLBACK_AUTH_TOKEN")
+
+	// Data Relay
+	_ = viper.BindEnv("DATA_RELAY_ENABLED")
+	_ = viper.BindEnv("DATA_RELAY_BASE_URL")
+	_ = viper.BindEnv("DATA_RELAY_API_KEY")
+	_ = viper.BindEnv("DATA_RELAY_TIMEOUT")
+	_ = viper.BindEnv("DATA_RELAY_SOURCE")
+	_ = viper.BindEnv("DATA_RELAY_FLOW_NAME")
 }
 
 // GetLogLevel returns the logrus log level from config
