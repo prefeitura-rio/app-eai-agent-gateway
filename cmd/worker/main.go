@@ -103,14 +103,27 @@ func main() {
 	// Initialize message formatter service
 	messageFormatterService := services.NewMessageFormatterService(cfg, log)
 
+	// Initialize Data Relay service if enabled
+	var dataRelayService *services.DataRelayService
+	if cfg.DataRelay.Enabled {
+		dataRelayService = services.NewDataRelayService(log, &cfg.DataRelay)
+		log.WithFields(logrus.Fields{
+			"base_url": cfg.DataRelay.BaseURL,
+			"source":   cfg.DataRelay.Source,
+			"flowname": cfg.DataRelay.FlowName,
+		}).Info("Data Relay error interceptor enabled")
+	} else {
+		log.Info("Data Relay error interceptor disabled by configuration")
+	}
+
 	// Initialize callback service if enabled
 	var callbackService *services.CallbackService
 	if cfg.Callback.Enabled {
 		if otelService != nil {
-			callbackService = services.NewCallbackService(log, cfg, otelService.GetTracer())
+			callbackService = services.NewCallbackService(log, cfg, otelService.GetTracer(), dataRelayService)
 			log.Info("Callback service initialized with tracing")
 		} else {
-			callbackService = services.NewCallbackService(log, cfg, nil)
+			callbackService = services.NewCallbackService(log, cfg, nil, dataRelayService)
 			log.Info("Callback service initialized without tracing")
 		}
 	} else {

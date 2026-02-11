@@ -271,7 +271,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			callbackURL, err := deps.RedisService.GetCallbackURL(ctx, queueMsg.ID)
 			if err == nil && callbackURL != "" {
 				// Execute callback asynchronously to avoid blocking worker
-				go executeCallback(context.Background(), deps, queueMsg.ID, callbackURL, response, logger)
+				go executeCallback(context.Background(), deps, queueMsg.ID, queueMsg.UserNumber, callbackURL, response, logger)
 			}
 		}
 
@@ -1241,10 +1241,11 @@ func classifyTranscriptionError(err error) string {
 }
 
 // executeCallback handles the callback execution asynchronously
-func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, messageID string, callbackURL string, response string, logger *logrus.Entry) {
+func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, messageID string, userNumber string, callbackURL string, response string, logger *logrus.Entry) {
 	callbackLogger := logger.WithFields(logrus.Fields{
 		"callback_url": callbackURL,
 		"message_id":   messageID,
+		"user_number":  userNumber,
 	})
 
 	callbackLogger.Info("Executing callback for completed task")
@@ -1267,7 +1268,7 @@ func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, mess
 	}
 
 	// Execute the callback with retry logic
-	if err := deps.CallbackService.ExecuteCallback(ctx, callbackURL, payload); err != nil {
+	if err := deps.CallbackService.ExecuteCallback(ctx, callbackURL, payload, userNumber); err != nil {
 		callbackLogger.WithError(err).Error("Failed to execute callback after all retries")
 		// Store callback failure for debugging
 		errorKey := "callback:error:" + messageID
