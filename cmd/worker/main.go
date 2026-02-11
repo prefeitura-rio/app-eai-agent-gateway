@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -171,6 +173,37 @@ func main() {
 
 	log.Info("Worker started successfully - consuming messages from RabbitMQ")
 
+	// Set up health check HTTP server
+	healthHandler := workerhandlers.NewWorkerHealthHandler(rabbitMQService, redisService, log)
+
+	// Create HTTP mux for health endpoints
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", healthHandler.Health)
+	mux.HandleFunc("/ready", healthHandler.Ready)
+	mux.HandleFunc("/live", healthHandler.Live)
+
+	// Get health check port from config or use default
+	healthPort := cfg.Server.HealthPort
+	if healthPort == 0 {
+		healthPort = 8081 // Default health check port for workers
+	}
+
+	healthServer := &http.Server{
+		Addr:         fmt.Sprintf(":%d", healthPort),
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	// Start health check server in background
+	go func() {
+		log.WithField("port", healthPort).Info("Starting worker health check server")
+		if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.WithError(err).Error("Health check server failed")
+		}
+	}()
+
 	// Wait for interrupt signal to gracefully shutdown
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
@@ -181,6 +214,12 @@ func main() {
 	// Give the worker 30 seconds to gracefully shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Shutdown health check server
+	log.Info("Shutting down health check server")
+	if err := healthServer.Shutdown(ctx); err != nil {
+		log.WithError(err).Error("Failed to shutdown health check server")
+	}
 
 	// Shutdown OpenTelemetry service first if initialized
 	if otelService != nil {

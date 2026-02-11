@@ -142,9 +142,40 @@ spec:
               value: "json"
             - name: TRANSCRIBE_TEMP_DIR
               value: "/tmp/audio"
+            - name: WORKER_HEALTH_PORT
+              value: "8081"
           volumeMounts:
             - name: temp-audio
               mountPath: /tmp/audio
+          ports:
+            - containerPort: 8081
+              name: health
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 4
+            failureThreshold: 4
+            successThreshold: 1
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 18
           resources:
             requests:
               ephemeral-storage: 1Gi
