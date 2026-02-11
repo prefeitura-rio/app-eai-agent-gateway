@@ -52,6 +52,7 @@ type Config struct {
 type ServerConfig struct {
 	Port         int           `mapstructure:"SERVER_PORT"`
 	Host         string        `mapstructure:"SERVER_HOST"`
+	HealthPort   int           `mapstructure:"WORKER_HEALTH_PORT"`
 	ReadTimeout  time.Duration `mapstructure:"SERVER_READ_TIMEOUT"`
 	WriteTimeout time.Duration `mapstructure:"SERVER_WRITE_TIMEOUT"`
 	IdleTimeout  time.Duration `mapstructure:"SERVER_IDLE_TIMEOUT"`

@@ -726,11 +726,12 @@ func processAIMessage(logger *logrus.Logger, msgMap map[string]interface{}, step
 		for _, item := range content {
 			if itemMap, ok := item.(map[string]interface{}); ok {
 				itemType, _ := itemMap["type"].(string)
-				if itemType == "thinking" {
+				switch itemType {
+				case "thinking":
 					if thinking, ok := itemMap["thinking"].(string); ok {
 						thinkingContent += thinking
 					}
-				} else if itemType == "text" {
+				case "text":
 					if text, ok := itemMap["text"].(string); ok {
 						finalContent += text
 					}
