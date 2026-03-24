@@ -47,6 +47,9 @@ type Config struct {
 
 	// Data Relay
 	DataRelay DataRelayConfig `mapstructure:",squash"`
+
+	// PostgreSQL (Agent Engine Database)
+	Postgres PostgresConfig `mapstructure:",squash"`
 }
 
 type ServerConfig struct {
@@ -221,6 +224,14 @@ type DataRelayConfig struct {
 	Timeout  int    `mapstructure:"DATA_RELAY_TIMEOUT"`
 	Source   string `mapstructure:"DATA_RELAY_SOURCE"`
 	FlowName string `mapstructure:"DATA_RELAY_FLOW_NAME"`
+}
+
+type PostgresConfig struct {
+	DSN             string        `mapstructure:"POSTGRES_DSN"`
+	MaxOpenConns    int           `mapstructure:"POSTGRES_MAX_OPEN_CONNS"`
+	MaxIdleConns    int           `mapstructure:"POSTGRES_MAX_IDLE_CONNS"`
+	ConnMaxLifetime time.Duration `mapstructure:"POSTGRES_CONN_MAX_LIFETIME"`
+	UserActivityTTL time.Duration `mapstructure:"POSTGRES_USER_ACTIVITY_TTL"`
 }
 
 // Load loads configuration from environment variables and files
@@ -555,6 +566,19 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("DATA_RELAY_TIMEOUT")
 	_ = viper.BindEnv("DATA_RELAY_SOURCE")
 	_ = viper.BindEnv("DATA_RELAY_FLOW_NAME")
+
+	// PostgreSQL
+	_ = viper.BindEnv("POSTGRES_DSN")
+	_ = viper.BindEnv("POSTGRES_MAX_OPEN_CONNS")
+	_ = viper.BindEnv("POSTGRES_MAX_IDLE_CONNS")
+	_ = viper.BindEnv("POSTGRES_CONN_MAX_LIFETIME")
+	_ = viper.BindEnv("POSTGRES_USER_ACTIVITY_TTL")
+
+	// Set PostgreSQL defaults
+	viper.SetDefault("POSTGRES_MAX_OPEN_CONNS", 25)
+	viper.SetDefault("POSTGRES_MAX_IDLE_CONNS", 5)
+	viper.SetDefault("POSTGRES_CONN_MAX_LIFETIME", 5*time.Minute)
+	viper.SetDefault("POSTGRES_USER_ACTIVITY_TTL", 24*time.Hour)
 }
 
 // GetLogLevel returns the logrus log level from config

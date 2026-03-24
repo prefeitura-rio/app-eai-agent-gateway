@@ -187,6 +187,21 @@ func (w *BaseWorker) handleMessage(ctx context.Context, delivery amqp.Delivery) 
 			procCtx.Logger.WithError(err).Error("Failed to set completed status")
 		}
 
+		// Cache user's last activity timestamp (only for user messages, not history updates)
+		if procCtx.UserNumber != "" && w.workerType == models.WorkerTypeUserMessage {
+			timestamp := time.Now()
+			ttl := w.deps.Config.Postgres.UserActivityTTL
+			if err := w.deps.RedisService.SetUserLastActivity(ctx, procCtx.UserNumber, timestamp, ttl); err != nil {
+				procCtx.Logger.WithError(err).Warn("Failed to cache user last activity timestamp")
+				// Don't fail the whole operation for cache errors
+			} else {
+				procCtx.Logger.WithFields(logrus.Fields{
+					"timestamp": timestamp,
+					"ttl":       ttl,
+				}).Debug("Cached user last activity timestamp")
+			}
+		}
+
 	} else {
 		procCtx.Logger.WithError(result.Error).Error("Message processing failed")
 

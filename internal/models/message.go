@@ -152,3 +152,11 @@ type CallbackInfo struct {
 	LastAttempt time.Time `json:"last_attempt,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 }
+
+// UserLastActivityResponse represents the response for user last activity endpoint
+type UserLastActivityResponse struct {
+	UserNumber           string `json:"user_number" example:"5521999999999"`
+	LastMessageTimestamp string `json:"last_message_timestamp" example:"2026-03-24T14:30:00Z"`
+	Cached               bool   `json:"cached" example:"true"`
+	TTLSeconds           int    `json:"ttl_seconds" example:"86400"`
+}
