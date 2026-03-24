@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -90,7 +91,7 @@ func (p *PostgresService) GetLastMessageTimestamp(ctx context.Context, threadID 
 		LIMIT 1
 	`
 
-	var checkpointID int64
+	var checkpointID string
 
 	// QueryRowContext with parameterized query - threadID is safely escaped by driver
 	err := p.db.QueryRowContext(ctx, query, threadID).Scan(&checkpointID)
@@ -102,15 +103,59 @@ func (p *PostgresService) GetLastMessageTimestamp(ctx context.Context, threadID 
 		return nil, fmt.Errorf("postgres query error: %w", err)
 	}
 
-	// Convert checkpoint_id to timestamp
-	// checkpoint_id is a bigint that represents nanoseconds since epoch in LangGraph
-	timestamp := time.Unix(0, checkpointID)
+	// Extract timestamp from UUID v7 checkpoint_id
+	// UUID v7 format: first 48 bits are Unix timestamp in milliseconds
+	// Format: "1f11c8ec-ce30-6641-8017-8909ed283a09"
+	timestamp, err := extractTimestampFromUUIDv7(checkpointID)
+	if err != nil {
+		p.logger.WithError(err).WithFields(logrus.Fields{
+			"thread_id":     threadID,
+			"checkpoint_id": checkpointID,
+		}).Error("Failed to extract timestamp from UUID v7")
+		return nil, fmt.Errorf("invalid checkpoint_id format: %w", err)
+	}
 
 	p.logger.WithFields(logrus.Fields{
 		"thread_id":     threadID,
 		"checkpoint_id": checkpointID,
 		"timestamp":     timestamp,
 	}).Debug("Retrieved last message timestamp from postgres")
+
+	return timestamp, nil
+}
+
+// extractTimestampFromUUIDv7 extracts the Unix timestamp from a UUID v7 string
+// UUID v7 format embeds a 48-bit Unix timestamp (milliseconds) in the first segment
+func extractTimestampFromUUIDv7(uuidStr string) (*time.Time, error) {
+	// Remove hyphens from UUID: "1f11c8ec-ce30-6641-8017-8909ed283a09" -> "1f11c8ecce3066418017890"
+	cleaned := ""
+	for _, c := range uuidStr {
+		if c != '-' {
+			cleaned += string(c)
+		}
+	}
+
+	// First 12 hex chars (48 bits) represent timestamp in milliseconds
+	if len(cleaned) < 12 {
+		return nil, fmt.Errorf("UUID too short: %s", uuidStr)
+	}
+
+	timestampHex := cleaned[:12]
+
+	// Decode hex to bytes
+	timestampBytes, err := hex.DecodeString(timestampHex)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode timestamp hex: %w", err)
+	}
+
+	// Convert bytes to milliseconds (48-bit big-endian integer)
+	var timestampMillis int64
+	for i := 0; i < len(timestampBytes); i++ {
+		timestampMillis = (timestampMillis << 8) | int64(timestampBytes[i])
+	}
+
+	// Convert milliseconds to time.Time
+	timestamp := time.UnixMilli(timestampMillis)
 
 	return &timestamp, nil
 }
