@@ -19,15 +19,17 @@ import (
 
 // Server represents the HTTP server
 type Server struct {
-	config          *config.Config
-	logger          *logrus.Logger
-	router          *gin.Engine
-	httpServer      *http.Server
-	healthHandler   *handlers.HealthHandler
-	messageHandler  *handlers.MessageHandler
-	redisService    *services.RedisService
-	rabbitMQService *services.RabbitMQService
-	otelService     *services.OTelService // Optional OTel service
+	config              *config.Config
+	logger              *logrus.Logger
+	router              *gin.Engine
+	httpServer          *http.Server
+	healthHandler       *handlers.HealthHandler
+	messageHandler      *handlers.MessageHandler
+	userActivityHandler *handlers.UserActivityHandler
+	redisService        *services.RedisService
+	rabbitMQService     *services.RabbitMQService
+	postgresService     *services.PostgresService
+	otelService         *services.OTelService // Optional OTel service
 }
 
 // NewServer creates a new HTTP server
@@ -51,6 +53,12 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 		return nil, fmt.Errorf("failed to initialize RabbitMQ service: %w", err)
 	}
 
+	// Initialize PostgreSQL service
+	postgresService, err := services.NewPostgresService(cfg, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize PostgreSQL service: %w", err)
+	}
+
 	// Initialize Google Agent Engine service (for sync history updates)
 	var googleAgentService *services.GoogleAgentEngineService
 	rateLimiter := services.NewRateLimiterService(cfg, logger, redisService)
@@ -66,6 +74,7 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 		router:          gin.New(),
 		redisService:    redisService,
 		rabbitMQService: rabbitMQService,
+		postgresService: postgresService,
 		otelService:     otelService,
 		healthHandler: handlers.NewHealthHandler(
 			cfg.Observability.HealthCheckTimeout,
@@ -78,6 +87,7 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			}
 			return nil
 		}()),
+		userActivityHandler: handlers.NewUserActivityHandler(logger, cfg, redisService, postgresService),
 	}
 
 	// Add Google Agent Engine to health checks if available
@@ -88,6 +98,7 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 	// Add services to health checks
 	server.healthHandler.AddChecker("redis", redisService)
 	server.healthHandler.AddChecker("rabbitmq", rabbitMQService)
+	server.healthHandler.AddChecker("postgres", postgresService)
 
 	server.setupMiddleware()
 	server.setupRoutes()
@@ -191,6 +202,7 @@ func (s *Server) setupRoutes() {
 				message.POST("/webhook/update_history", s.messageHandler.HandleHistoryUpdateWebhook)
 				message.GET("/response", s.messageHandler.HandleMessageResponse)
 				message.GET("/debug/task-status", s.messageHandler.HandleDebugTaskStatus)
+				message.GET("/last-activity", s.userActivityHandler.HandleLastActivity)
 			}
 
 			// Note: Agent management endpoints removed - were Letta-specific
@@ -248,6 +260,13 @@ func (s *Server) Stop(ctx context.Context) error {
 	if s.rabbitMQService != nil {
 		if err := s.rabbitMQService.Close(); err != nil {
 			s.logger.WithError(err).Error("Failed to close RabbitMQ connection during shutdown")
+		}
+	}
+
+	// Close PostgreSQL connection
+	if s.postgresService != nil {
+		if err := s.postgresService.Close(); err != nil {
+			s.logger.WithError(err).Error("Failed to close PostgreSQL connection during shutdown")
 		}
 	}
 
