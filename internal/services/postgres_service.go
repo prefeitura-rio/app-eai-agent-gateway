@@ -3,7 +3,6 @@ package services
 import (
 	"context"
 	"database/sql"
-	"encoding/hex"
 	"fmt"
 	"time"
 
@@ -82,19 +81,22 @@ func NewPostgresService(cfg *config.Config, logger *logrus.Logger) (*PostgresSer
 // Uses parameterized query ($1 placeholder) to prevent SQL injection
 func (p *PostgresService) GetLastMessageTimestamp(ctx context.Context, threadID string) (*time.Time, error) {
 	// Use $1 placeholder for parameterized query - prevents SQL injection
+	// Extract timestamp from checkpoint_jsonb->>'ts' field
+	// LangGraph stores timestamp in ISO 8601 format in the 'ts' field
 	query := `
-		SELECT c.checkpoint_id
-		FROM checkpoints c
-		WHERE c.thread_id = $1
-		  AND c.checkpoint_ns = ''
-		ORDER BY c.checkpoint_id DESC
+		SELECT checkpoint_jsonb->>'ts' as timestamp
+		FROM checkpoints
+		WHERE thread_id = $1
+		  AND checkpoint_ns = ''
+		  AND checkpoint_jsonb->>'ts' IS NOT NULL
+		ORDER BY checkpoint_id DESC
 		LIMIT 1
 	`
 
-	var checkpointID string
+	var timestampStr string
 
 	// QueryRowContext with parameterized query - threadID is safely escaped by driver
-	err := p.db.QueryRowContext(ctx, query, threadID).Scan(&checkpointID)
+	err := p.db.QueryRowContext(ctx, query, threadID).Scan(&timestampStr)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("no messages found for thread: %s", threadID)
@@ -103,59 +105,20 @@ func (p *PostgresService) GetLastMessageTimestamp(ctx context.Context, threadID 
 		return nil, fmt.Errorf("postgres query error: %w", err)
 	}
 
-	// Extract timestamp from UUID v7 checkpoint_id
-	// UUID v7 format: first 48 bits are Unix timestamp in milliseconds
-	// Format: "1f11c8ec-ce30-6641-8017-8909ed283a09"
-	timestamp, err := extractTimestampFromUUIDv7(checkpointID)
+	// Parse ISO 8601 timestamp from JSONB
+	timestamp, err := time.Parse(time.RFC3339, timestampStr)
 	if err != nil {
 		p.logger.WithError(err).WithFields(logrus.Fields{
 			"thread_id":     threadID,
-			"checkpoint_id": checkpointID,
-		}).Error("Failed to extract timestamp from UUID v7")
-		return nil, fmt.Errorf("invalid checkpoint_id format: %w", err)
+			"timestamp_str": timestampStr,
+		}).Error("Failed to parse timestamp")
+		return nil, fmt.Errorf("invalid timestamp format: %w", err)
 	}
 
 	p.logger.WithFields(logrus.Fields{
-		"thread_id":     threadID,
-		"checkpoint_id": checkpointID,
-		"timestamp":     timestamp,
+		"thread_id": threadID,
+		"timestamp": timestamp,
 	}).Debug("Retrieved last message timestamp from postgres")
-
-	return timestamp, nil
-}
-
-// extractTimestampFromUUIDv7 extracts the Unix timestamp from a UUID v7 string
-// UUID v7 format embeds a 48-bit Unix timestamp (milliseconds) in the first segment
-func extractTimestampFromUUIDv7(uuidStr string) (*time.Time, error) {
-	// Remove hyphens from UUID: "1f11c8ec-ce30-6641-8017-8909ed283a09" -> "1f11c8ecce3066418017890"
-	cleaned := ""
-	for _, c := range uuidStr {
-		if c != '-' {
-			cleaned += string(c)
-		}
-	}
-
-	// First 12 hex chars (48 bits) represent timestamp in milliseconds
-	if len(cleaned) < 12 {
-		return nil, fmt.Errorf("UUID too short: %s", uuidStr)
-	}
-
-	timestampHex := cleaned[:12]
-
-	// Decode hex to bytes
-	timestampBytes, err := hex.DecodeString(timestampHex)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode timestamp hex: %w", err)
-	}
-
-	// Convert bytes to milliseconds (48-bit big-endian integer)
-	var timestampMillis int64
-	for i := 0; i < len(timestampBytes); i++ {
-		timestampMillis = (timestampMillis << 8) | int64(timestampBytes[i])
-	}
-
-	// Convert milliseconds to time.Time
-	timestamp := time.UnixMilli(timestampMillis)
 
 	return &timestamp, nil
 }
