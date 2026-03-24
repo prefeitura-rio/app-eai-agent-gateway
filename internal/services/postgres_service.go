@@ -81,14 +81,14 @@ func NewPostgresService(cfg *config.Config, logger *logrus.Logger) (*PostgresSer
 // Uses parameterized query ($1 placeholder) to prevent SQL injection
 func (p *PostgresService) GetLastMessageTimestamp(ctx context.Context, threadID string) (*time.Time, error) {
 	// Use $1 placeholder for parameterized query - prevents SQL injection
-	// Extract timestamp from checkpoint_jsonb->>'ts' field
-	// LangGraph stores timestamp in ISO 8601 format in the 'ts' field
+	// Extract timestamp from checkpoint->>'ts' field
+	// LangGraph stores timestamp in ISO 8601 format in the 'ts' field of the checkpoint JSONB column
 	query := `
-		SELECT checkpoint_jsonb->>'ts' as timestamp
+		SELECT checkpoint->>'ts' as timestamp
 		FROM checkpoints
 		WHERE thread_id = $1
 		  AND checkpoint_ns = ''
-		  AND checkpoint_jsonb->>'ts' IS NOT NULL
+		  AND checkpoint->>'ts' IS NOT NULL
 		ORDER BY checkpoint_id DESC
 		LIMIT 1
 	`
