@@ -81,19 +81,22 @@ func NewPostgresService(cfg *config.Config, logger *logrus.Logger) (*PostgresSer
 // Uses parameterized query ($1 placeholder) to prevent SQL injection
 func (p *PostgresService) GetLastMessageTimestamp(ctx context.Context, threadID string) (*time.Time, error) {
 	// Use $1 placeholder for parameterized query - prevents SQL injection
+	// Extract timestamp from checkpoint->>'ts' field
+	// LangGraph stores timestamp in ISO 8601 format in the 'ts' field of the checkpoint JSONB column
 	query := `
-		SELECT c.checkpoint_id
-		FROM checkpoints c
-		WHERE c.thread_id = $1
-		  AND c.checkpoint_ns = ''
-		ORDER BY c.checkpoint_id DESC
+		SELECT checkpoint->>'ts' as timestamp
+		FROM checkpoints
+		WHERE thread_id = $1
+		  AND checkpoint_ns = ''
+		  AND checkpoint->>'ts' IS NOT NULL
+		ORDER BY checkpoint_id DESC
 		LIMIT 1
 	`
 
-	var checkpointID int64
+	var timestampStr string
 
 	// QueryRowContext with parameterized query - threadID is safely escaped by driver
-	err := p.db.QueryRowContext(ctx, query, threadID).Scan(&checkpointID)
+	err := p.db.QueryRowContext(ctx, query, threadID).Scan(&timestampStr)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("no messages found for thread: %s", threadID)
@@ -102,14 +105,19 @@ func (p *PostgresService) GetLastMessageTimestamp(ctx context.Context, threadID 
 		return nil, fmt.Errorf("postgres query error: %w", err)
 	}
 
-	// Convert checkpoint_id to timestamp
-	// checkpoint_id is a bigint that represents nanoseconds since epoch in LangGraph
-	timestamp := time.Unix(0, checkpointID)
+	// Parse ISO 8601 timestamp from JSONB
+	timestamp, err := time.Parse(time.RFC3339, timestampStr)
+	if err != nil {
+		p.logger.WithError(err).WithFields(logrus.Fields{
+			"thread_id":     threadID,
+			"timestamp_str": timestampStr,
+		}).Error("Failed to parse timestamp")
+		return nil, fmt.Errorf("invalid timestamp format: %w", err)
+	}
 
 	p.logger.WithFields(logrus.Fields{
-		"thread_id":     threadID,
-		"checkpoint_id": checkpointID,
-		"timestamp":     timestamp,
+		"thread_id": threadID,
+		"timestamp": timestamp,
 	}).Debug("Retrieved last message timestamp from postgres")
 
 	return &timestamp, nil
