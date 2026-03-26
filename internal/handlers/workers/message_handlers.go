@@ -254,6 +254,30 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			logger.WithError(err).Error("Failed to update task status to completed")
 		}
 
+		// Cache user's last activity timestamp (only for user messages)
+		if queueMsg.UserNumber != "" {
+			timestamp := time.Now()
+			ttl := deps.Config.Postgres.UserActivityTTL
+			activityCtx, activityCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer activityCancel()
+
+			logger.WithFields(logrus.Fields{
+				"user_number": queueMsg.UserNumber,
+				"timestamp":   timestamp,
+				"ttl":         ttl,
+			}).Debug("Attempting to cache user last activity timestamp")
+
+			if err := deps.RedisService.SetUserLastActivity(activityCtx, queueMsg.UserNumber, timestamp, ttl); err != nil {
+				logger.WithError(err).Warn("Failed to cache user last activity timestamp")
+			} else {
+				logger.WithFields(logrus.Fields{
+					"user_number": queueMsg.UserNumber,
+					"timestamp":   timestamp,
+					"ttl":         ttl,
+				}).Info("Cached user last activity timestamp")
+			}
+		}
+
 		// Add success attributes to the main span if available
 		if deps.OTelWorkerWrapper != nil {
 			if span := trace.SpanFromContext(ctx); span.IsRecording() {
