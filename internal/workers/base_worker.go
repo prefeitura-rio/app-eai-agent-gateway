@@ -187,19 +187,35 @@ func (w *BaseWorker) handleMessage(ctx context.Context, delivery amqp.Delivery) 
 			procCtx.Logger.WithError(err).Error("Failed to set completed status")
 		}
 
-		// Cache user's last activity timestamp (only for user messages, not history updates)
+		// Cache user's last activity timestamp (only for user messages, not history updates).
+		// Use a fresh background context so that a cancelled or timed-out consumer context
+		// does not silently skip the write.
 		if procCtx.UserNumber != "" && w.workerType == models.WorkerTypeUserMessage {
 			timestamp := time.Now()
 			ttl := w.deps.Config.Postgres.UserActivityTTL
-			if err := w.deps.RedisService.SetUserLastActivity(ctx, procCtx.UserNumber, timestamp, ttl); err != nil {
+			activityCtx, activityCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			procCtx.Logger.WithFields(logrus.Fields{
+				"user_number": procCtx.UserNumber,
+				"timestamp":   timestamp,
+				"ttl":         ttl,
+			}).Debug("Attempting to cache user last activity timestamp")
+			if err := w.deps.RedisService.SetUserLastActivity(activityCtx, procCtx.UserNumber, timestamp, ttl); err != nil {
 				procCtx.Logger.WithError(err).Warn("Failed to cache user last activity timestamp")
 				// Don't fail the whole operation for cache errors
 			} else {
 				procCtx.Logger.WithFields(logrus.Fields{
-					"timestamp": timestamp,
-					"ttl":       ttl,
-				}).Debug("Cached user last activity timestamp")
+					"user_number": procCtx.UserNumber,
+					"timestamp":   timestamp,
+					"ttl":         ttl,
+				}).Info("Cached user last activity timestamp")
 			}
+			activityCancel()
+		} else {
+			procCtx.Logger.WithFields(logrus.Fields{
+				"user_number":  procCtx.UserNumber,
+				"worker_type":  w.workerType,
+				"expected_type": models.WorkerTypeUserMessage,
+			}).Debug("Skipping user last activity cache update (condition not met)")
 		}
 
 	} else {

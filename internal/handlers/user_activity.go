@@ -99,7 +99,21 @@ func (h *UserActivityHandler) HandleLastActivity(c *gin.Context) {
 		logger.Debug("Cache hit for user last activity")
 	}
 
+	// Default TTL is the configured value (used when the key was just written, or on fallback)
 	ttlSeconds := int(h.config.Postgres.UserActivityTTL.Seconds())
+
+	// When the value came from cache, query Redis for the actual remaining TTL so the
+	// caller can observe the key expiring in real time instead of always seeing the
+	// full configured TTL.
+	if cached {
+		remainingTTL, ttlErr := h.redisService.GetUserLastActivityTTL(ctx, userNumber)
+		if ttlErr != nil {
+			logger.WithError(ttlErr).Warn("Failed to get remaining TTL from Redis, falling back to configured TTL")
+		} else if remainingTTL >= 0 {
+			// remainingTTL == -1 means the key has no expiry; keep the configured value in that case.
+			ttlSeconds = int(remainingTTL.Seconds())
+		}
+	}
 
 	logger.WithFields(logrus.Fields{
 		"timestamp":   timestamp,

@@ -30,6 +30,7 @@ type RedisServiceInterface interface {
 	GetCallbackURL(ctx context.Context, messageID string) (string, error)
 	SetUserLastActivity(ctx context.Context, userNumber string, timestamp time.Time, ttl time.Duration) error
 	GetUserLastActivity(ctx context.Context, userNumber string) (*time.Time, error)
+	GetUserLastActivityTTL(ctx context.Context, userNumber string) (time.Duration, error)
 	Ping(ctx context.Context) error
 }
 
