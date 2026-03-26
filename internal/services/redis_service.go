@@ -112,6 +112,12 @@ type CacheInterface interface {
 	GetCallbackURL(ctx context.Context, messageID string) (string, error)
 	DeleteCallbackURL(ctx context.Context, messageID string) error
 
+	// User activity tracking
+	SetUserLastActivity(ctx context.Context, userNumber string, timestamp time.Time, ttl time.Duration) error
+	GetUserLastActivity(ctx context.Context, userNumber string) (*time.Time, error)
+	GetUserLastActivityTTL(ctx context.Context, userNumber string) (time.Duration, error)
+	DeleteUserLastActivity(ctx context.Context, userNumber string) error
+
 	// Health check
 	Ping(ctx context.Context) error
 	Close() error
@@ -413,6 +419,49 @@ func (r *RedisService) ResetMetrics() {
 // GetStats returns Redis connection pool statistics
 func (r *RedisService) GetStats() *redis.PoolStats {
 	return r.client.PoolStats()
+}
+
+// SetUserLastActivity stores the timestamp of user's last message activity
+func (r *RedisService) SetUserLastActivity(ctx context.Context, userNumber string, timestamp time.Time, ttl time.Duration) error {
+	key := fmt.Sprintf("user:last_activity:%s", userNumber)
+	// Store as RFC3339 string for readability
+	return r.SetValue(ctx, key, timestamp.Format(time.RFC3339), ttl)
+}
+
+// GetUserLastActivity retrieves the cached timestamp of user's last message activity
+func (r *RedisService) GetUserLastActivity(ctx context.Context, userNumber string) (*time.Time, error) {
+	key := fmt.Sprintf("user:last_activity:%s", userNumber)
+	timestampStr, err := r.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+
+	timestamp, err := time.Parse(time.RFC3339, timestampStr)
+	if err != nil {
+		r.logger.WithError(err).WithField("timestamp_str", timestampStr).Error("Failed to parse timestamp")
+		return nil, fmt.Errorf("invalid timestamp format: %w", err)
+	}
+
+	return &timestamp, nil
+}
+
+// GetUserLastActivityTTL returns the remaining TTL for a user's last activity key.
+// Returns -1 if the key exists but has no expiry, -2 if the key does not exist,
+// or a positive duration representing seconds remaining.
+func (r *RedisService) GetUserLastActivityTTL(ctx context.Context, userNumber string) (time.Duration, error) {
+	key := fmt.Sprintf("user:last_activity:%s", userNumber)
+	ttl, err := r.client.TTL(ctx, key).Result()
+	if err != nil {
+		r.logger.WithError(err).WithField("key", key).Error("Failed to get TTL from Redis")
+		return 0, fmt.Errorf("redis TTL error: %w", err)
+	}
+	return ttl, nil
+}
+
+// DeleteUserLastActivity removes cached user activity timestamp
+func (r *RedisService) DeleteUserLastActivity(ctx context.Context, userNumber string) error {
+	key := fmt.Sprintf("user:last_activity:%s", userNumber)
+	return r.Delete(ctx, key)
 }
 
 // HealthCheck implements the HealthChecker interface

@@ -76,6 +76,7 @@ type RedisServiceInterface interface {
 	Set(ctx context.Context, key string, value string, ttl time.Duration) error
 	SetValue(ctx context.Context, key string, value interface{}, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
+	SetUserLastActivity(ctx context.Context, userNumber string, timestamp time.Time, ttl time.Duration) error
 }
 
 // TranscribeServiceInterface defines audio transcription operations
@@ -155,6 +156,7 @@ type WorkerStatus struct {
 type ProcessingContext struct {
 	MessageID     string
 	UserID        string
+	UserNumber    string // Phone number for user activity tracking
 	AgentID       string
 	ThreadID      string
 	CorrelationID string
@@ -185,6 +187,7 @@ func NewProcessingContext(queueMessage *models.QueueMessage, logger *logrus.Logg
 	return &ProcessingContext{
 		MessageID:     queueMessage.ID,
 		UserID:        queueMessage.UserNumber,
+		UserNumber:    queueMessage.UserNumber,
 		AgentID:       queueMessage.AgentID,
 		CorrelationID: correlationID,
 		StartTime:     time.Now(),
