@@ -115,6 +115,7 @@ type CacheInterface interface {
 	// User activity tracking
 	SetUserLastActivity(ctx context.Context, userNumber string, timestamp time.Time, ttl time.Duration) error
 	GetUserLastActivity(ctx context.Context, userNumber string) (*time.Time, error)
+	GetUserLastActivityTTL(ctx context.Context, userNumber string) (time.Duration, error)
 	DeleteUserLastActivity(ctx context.Context, userNumber string) error
 
 	// Health check
@@ -442,6 +443,19 @@ func (r *RedisService) GetUserLastActivity(ctx context.Context, userNumber strin
 	}
 
 	return &timestamp, nil
+}
+
+// GetUserLastActivityTTL returns the remaining TTL for a user's last activity key.
+// Returns -1 if the key exists but has no expiry, -2 if the key does not exist,
+// or a positive duration representing seconds remaining.
+func (r *RedisService) GetUserLastActivityTTL(ctx context.Context, userNumber string) (time.Duration, error) {
+	key := fmt.Sprintf("user:last_activity:%s", userNumber)
+	ttl, err := r.client.TTL(ctx, key).Result()
+	if err != nil {
+		r.logger.WithError(err).WithField("key", key).Error("Failed to get TTL from Redis")
+		return 0, fmt.Errorf("redis TTL error: %w", err)
+	}
+	return ttl, nil
 }
 
 // DeleteUserLastActivity removes cached user activity timestamp
