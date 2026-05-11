@@ -24,11 +24,30 @@ type HistoryUpdateWebhookRequest struct {
 type UserWebhookRequest struct {
 	UserNumber        string                 `json:"user_number" binding:"required" example:"5521999999999"`
 	PreviousMessage   *string                `json:"previous_message,omitempty" example:"Previous message context"`
-	Message           string                 `json:"message" binding:"required" example:"Hello, how can you help me?"`
+	// Message is optional when MessageType != "text" and Media is provided
+	// (media-only payloads, e.g. raw image without caption). Handler enforces
+	// "either Message non-empty OR (MessageType non-text + Media)" semantic
+	// after JSON bind. Pre-existing callers (with always-populated text) keep
+	// working unchanged.
+	Message           string                 `json:"message" example:"Hello, how can you help me?"`
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`
 	Provider          *string                `json:"provider,omitempty" example:"google_agent_engine"`
 	CallbackURL       *string                `json:"callback_url,omitempty" binding:"omitempty,url" example:"https://example.com/webhook/callback"`
 	ReasoningEngineID *string                `json:"reasoning_engine_id,omitempty" example:"12345678"`
+	// MessageType discriminates inbound media kinds when caller (Mule, etc.) sends
+	// non-text payloads. Values: "text" (default), "image", "audio", "location",
+	// "unsupported", "unknown". Worker uses it to enrich `Message` with an
+	// [INBOUND_MEDIA] prefix so the downstream LLM can call the MCP tool
+	// `register_inbound_media`. Optional; absent or "text" preserves legacy
+	// behavior.
+	MessageType *string `json:"message_type,omitempty" example:"image"`
+	// Media carries the media metadata (`content_version_id`, `download_path`,
+	// `file_extension`, `file_size_bytes`, lat/lng/address) when MessageType is
+	// non-text. Pass-through `map[string]interface{}` to avoid coupling to any
+	// specific upstream schema; serialized as-is into the enriched Message body
+	// for the LLM to extract. Source upstream: Salesforce Apex (study-sf-whatsapp-poc1)
+	// → Mule sc-inbound-flow.
+	Media map[string]interface{} `json:"media,omitempty"`
 }
 
 // WebhookResponse represents the response for webhook endpoints (matches Python API)
@@ -94,6 +113,10 @@ type QueueMessage struct {
 	Timestamp         time.Time              `json:"timestamp"`
 	Metadata          map[string]interface{} `json:"metadata,omitempty"`
 	ReasoningEngineID *string                `json:"reasoning_engine_id,omitempty"`
+	// MessageType + Media propagated from UserWebhookRequest. Worker reads these
+	// before invoking the agent provider and enriches Message accordingly.
+	MessageType *string                `json:"message_type,omitempty"`
+	Media       map[string]interface{} `json:"media,omitempty"`
 }
 
 // Note: Agent management models removed - were Letta-specific

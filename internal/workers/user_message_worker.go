@@ -65,6 +65,11 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 
 	// Process the message content (handle audio if needed)
 	content := queueMessage.Message
+
+	// Pre-existing legacy: caller que envia `message` = raw audio URL recebe
+	// transcrição PRIMEIRO. Mantido antes do enrichment de mídia pra preservar
+	// compatibilidade (se MessageType=audio + Message=URL HTTP, transcribe usa
+	// a URL; depois disso o enrich abaixo embrulha o texto transcrito).
 	if w.deps.TranscribeService != nil && w.deps.TranscribeService.IsAudioURL(content) {
 		procCtx.Logger.WithField("audio_url", content).Debug("Detected audio message, transcribing")
 
@@ -85,6 +90,30 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 		}).Info("Audio transcribed successfully")
 
 		content = transcribedText
+	}
+
+	// Enrich content with [INBOUND_MEDIA] prefix when upstream caller (Salesforce
+	// Apex → Mule) sends non-text payload. Placed APÓS a transcrição legacy
+	// pra que `IsAudioURL` continue funcionando pra raw-URL audio (suffix-based
+	// check quebra com prefix). LLM downstream detecta o prefix e chama a tool
+	// MCP `register_inbound_media`. Ver prefeitura-rio/app-eai-agent-engine#37
+	// (prompt) + ADR-012 em study-sf-whatsapp-poc1.
+	if mt := queueMessage.MessageType; mt != nil && *mt != "" && *mt != "text" {
+		mediaJSON := "null"
+		if queueMessage.Media != nil {
+			if jb, err := json.Marshal(queueMessage.Media); err == nil {
+				mediaJSON = string(jb)
+			} else {
+				procCtx.Logger.WithError(err).Warn("Failed to marshal media metadata; sending null")
+			}
+		}
+		content = fmt.Sprintf("[INBOUND_MEDIA] type=%s user_number=%s media=%s | user_text=%s",
+			*mt, queueMessage.UserNumber, mediaJSON, content)
+		procCtx.Logger.WithFields(logrus.Fields{
+			"message_type": *mt,
+			"has_media":    queueMessage.Media != nil,
+			"prefix_added": true,
+		}).Info("Enriched content with inbound media prefix")
 	}
 
 	// Get or create thread for the user

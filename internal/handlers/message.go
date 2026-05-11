@@ -99,6 +99,44 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 		return
 	}
 
+	// Validar message_type contra enum fechado (alinhado com MCP tool
+	// `register_inbound_media`). Typos como "imgae" sao rejeitados aqui em vez
+	// de virarem prefix [INBOUND_MEDIA] malformado pro LLM downstream.
+	if req.MessageType != nil && *req.MessageType != "" {
+		mt := *req.MessageType
+		valid := map[string]bool{
+			"text": true, "image": true, "audio": true,
+			"location": true, "unsupported": true, "unknown": true,
+		}
+		if !valid[mt] {
+			h.logger.WithField("message_type", mt).Error("Invalid message_type")
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid request",
+				"message": "message_type must be one of: text, image, audio, location, unsupported, unknown",
+			})
+			return
+		}
+	}
+
+	// Content presence: aceita texto puro (Message non-empty) OU midia-only
+	// (Message vazio + MessageType != "text" + Media non-nil). Removemos o
+	// binding:"required" do Message pra permitir o segundo caso (caller que
+	// nao quer mandar caption junto). Pelo menos uma forma de conteudo eh
+	// obrigatoria — payload {user_number only} fica invalido como antes.
+	hasText := req.Message != ""
+	// req.Media != nil aceita `media:{}` (objeto vazio mas presente no JSON);
+	// len(req.Media) > 0 garante que pelo menos uma chave de metadata esta
+	// presente (content_version_id, download_path, latitude, etc.).
+	hasMedia := req.MessageType != nil && *req.MessageType != "" && *req.MessageType != "text" && len(req.Media) > 0
+	if !hasText && !hasMedia {
+		h.logger.Error("User webhook payload has neither text nor media")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "Invalid request",
+			"message": "either `message` (non-empty) OR (`message_type` != \"text\" AND `media`) is required",
+		})
+		return
+	}
+
 	// Validate callback URL if provided
 	if req.CallbackURL != nil && *req.CallbackURL != "" {
 		if err := validateCallbackURL(*req.CallbackURL); err != nil {
@@ -182,6 +220,8 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 		Timestamp:         time.Now(),
 		Metadata:          req.Metadata,
 		ReasoningEngineID: req.ReasoningEngineID,
+		MessageType:       req.MessageType,
+		Media:             req.Media,
 	}
 
 	// Add request metadata
