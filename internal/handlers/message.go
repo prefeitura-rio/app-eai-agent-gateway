@@ -124,10 +124,15 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	// nao quer mandar caption junto). Pelo menos uma forma de conteudo eh
 	// obrigatoria — payload {user_number only} fica invalido como antes.
 	hasText := req.Message != ""
-	// req.Media != nil aceita `media:{}` (objeto vazio mas presente no JSON);
-	// len(req.Media) > 0 garante que pelo menos uma chave de metadata esta
-	// presente (content_version_id, download_path, latitude, etc.).
-	hasMedia := req.MessageType != nil && *req.MessageType != "" && *req.MessageType != "text" && len(req.Media) > 0
+	// "unsupported" e "unknown" sao tipos sentinela: BSP injetou texto fake
+	// (location, video, etc.) ou Apex falhou em correlacionar ContentVersion.
+	// Nao precisam de Media populado por design — Message=null + classificacao
+	// pelo tipo basta pra telemetria/log. Os tipos "midia real" (image, audio,
+	// location) requerem len(req.Media) > 0 (ex: content_version_id, lat/lng).
+	noMediaTypesAllowed := req.MessageType != nil &&
+		(*req.MessageType == "unsupported" || *req.MessageType == "unknown")
+	hasMedia := req.MessageType != nil && *req.MessageType != "" && *req.MessageType != "text" &&
+		(len(req.Media) > 0 || noMediaTypesAllowed)
 	if !hasText && !hasMedia {
 		h.logger.Error("User webhook payload has neither text nor media")
 		c.JSON(http.StatusBadRequest, gin.H{

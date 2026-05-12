@@ -95,20 +95,10 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 	// Enrich content with [INBOUND_MEDIA] prefix when upstream caller (Salesforce
 	// Apex → Mule) sends non-text payload. Placed APÓS a transcrição legacy
 	// pra que `IsAudioURL` continue funcionando pra raw-URL audio (suffix-based
-	// check quebra com prefix). LLM downstream detecta o prefix e chama a tool
-	// MCP `register_inbound_media`. Ver prefeitura-rio/app-eai-agent-engine#37
-	// (prompt) + ADR-012 em study-sf-whatsapp-poc1.
+	// check quebra com prefix). Helper compartilhado em models.EnrichMediaContent
+	// garante mesmo formato no worker `handlers/workers/message_handlers.go`.
 	if mt := queueMessage.MessageType; mt != nil && *mt != "" && *mt != "text" {
-		mediaJSON := "null"
-		if queueMessage.Media != nil {
-			if jb, err := json.Marshal(queueMessage.Media); err == nil {
-				mediaJSON = string(jb)
-			} else {
-				procCtx.Logger.WithError(err).Warn("Failed to marshal media metadata; sending null")
-			}
-		}
-		content = fmt.Sprintf("[INBOUND_MEDIA] type=%s user_number=%s media=%s | user_text=%s",
-			*mt, queueMessage.UserNumber, mediaJSON, content)
+		content = models.EnrichMediaContent(*mt, queueMessage.UserNumber, queueMessage.Media, content)
 		procCtx.Logger.WithFields(logrus.Fields{
 			"message_type": *mt,
 			"has_media":    queueMessage.Media != nil,

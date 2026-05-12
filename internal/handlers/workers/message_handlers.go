@@ -415,21 +415,12 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	// so that legacy raw-URL audio flow keeps working: if the message arrives as
 	// `message_type=audio` with an HTTP audio URL in `message`, the transcription
 	// block above replaces `message` with the transcript before we wrap with the
-	// prefix. The downstream LLM is instructed via system prompt to detect this
-	// prefix and call the MCP tool `register_inbound_media` with the parsed
-	// metadata. See prefeitura-rio/app-eai-agent-engine#37 (prompt update) and
-	// ADR-012 in study-sf-whatsapp-poc1 for upstream context.
+	// prefix. Helper compartilhado em models.EnrichMediaContent garante mesmo
+	// formato no worker alternativo `UserMessageWorker.ProcessMessage`. Ver
+	// prefeitura-rio/app-eai-agent-engine#37 (prompt) + ADR-012 em
+	// study-sf-whatsapp-poc1 (upstream context).
 	if mt := msg.MessageType; mt != nil && *mt != "" && *mt != "text" {
-		mediaJSON := "null"
-		if msg.Media != nil {
-			if jb, err := json.Marshal(msg.Media); err == nil {
-				mediaJSON = string(jb)
-			} else {
-				logger.WithError(err).Warn("Failed to marshal media metadata; sending null")
-			}
-		}
-		message = fmt.Sprintf("[INBOUND_MEDIA] type=%s user_number=%s media=%s | user_text=%s",
-			*mt, msg.UserNumber, mediaJSON, message)
+		message = models.EnrichMediaContent(*mt, msg.UserNumber, msg.Media, message)
 		logger.WithFields(logrus.Fields{
 			"message_type": *mt,
 			"has_media":    msg.Media != nil,

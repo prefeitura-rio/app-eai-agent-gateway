@@ -41,12 +41,33 @@ type UserWebhookRequest struct {
 	// `register_inbound_media`. Optional; absent or "text" preserves legacy
 	// behavior.
 	MessageType *string `json:"message_type,omitempty" example:"image"`
-	// Media carries the media metadata (`content_version_id`, `download_path`,
-	// `file_extension`, `file_size_bytes`, lat/lng/address) when MessageType is
-	// non-text. Pass-through `map[string]interface{}` to avoid coupling to any
-	// specific upstream schema; serialized as-is into the enriched Message body
-	// for the LLM to extract. Source upstream: Salesforce Apex (study-sf-whatsapp-poc1)
+	// Media carries the media metadata when MessageType is non-text.
+	// Pass-through `map[string]interface{}` to avoid coupling to any specific
+	// upstream schema; serialized as-is into the enriched Message body for the
+	// LLM to extract. Source upstream: Salesforce Apex (study-sf-whatsapp-poc1)
 	// → Mule sc-inbound-flow.
+	//
+	// Chaves esperadas/conhecidas (mantidas em sync com o tool MCP
+	// `register_inbound_media` em prefeitura-rio/app-mcp-server e ADR-012 em
+	// study-sf-whatsapp-poc1). Typos passam silenciosos por design — gateway
+	// é pass-through; validação semântica fica no MCP tool. Atualizar este
+	// comentário sempre que o tool aceitar/exigir nova chave.
+	//
+	// Pra image/audio (BSP entrega via ContentVersion auto-attachado):
+	//   - content_version_id   (string, SF Id 18-char)
+	//   - content_document_id  (string, SF Id 18-char)
+	//   - file_extension       (string, lowercase: "jpg"|"png"|"oga"|"ogg"|...)
+	//   - file_size_bytes      (number)
+	//   - download_path        (string, REST path: "/services/data/v62.0/sobjects/ContentVersion/{Id}/VersionData")
+	//
+	// Pra location (atualmente não entregue pelo BSP; placeholder pra BYOC futuro):
+	//   - latitude             (number, -90..90)
+	//   - longitude            (number, -180..180)
+	//   - address              (string, opcional)
+	//   - name                 (string, opcional — point-of-interest)
+	//
+	// Pra unsupported/unknown: Media pode ser nil ou {} — tipo já carrega o
+	// signal suficiente, sem metadata útil pra MCP processar.
 	Media map[string]interface{} `json:"media,omitempty"`
 }
 
