@@ -27,6 +27,12 @@ type RabbitMQService struct {
 	notifyChanClose chan *amqp.Error
 	notifyReconnect chan bool
 	isShutdown      bool
+
+	// Reconnect broadcast: closed and replaced on every successful reconnect.
+	// Consumer goroutines wait on the channel returned by ReconnectedCh() to
+	// know when they can re-register with the new AMQP channel.
+	reconnectedMu sync.RWMutex
+	reconnectedCh chan struct{}
 }
 
 // MessagePublisher defines the interface for publishing messages
@@ -61,6 +67,7 @@ func NewRabbitMQService(cfg *config.Config, logger *logrus.Logger) (*RabbitMQSer
 		config:          cfg,
 		logger:          logger,
 		notifyReconnect: make(chan bool),
+		reconnectedCh:   make(chan struct{}),
 	}
 
 	if err := service.connect(); err != nil {
@@ -480,6 +487,7 @@ func (r *RabbitMQService) reconnect() {
 			continue
 		}
 
+		r.broadcastReconnected()
 		r.logger.Info("Successfully reconnected to RabbitMQ")
 		return
 	}
@@ -572,4 +580,37 @@ func (r *RabbitMQService) TriggerReconnect() {
 	default:
 		// Channel is full, reconnection already in progress
 	}
+}
+
+// broadcastReconnected signals all goroutines waiting in ReconnectedCh that a
+// new AMQP connection and channel are ready. Must be called after r.mutex is
+// released so waiters can immediately call ConsumeQueue without deadlocking.
+func (r *RabbitMQService) broadcastReconnected() {
+	r.reconnectedMu.Lock()
+	old := r.reconnectedCh
+	r.reconnectedCh = make(chan struct{})
+	r.reconnectedMu.Unlock()
+	close(old)
+}
+
+// ReconnectedCh returns a channel that is closed when the next successful
+// reconnect completes. Call this before checking IsConnected to avoid missing
+// a reconnect event between the two operations.
+func (r *RabbitMQService) ReconnectedCh() <-chan struct{} {
+	r.reconnectedMu.RLock()
+	defer r.reconnectedMu.RUnlock()
+	return r.reconnectedCh
+}
+
+// ConsumeQueue registers a consumer on the current channel under a read lock,
+// returning the delivery channel. Safe to call after ReconnectedCh fires.
+func (r *RabbitMQService) ConsumeQueue(queueName, consumerTag string) (<-chan amqp.Delivery, error) {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	if !r.isConnected {
+		return nil, fmt.Errorf("RabbitMQ not connected")
+	}
+
+	return r.channel.Consume(queueName, consumerTag, false, false, false, false, nil)
 }

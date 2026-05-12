@@ -129,9 +129,8 @@ func (r *RabbitMQService) StopConsumer(queueName string) error {
 func (c *Consumer) workerLoop(ctx context.Context, workerID int) {
 	defer c.wg.Done()
 
-	// Generate unique consumer tag to avoid conflicts between containers
 	hostname, _ := os.Hostname()
-	uniqueID := uuid.New().String()[:8] // Use first 8 chars of UUID
+	uniqueID := uuid.New().String()[:8]
 	consumerTag := fmt.Sprintf("worker_%s_%s_%d", hostname, uniqueID, workerID)
 
 	logger := c.logger.WithFields(logrus.Fields{
@@ -140,16 +139,7 @@ func (c *Consumer) workerLoop(ctx context.Context, workerID int) {
 		"consumer_tag": consumerTag,
 	})
 
-	// Start consuming for this worker
-	msgs, err := c.rabbitMQ.channel.Consume(
-		c.queueName, // queue
-		consumerTag, // consumer tag (unique across containers)
-		false,       // auto-ack
-		false,       // exclusive
-		false,       // no-local
-		false,       // no-wait
-		nil,         // arguments
-	)
+	msgs, err := c.rabbitMQ.ConsumeQueue(c.queueName, consumerTag)
 	if err != nil {
 		logger.WithError(err).Error("Failed to start consuming messages")
 		return
@@ -167,10 +157,36 @@ func (c *Consumer) workerLoop(ctx context.Context, workerID int) {
 			return
 		case msg, ok := <-msgs:
 			if !ok {
-				logger.Info("Message channel closed for worker")
-				return
+				logger.Warn("AMQP channel closed, waiting for reconnect to re-register consumer")
+				msgs = c.waitAndReRegister(ctx, consumerTag, logger)
+				if msgs == nil {
+					return
+				}
+				continue
 			}
 			c.processMessageWithRetry(ctx, msg, logger)
+		}
+	}
+}
+
+// waitAndReRegister blocks until the RabbitMQ connection is re-established and
+// successfully re-registers this consumer. Returns nil if ctx or stopChan fires.
+func (c *Consumer) waitAndReRegister(ctx context.Context, consumerTag string, logger *logrus.Entry) <-chan amqp.Delivery {
+	for {
+		reconnectedCh := c.rabbitMQ.ReconnectedCh()
+
+		msgs, err := c.rabbitMQ.ConsumeQueue(c.queueName, consumerTag)
+		if err == nil {
+			logger.Info("Consumer re-registered after reconnect")
+			return msgs
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-c.stopChan:
+			return nil
+		case <-reconnectedCh:
 		}
 	}
 }
