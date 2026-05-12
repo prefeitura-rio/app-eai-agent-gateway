@@ -410,6 +410,24 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		}
 	}
 
+	// Enrich content with [INBOUND_MEDIA] prefix when upstream caller (Salesforce
+	// Apex → Mule) sends non-text payload. Placed AFTER audio-URL transcription
+	// so that legacy raw-URL audio flow keeps working: if the message arrives as
+	// `message_type=audio` with an HTTP audio URL in `message`, the transcription
+	// block above replaces `message` with the transcript before we wrap with the
+	// prefix. Helper compartilhado em models.EnrichMediaContent garante mesmo
+	// formato no worker alternativo `UserMessageWorker.ProcessMessage`. Ver
+	// prefeitura-rio/app-eai-agent-engine#37 (prompt) + ADR-012 em
+	// study-sf-whatsapp-poc1 (upstream context).
+	if mt := msg.MessageType; mt != nil && *mt != "" && *mt != "text" {
+		message = models.EnrichMediaContent(*mt, msg.UserNumber, msg.Media, message)
+		logger.WithFields(logrus.Fields{
+			"message_type": *mt,
+			"has_media":    msg.Media != nil,
+			"prefix_added": true,
+		}).Info("Enriched content with inbound media prefix")
+	}
+
 	// Validate message content
 	if deps.MessageFormatter != nil {
 		if err := deps.MessageFormatter.ValidateMessageContent(message); err != nil {

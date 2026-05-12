@@ -65,6 +65,11 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 
 	// Process the message content (handle audio if needed)
 	content := queueMessage.Message
+
+	// Pre-existing legacy: caller que envia `message` = raw audio URL recebe
+	// transcrição PRIMEIRO. Mantido antes do enrichment de mídia pra preservar
+	// compatibilidade (se MessageType=audio + Message=URL HTTP, transcribe usa
+	// a URL; depois disso o enrich abaixo embrulha o texto transcrito).
 	if w.deps.TranscribeService != nil && w.deps.TranscribeService.IsAudioURL(content) {
 		procCtx.Logger.WithField("audio_url", content).Debug("Detected audio message, transcribing")
 
@@ -85,6 +90,20 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 		}).Info("Audio transcribed successfully")
 
 		content = transcribedText
+	}
+
+	// Enrich content with [INBOUND_MEDIA] prefix when upstream caller (Salesforce
+	// Apex → Mule) sends non-text payload. Placed APÓS a transcrição legacy
+	// pra que `IsAudioURL` continue funcionando pra raw-URL audio (suffix-based
+	// check quebra com prefix). Helper compartilhado em models.EnrichMediaContent
+	// garante mesmo formato no worker `handlers/workers/message_handlers.go`.
+	if mt := queueMessage.MessageType; mt != nil && *mt != "" && *mt != "text" {
+		content = models.EnrichMediaContent(*mt, queueMessage.UserNumber, queueMessage.Media, content)
+		procCtx.Logger.WithFields(logrus.Fields{
+			"message_type": *mt,
+			"has_media":    queueMessage.Media != nil,
+			"prefix_added": true,
+		}).Info("Enriched content with inbound media prefix")
 	}
 
 	// Get or create thread for the user
