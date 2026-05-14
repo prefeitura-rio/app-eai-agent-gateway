@@ -226,7 +226,7 @@ func (s *TranscribeService) TranscribeFromFile(ctx context.Context, filePath str
 				MaxAlternatives:            int32(s.config.Transcribe.MaxAlternatives),
 			},
 			LanguageCodes: []string{s.config.Transcribe.LanguageCode},
-			Model:         "chirp_3",
+			Model:         "long",
 		},
 		AudioSource: &speechpb.RecognizeRequest_Content{
 			Content: audioData,
