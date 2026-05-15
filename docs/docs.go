@@ -526,7 +526,7 @@ const docTemplate = `{
                     "example": "Hello, how can you help me?"
                 },
                 "message_type": {
-                    "description": "MessageType discriminates inbound media kinds when caller (Mule, etc.) sends\nnon-text payloads. Values: \"text\" (default), \"image\", \"audio\", \"location\",\n\"unsupported\", \"unknown\". Worker uses it to enrich ` + "`" + `Message` + "`" + ` with an\n[INBOUND_MEDIA] prefix so the downstream LLM can call the MCP tool\n` + "`" + `register_inbound_media` + "`" + `. Optional; absent or \"text\" preserves legacy\nbehavior.",
+                    "description": "MessageType discriminates inbound media kinds when caller (Mule, etc.) sends\nnon-text payloads. Values: \"text\" (default), \"image\", \"audio\", \"video\", \"location\",\n\"unsupported\", \"unknown\". Worker uses it to enrich ` + "`" + `Message` + "`" + ` with an\n[INBOUND_MEDIA] prefix so the downstream LLM can call the MCP tool\n` + "`" + `register_inbound_media` + "`" + `. Optional; absent or \"text\" preserves legacy\nbehavior.",
                     "type": "string",
                     "example": "image"
                 },

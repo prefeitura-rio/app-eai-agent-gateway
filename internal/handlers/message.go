@@ -105,14 +105,14 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	if req.MessageType != nil && *req.MessageType != "" {
 		mt := *req.MessageType
 		valid := map[string]bool{
-			"text": true, "image": true, "audio": true,
+			"text": true, "image": true, "audio": true, "video": true,
 			"location": true, "unsupported": true, "unknown": true,
 		}
 		if !valid[mt] {
 			h.logger.WithField("message_type", mt).Error("Invalid message_type")
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "Invalid request",
-				"message": "message_type must be one of: text, image, audio, location, unsupported, unknown",
+				"message": "message_type must be one of: text, image, audio, video, location, unsupported, unknown",
 			})
 			return
 		}

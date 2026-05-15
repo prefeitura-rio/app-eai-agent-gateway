@@ -35,11 +35,11 @@ type UserWebhookRequest struct {
 	CallbackURL       *string                `json:"callback_url,omitempty" binding:"omitempty,url" example:"https://example.com/webhook/callback"`
 	ReasoningEngineID *string                `json:"reasoning_engine_id,omitempty" example:"12345678"`
 	// MessageType discriminates inbound media kinds when caller (Mule, etc.) sends
-	// non-text payloads. Values: "text" (default), "image", "audio", "location",
-	// "unsupported", "unknown". Worker uses it to enrich `Message` with an
-	// [INBOUND_MEDIA] prefix so the downstream LLM can call the MCP tool
-	// `register_inbound_media`. Optional; absent or "text" preserves legacy
-	// behavior.
+	// non-text payloads. Values: "text" (default), "image", "audio", "video",
+	// "location", "unsupported", "unknown". Worker uses it to enrich `Message`
+	// with an [INBOUND_MEDIA] prefix so the downstream LLM can call the MCP
+	// tool `register_inbound_media`. Optional; absent or "text" preserves
+	// legacy behavior.
 	MessageType *string `json:"message_type,omitempty" example:"image"`
 	// Media carries the media metadata when MessageType is non-text.
 	// Pass-through `map[string]interface{}` to avoid coupling to any specific
