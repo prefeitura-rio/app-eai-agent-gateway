@@ -53,10 +53,10 @@ type UserWebhookRequest struct {
 	// é pass-through; validação semântica fica no MCP tool. Atualizar este
 	// comentário sempre que o tool aceitar/exigir nova chave.
 	//
-	// Pra image/audio (BSP entrega via ContentVersion auto-attachado):
+	// Pra image/audio/video (BSP entrega via ContentVersion auto-attachado):
 	//   - content_version_id   (string, SF Id 18-char)
 	//   - content_document_id  (string, SF Id 18-char)
-	//   - file_extension       (string, lowercase: "jpg"|"png"|"oga"|"ogg"|...)
+	//   - file_extension       (string, lowercase: "jpg"|"png"|"oga"|"ogg"|"mp4"|...)
 	//   - file_size_bytes      (number)
 	//   - download_path        (string, REST path: "/services/data/v62.0/sobjects/ContentVersion/{Id}/VersionData")
 	//
