@@ -53,7 +53,7 @@ const docTemplate = `{
                     "200": {
                         "description": "Task debug information",
                         "schema": {
-                            "$ref": "#/definitions/models.TaskDebugInfo"
+                            "$ref": "#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.TaskDebugInfo"
                         }
                     },
                     "400": {
@@ -103,7 +103,7 @@ const docTemplate = `{
                     "200": {
                         "description": "Last activity timestamp found",
                         "schema": {
-                            "$ref": "#/definitions/models.UserLastActivityResponse"
+                            "$ref": "#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.UserLastActivityResponse"
                         }
                     },
                     "400": {
@@ -156,13 +156,13 @@ const docTemplate = `{
                     "200": {
                         "description": "Message completed or failed",
                         "schema": {
-                            "$ref": "#/definitions/models.MessageResponse"
+                            "$ref": "#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.MessageResponse"
                         }
                     },
                     "202": {
                         "description": "Message still processing",
                         "schema": {
-                            "$ref": "#/definitions/models.MessageResponse"
+                            "$ref": "#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.MessageResponse"
                         }
                     },
                     "400": {
@@ -209,7 +209,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/models.HistoryUpdateWebhookRequest"
+                            "$ref": "#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.HistoryUpdateWebhookRequest"
                         }
                     }
                 ],
@@ -258,7 +258,7 @@ const docTemplate = `{
                         "in": "body",
                         "required": true,
                         "schema": {
-                            "$ref": "#/definitions/models.UserWebhookRequest"
+                            "$ref": "#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.UserWebhookRequest"
                         }
                     }
                 ],
@@ -266,7 +266,7 @@ const docTemplate = `{
                     "202": {
                         "description": "Message queued successfully",
                         "schema": {
-                            "$ref": "#/definitions/models.WebhookResponse"
+                            "$ref": "#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.WebhookResponse"
                         }
                     },
                     "400": {
@@ -374,7 +374,7 @@ const docTemplate = `{
         }
     },
     "definitions": {
-        "models.HistoryMessage": {
+        "github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.HistoryMessage": {
             "type": "object",
             "required": [
                 "content",
@@ -391,7 +391,7 @@ const docTemplate = `{
                 }
             }
         },
-        "models.HistoryUpdateWebhookRequest": {
+        "github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.HistoryUpdateWebhookRequest": {
             "type": "object",
             "required": [
                 "messages",
@@ -402,7 +402,7 @@ const docTemplate = `{
                     "type": "array",
                     "minItems": 1,
                     "items": {
-                        "$ref": "#/definitions/models.HistoryMessage"
+                        "$ref": "#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.HistoryMessage"
                     }
                 },
                 "metadata": {
@@ -419,7 +419,7 @@ const docTemplate = `{
                 }
             }
         },
-        "models.MessageResponse": {
+        "github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.MessageResponse": {
             "description": "Message processing response",
             "type": "object",
             "properties": {
@@ -436,7 +436,7 @@ const docTemplate = `{
                 }
             }
         },
-        "models.TaskDebugInfo": {
+        "github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.TaskDebugInfo": {
             "type": "object",
             "properties": {
                 "created_at": {
@@ -462,14 +462,14 @@ const docTemplate = `{
                     "type": "integer"
                 },
                 "status": {
-                    "$ref": "#/definitions/models.TaskStatus"
+                    "$ref": "#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.TaskStatus"
                 },
                 "updated_at": {
                     "type": "string"
                 }
             }
         },
-        "models.TaskStatus": {
+        "github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.TaskStatus": {
             "type": "string",
             "enum": [
                 "pending",
@@ -484,7 +484,7 @@ const docTemplate = `{
                 "TaskStatusFailed"
             ]
         },
-        "models.UserLastActivityResponse": {
+        "github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.UserLastActivityResponse": {
             "type": "object",
             "properties": {
                 "cached": {
@@ -505,7 +505,7 @@ const docTemplate = `{
                 }
             }
         },
-        "models.UserWebhookRequest": {
+        "github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.UserWebhookRequest": {
             "type": "object",
             "required": [
                 "user_number"
@@ -516,7 +516,7 @@ const docTemplate = `{
                     "example": "https://example.com/webhook/callback"
                 },
                 "media": {
-                    "description": "Media carries the media metadata when MessageType is non-text.\nPass-through ` + "`" + `map[string]interface{}` + "`" + ` to avoid coupling to any specific\nupstream schema; serialized as-is into the enriched Message body for the\nLLM to extract. Source upstream: Salesforce Apex (study-sf-whatsapp-poc1)\n→ Mule sc-inbound-flow.\n\nChaves esperadas/conhecidas (mantidas em sync com o tool MCP\n` + "`" + `register_inbound_media` + "`" + ` em prefeitura-rio/app-mcp-server e ADR-012 em\nstudy-sf-whatsapp-poc1). Typos passam silenciosos por design — gateway\né pass-through; validação semântica fica no MCP tool. Atualizar este\ncomentário sempre que o tool aceitar/exigir nova chave.\n\nPra image/audio/video (BSP entrega via ContentVersion auto-attachado):\n  - content_version_id   (string, SF Id 18-char)\n  - content_document_id  (string, SF Id 18-char)\n  - file_extension       (string, lowercase: \"jpg\"|\"png\"|\"oga\"|\"ogg\"|\"mp4\"|...)\n  - file_size_bytes      (number)\n  - download_path        (string, REST path: \"/services/data/v62.0/sobjects/ContentVersion/{Id}/VersionData\")\n\nPra location (atualmente não entregue pelo BSP; placeholder pra BYOC futuro):\n  - latitude             (number, -90..90)\n  - longitude            (number, -180..180)\n  - address              (string, opcional)\n  - name                 (string, opcional — point-of-interest)\n\nPra unsupported/unknown: Media pode ser nil ou {} — tipo já carrega o\nsignal suficiente, sem metadata útil pra MCP processar.",
+                    "description": "Media carries the media metadata when MessageType is non-text.\nPass-through ` + "`" + `map[string]interface{}` + "`" + ` to avoid coupling to any specific\nupstream schema; serialized as-is into the enriched Message body for the\nLLM to extract. Source upstream: Salesforce Apex (study-sf-whatsapp-poc1)\n→ Mule sc-inbound-flow.\n\nChaves esperadas/conhecidas (mantidas em sync com o tool MCP\n` + "`" + `register_inbound_media` + "`" + ` em prefeitura-rio/app-mcp-server e ADR-012 em\nstudy-sf-whatsapp-poc1). Typos passam silenciosos por design — gateway\né pass-through; validação semântica fica no MCP tool. Atualizar este\ncomentário sempre que o tool aceitar/exigir nova chave.\n\nPra image/audio/video (BSP entrega via ContentVersion auto-attachado):\n  - content_version_id   (string, SF Id 18-char)\n  - content_document_id  (string, SF Id 18-char)\n  - file_extension       (string, lowercase: \"jpg\"|\"png\"|\"oga\"|\"ogg\"|\"mp4\"|...)\n  - file_size_bytes      (number)\n  - download_path        (string, REST path: \"/services/data/v62.0/sobjects/ContentVersion/{Id}/VersionData\")\n\nPra location (atualmente não entregue pelo BSP; placeholder pra BYOC futuro):\n  - latitude             (number, -90..90)\n  - longitude            (number, -180..180)\n  - address              (string, opcional)\n  - name                 (string, opcional — point-of-interest)\n\nPra interactive: Media carrega sub-shapes de WhatsApp interactive inbound\n(button_reply, list_reply, nfm_reply/Flow submission) sem validação local.\n\nPra unsupported/unknown: Media pode ser nil ou {} — tipo já carrega o\nsignal suficiente, sem metadata útil pra MCP processar.",
                     "type": "object",
                     "additionalProperties": true
                 },
@@ -526,7 +526,7 @@ const docTemplate = `{
                     "example": "Hello, how can you help me?"
                 },
                 "message_type": {
-                    "description": "MessageType discriminates inbound media kinds when caller (Mule, etc.) sends\nnon-text payloads. Values: \"text\" (default), \"image\", \"audio\", \"video\", \"location\",\n\"unsupported\", \"unknown\". Worker uses it to enrich ` + "`" + `Message` + "`" + ` with an\n[INBOUND_MEDIA] prefix so the downstream LLM can call the MCP tool\n` + "`" + `register_inbound_media` + "`" + `. Optional; absent or \"text\" preserves legacy\nbehavior.",
+                    "description": "MessageType discriminates inbound media kinds when caller (Mule, etc.) sends\nnon-text payloads. Inbound-capable values follow the canonical registry in\nprefeitura-rio/app-mcp-server/media-types.yaml: \"text\", \"audio\", \"image\",\n\"video\", \"location\", \"interactive\". Gateway also accepts sentinel values\n\"unsupported\" and \"unknown\". Worker uses it to enrich ` + "`" + `Message` + "`" + ` with an\n[INBOUND_MEDIA] prefix so the downstream LLM can call MCP tools. Optional;\nabsent or \"text\" preserves legacy behavior.",
                     "type": "string",
                     "example": "image"
                 },
@@ -552,7 +552,7 @@ const docTemplate = `{
                 }
             }
         },
-        "models.WebhookResponse": {
+        "github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.WebhookResponse": {
             "type": "object",
             "properties": {
                 "message_id": {

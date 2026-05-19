@@ -1,10 +1,50 @@
 package models
 
 import (
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+// KnownMessageTypesList mirrors inbound-capable media types from
+// prefeitura-rio/app-mcp-server/media-types.yaml plus Gateway sentinel values.
+// Gateway intentionally remains pass-through for media payload shape; semantic
+// validation belongs to MCP tools.
+var KnownMessageTypesList = []string{
+	"text",
+	"audio",
+	"image",
+	"video",
+	"location",
+	"interactive",
+	"unsupported",
+	"unknown",
+}
+
+var knownMessageTypesSet = func() map[string]bool {
+	set := make(map[string]bool, len(KnownMessageTypesList))
+	for _, messageType := range KnownMessageTypesList {
+		set[messageType] = true
+	}
+	return set
+}()
+
+// IsKnownMessageType reports whether message_type is supported by the Gateway
+// input contract. Empty is allowed because absent message_type preserves legacy
+// text behavior.
+func IsKnownMessageType(messageType string) bool {
+	if messageType == "" {
+		return true
+	}
+	return knownMessageTypesSet[messageType]
+}
+
+// AllowsEmptyMedia reports whether message_type can carry only its sentinel
+// classification without a media metadata object.
+func AllowsEmptyMedia(messageType string) bool {
+	return messageType == "unsupported" || messageType == "unknown"
+}
 
 // HistoryMessage represents a single message in the history update
 type HistoryMessage struct {
@@ -22,8 +62,8 @@ type HistoryUpdateWebhookRequest struct {
 
 // UserWebhookRequest represents the request payload for user webhook (matches Python API)
 type UserWebhookRequest struct {
-	UserNumber        string                 `json:"user_number" binding:"required" example:"5521999999999"`
-	PreviousMessage   *string                `json:"previous_message,omitempty" example:"Previous message context"`
+	UserNumber      string  `json:"user_number" binding:"required" example:"5521999999999"`
+	PreviousMessage *string `json:"previous_message,omitempty" example:"Previous message context"`
 	// Message is optional when MessageType != "text" and Media is provided
 	// (media-only payloads, e.g. raw image without caption). Handler enforces
 	// "either Message non-empty OR (MessageType non-text + Media)" semantic
@@ -35,11 +75,12 @@ type UserWebhookRequest struct {
 	CallbackURL       *string                `json:"callback_url,omitempty" binding:"omitempty,url" example:"https://example.com/webhook/callback"`
 	ReasoningEngineID *string                `json:"reasoning_engine_id,omitempty" example:"12345678"`
 	// MessageType discriminates inbound media kinds when caller (Mule, etc.) sends
-	// non-text payloads. Values: "text" (default), "image", "audio", "video",
-	// "location", "unsupported", "unknown". Worker uses it to enrich `Message`
-	// with an [INBOUND_MEDIA] prefix so the downstream LLM can call the MCP
-	// tool `register_inbound_media`. Optional; absent or "text" preserves
-	// legacy behavior.
+	// non-text payloads. Inbound-capable values follow the canonical registry in
+	// prefeitura-rio/app-mcp-server/media-types.yaml: "text", "audio", "image",
+	// "video", "location", "interactive". Gateway also accepts sentinel values
+	// "unsupported" and "unknown". Worker uses it to enrich `Message` with an
+	// [INBOUND_MEDIA] prefix so the downstream LLM can call MCP tools. Optional;
+	// absent or "text" preserves legacy behavior.
 	MessageType *string `json:"message_type,omitempty" example:"image"`
 	// Media carries the media metadata when MessageType is non-text.
 	// Pass-through `map[string]interface{}` to avoid coupling to any specific
@@ -66,9 +107,16 @@ type UserWebhookRequest struct {
 	//   - address              (string, opcional)
 	//   - name                 (string, opcional — point-of-interest)
 	//
+	// Pra interactive: Media carrega sub-shapes de WhatsApp interactive inbound
+	// (button_reply, list_reply, nfm_reply/Flow submission) sem validação local.
+	//
 	// Pra unsupported/unknown: Media pode ser nil ou {} — tipo já carrega o
 	// signal suficiente, sem metadata útil pra MCP processar.
 	Media map[string]interface{} `json:"media,omitempty"`
+}
+
+func KnownMessageTypesDescription() string {
+	return strings.Join(KnownMessageTypesList, ", ")
 }
 
 // WebhookResponse represents the response for webhook endpoints (matches Python API)

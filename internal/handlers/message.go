@@ -104,15 +104,11 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	// de virarem prefix [INBOUND_MEDIA] malformado pro LLM downstream.
 	if req.MessageType != nil && *req.MessageType != "" {
 		mt := *req.MessageType
-		valid := map[string]bool{
-			"text": true, "image": true, "audio": true, "video": true,
-			"location": true, "unsupported": true, "unknown": true,
-		}
-		if !valid[mt] {
+		if !models.IsKnownMessageType(mt) {
 			h.logger.WithField("message_type", mt).Error("Invalid message_type")
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "Invalid request",
-				"message": "message_type must be one of: text, image, audio, video, location, unsupported, unknown",
+				"message": "message_type must be one of: " + models.KnownMessageTypesDescription(),
 			})
 			return
 		}
@@ -127,12 +123,11 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	// "unsupported" e "unknown" sao tipos sentinela: BSP injetou texto fake
 	// ou Apex falhou em correlacionar ContentVersion. Nao precisam de Media
 	// populado por design — Message=null + classificacao pelo tipo basta pra
-	// telemetria/log. Os tipos "midia real" (image, audio, video, location)
-	// requerem len(req.Media) > 0 (ex: content_version_id, lat/lng).
-	noMediaTypesAllowed := req.MessageType != nil &&
-		(*req.MessageType == "unsupported" || *req.MessageType == "unknown")
+	// telemetria/log. Os tipos "midia real" (image, audio, video, location,
+	// interactive) requerem len(req.Media) > 0.
+	emptyMediaAllowed := req.MessageType != nil && models.AllowsEmptyMedia(*req.MessageType)
 	hasMedia := req.MessageType != nil && *req.MessageType != "" && *req.MessageType != "text" &&
-		(len(req.Media) > 0 || noMediaTypesAllowed)
+		(len(req.Media) > 0 || emptyMediaAllowed)
 	if !hasText && !hasMedia {
 		h.logger.Error("User webhook payload has neither text nor media")
 		c.JSON(http.StatusBadRequest, gin.H{
