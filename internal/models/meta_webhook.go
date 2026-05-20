@@ -91,6 +91,11 @@ type MetaMedia struct {
 	SHA256   string `json:"sha256,omitempty"`
 	Filename string `json:"filename,omitempty"` // só pra document/sticker às vezes
 	Caption  string `json:"caption,omitempty"`  // image/video/document
+	// Voice é populado apenas em audio messages — true significa que o
+	// cidadão gravou voice note (push-to-talk no WhatsApp), false/ausente
+	// significa que mandou um audio file. Engine pode usar pra optar entre
+	// transcrição direta (voice) ou path mais elaborado.
+	Voice bool `json:"voice,omitempty"`
 }
 
 // MetaLocation — coordenadas compartilhadas via "anexo → localização".
@@ -110,9 +115,12 @@ type MetaInteractive struct {
 }
 
 // MetaInteractiveID — comum a button_reply/list_reply.
+// `Description` é populado apenas em list_reply (cada item da lista pode
+// ter description opcional); button_reply ignora.
 type MetaInteractiveID struct {
-	ID    string `json:"id"`
-	Title string `json:"title"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description,omitempty"`
 }
 
 // MetaNFMReply — WhatsApp Flow completion.

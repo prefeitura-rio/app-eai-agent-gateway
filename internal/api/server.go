@@ -28,7 +28,8 @@ type Server struct {
 	userActivityHandler *handlers.UserActivityHandler
 	// metaWebhookHandler é nil quando META_DIRECT_ENABLED=false (default).
 	// POC `feat/meta-direct-poc`: substitui Mule como broker entre Meta e Engine.
-	metaWebhookHandler *handlers.MetaWebhookHandler
+	metaWebhookHandler  *handlers.MetaWebhookHandler
+	metaDispatchHandler *handlers.MetaDispatchHandler
 	redisService        *services.RedisService
 	rabbitMQService     *services.RabbitMQService
 	postgresService     *services.PostgresService
@@ -97,9 +98,24 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 	// Tokens validados de forma laxa aqui; handler faz fail-closed em runtime
 	// se AppSecret ausente.
 	if cfg.Meta.Enabled {
+		// Redis cumpre o papel de dedup ledger (SETNX wamid). Em testes/POC
+		// sem Redis, passar nil desativa idempotência — Meta retries podem
+		// duplicar processamento, mas o webhook continua funcionando.
+		var dedup handlers.MetaDedupChecker
+		if redisService != nil {
+			dedup = redisService
+		}
 		server.metaWebhookHandler = handlers.NewMetaWebhookHandler(
-			&cfg.Meta, server.messageHandler, logger,
+			&cfg.Meta, server.messageHandler, dedup, logger,
 		)
+		// Outbound dispatcher: worker callback → /meta/dispatch → Meta Graph.
+		// Inicializa apenas se credenciais Meta estão setadas; senão `sender`
+		// fica nil e o endpoint retorna 503.
+		var sender handlers.MetaSender
+		if cfg.Meta.SystemUserToken != "" && cfg.Meta.PhoneNumberID != "" {
+			sender = services.NewMetaGraphService(&cfg.Meta, logger)
+		}
+		server.metaDispatchHandler = handlers.NewMetaDispatchHandler(sender, redisService, cfg.Meta.DispatchSecret, logger)
 		logger.WithFields(logrus.Fields{
 			"event":             "meta_direct_enabled",
 			"verify_token_set":  cfg.Meta.VerifyToken != "",
@@ -216,6 +232,10 @@ func (s *Server) setupRoutes() {
 		s.router.GET("/meta/webhook", s.metaWebhookHandler.HandleVerify)
 		s.router.POST("/meta/webhook", s.metaWebhookHandler.HandleInbound)
 		s.logger.Info("Meta webhook routes registered: GET+POST /meta/webhook")
+	}
+	if s.metaDispatchHandler != nil {
+		s.router.POST("/meta/dispatch", s.metaDispatchHandler.HandleDispatch)
+		s.logger.Info("Meta dispatch route registered: POST /meta/dispatch")
 	}
 
 	// API routes group

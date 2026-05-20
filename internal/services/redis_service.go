@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -209,7 +210,7 @@ func (r *RedisService) Get(ctx context.Context, key string) (string, error) {
 	if err := result.Err(); err != nil {
 		if err == redis.Nil {
 			r.recordMiss()
-			return "", fmt.Errorf("key not found: %s", key)
+			return "", fmt.Errorf("%w: %s", ErrKeyNotFound, key)
 		}
 		r.recordError()
 		r.logger.WithError(err).WithField("key", key).Error("Failed to get value from Redis")
@@ -240,6 +241,37 @@ func (r *RedisService) SetValue(ctx context.Context, key string, value interface
 // Set stores a string value with TTL (implements interface)
 func (r *RedisService) Set(ctx context.Context, key string, value string, ttl time.Duration) error {
 	return r.SetValue(ctx, key, value, ttl)
+}
+
+// ErrKeyNotFound — sentinel retornado por Get quando a chave não existe.
+// Callers usam `errors.Is(err, services.ErrKeyNotFound)` pra discriminar
+// "miss esperado" de "Redis down". Sem isso, callers acabam classificando
+// stale/evicted como erro fatal.
+var ErrKeyNotFound = errors.New("redis key not found")
+
+// SetNX implementa SET key value NX EX ttl — claim atômico usado pra
+// idempotência (ex.: dedup wamid Meta webhook). Retorna true se claim foi
+// adquirida (chave não existia), false se já estava ocupada.
+//
+// A claim sobrevive `ttl` mesmo após processamento bem-sucedido; consumers
+// devem chamar SetNX *após* commit lógico (não antes) ou aceitar replay
+// indo até TTL expirar.
+func (r *RedisService) SetNX(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
+	r.recordOperation()
+
+	ok, err := r.client.SetNX(ctx, key, value, ttl).Result()
+	if err != nil {
+		r.recordError()
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"key": key,
+			"ttl": ttl,
+		}).Error("Failed to SETNX in Redis")
+		return false, fmt.Errorf("redis setnx error: %w", err)
+	}
+	if ok {
+		r.recordSet()
+	}
+	return ok, nil
 }
 
 // Delete removes a key

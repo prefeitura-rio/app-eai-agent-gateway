@@ -67,6 +67,20 @@ type MetaConfig struct {
 	SystemUserToken string `mapstructure:"META_SYSTEM_USER_TOKEN"`
 	PhoneNumberID   string `mapstructure:"META_PHONE_NUMBER_ID"`
 	GraphAPIVersion string `mapstructure:"META_GRAPH_API_VERSION"`
+	// SelfCallbackURL é a URL pública do próprio Gateway pro endpoint
+	// `/meta/dispatch`. Quando Meta-direct está ativo e o webhook enqueua,
+	// o worker call back para esse endpoint, que faz outbound via Meta Graph.
+	// Em ambientes diferentes setar via env (ex: https://gateway.staging/meta/dispatch).
+	// Vazio = path Meta-direct inbound funciona, outbound não dispara (worker
+	// loga "no callback_url" e a resposta fica órfã em Redis).
+	SelfCallbackURL string `mapstructure:"META_SELF_CALLBACK_URL"`
+	// DispatchSecret é o shared secret que `/meta/dispatch` valida via header
+	// `X-Meta-Dispatch-Secret`. Sem ele, qualquer caller com um `message_id`
+	// válido (que vem na resposta do webhook) poderia POSTar payload fake e
+	// fazer o Gateway enviar texto arbitrário ao usuário via Meta credentials.
+	// Fail-closed: vazio/placeholder → endpoint sempre rejeita 401 (sem auth =
+	// sem outbound).
+	DispatchSecret string `mapstructure:"META_DISPATCH_SECRET"`
 }
 
 type ServerConfig struct {
@@ -456,6 +470,8 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("META_SYSTEM_USER_TOKEN")
 	_ = viper.BindEnv("META_PHONE_NUMBER_ID")
 	_ = viper.BindEnv("META_GRAPH_API_VERSION")
+	_ = viper.BindEnv("META_SELF_CALLBACK_URL")
+	_ = viper.BindEnv("META_DISPATCH_SECRET")
 
 	// Core Application
 	_ = viper.BindEnv("APP_PREFIX")

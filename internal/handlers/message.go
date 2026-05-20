@@ -76,6 +76,207 @@ func NewMessageHandler(
 	}
 }
 
+// EnqueueResult contains the outcome of enqueueing a user message.
+// Returned by EnqueueUserMessage so non-HTTP callers (e.g. MetaWebhookHandler)
+// can decide their own response shape without going through gin.Context.
+type EnqueueResult struct {
+	MessageID string
+	Status    string
+}
+
+// EnqueueOptions controla privilégios do caller. `TrustedInternal=true` é usado
+// por entrypoints confiáveis (Meta-direct webhook) que precisam apontar pro
+// SelfCallbackURL reservado. Callers externos (`/api/v1/message/webhook/user`)
+// passam false: tentar apontar pro SelfCallbackURL é rejeitado como inválido.
+type EnqueueOptions struct {
+	TrustedInternal bool
+}
+
+// EnqueueUserMessage é o core enqueue path compartilhado por HTTP handler e
+// entrypoints alternos (Meta-direct webhook).
+//
+// Errors:
+//   - ErrInvalidPayload (400-class): payload semantics violated
+//     (missing content, bad message_type, bad callback URL, attempted use
+//     of reserved internal callback URL)
+//   - other errors são 500-class (Redis/RabbitMQ down)
+//
+// Caller provê `req` já JSON-decoded + minimal metadata (request_id,
+// trace headers if any). Não toca gin.Context — pure business logic.
+func (h *MessageHandler) EnqueueUserMessage(
+	ctx context.Context,
+	req *models.UserWebhookRequest,
+	requestID string,
+	traceHeaders map[string]interface{},
+	opts EnqueueOptions,
+) (*EnqueueResult, error) {
+	if req == nil {
+		return nil, ErrInvalidPayload{Reason: "nil request"}
+	}
+	if req.UserNumber == "" {
+		return nil, ErrInvalidPayload{Reason: "user_number is required"}
+	}
+
+	if req.MessageType != nil && *req.MessageType != "" {
+		mt := *req.MessageType
+		valid := map[string]bool{
+			"text": true, "image": true, "audio": true, "video": true,
+			"location": true, "unsupported": true, "unknown": true,
+		}
+		if !valid[mt] {
+			return nil, ErrInvalidPayload{Reason: "message_type must be one of: text, image, audio, video, location, unsupported, unknown"}
+		}
+	}
+
+	hasText := req.Message != ""
+	noMediaTypesAllowed := req.MessageType != nil &&
+		(*req.MessageType == "unsupported" || *req.MessageType == "unknown")
+	hasMedia := req.MessageType != nil && *req.MessageType != "" && *req.MessageType != "text" &&
+		(len(req.Media) > 0 || noMediaTypesAllowed)
+	if !hasText && !hasMedia {
+		return nil, ErrInvalidPayload{Reason: "either `message` (non-empty) OR (`message_type` != \"text\" AND `media`) is required"}
+	}
+
+	if req.CallbackURL != nil && *req.CallbackURL != "" {
+		if err := validateCallbackURL(*req.CallbackURL); err != nil {
+			return nil, ErrInvalidPayload{Reason: "invalid callback URL: " + err.Error()}
+		}
+		// Reservar SelfCallbackURL pra uso interno (Meta-direct). Callers
+		// externos do `/api/v1/message/webhook/user` apontando pra SelfCallbackURL
+		// receberiam resposta autenticada do `/meta/dispatch` e poderiam disparar
+		// SendText ao próprio user_number via Meta credentials. MetaWebhookHandler
+		// passa `opts.TrustedInternal=true` pra bypass; outros são rejeitados.
+		if !opts.TrustedInternal &&
+			h.config.Meta.SelfCallbackURL != "" &&
+			*req.CallbackURL == h.config.Meta.SelfCallbackURL {
+			return nil, ErrInvalidPayload{Reason: "callback URL reserved for internal Meta-direct path"}
+		}
+	}
+
+	messageID := models.GenerateMessageID()
+	provider := "google_agent_engine"
+	if req.Provider != nil && *req.Provider != "" {
+		provider = *req.Provider
+	}
+
+	logger := h.logger.WithFields(logrus.Fields{
+		"message_id":  messageID,
+		"user_number": req.UserNumber,
+		"provider":    provider,
+	})
+
+	ctxTimeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	if err := h.redisService.SetTaskStatus(ctxTimeout, messageID, string(models.TaskStatusProcessing), h.config.Redis.TaskStatusTTL); err != nil {
+		logger.WithError(err).Error("Failed to set initial task status")
+		return nil, fmt.Errorf("set task status: %w", err)
+	}
+
+	queueMessage := models.QueueMessage{
+		ID:                messageID,
+		Type:              "user_message",
+		UserNumber:        req.UserNumber,
+		Message:           req.Message,
+		PreviousMessage:   req.PreviousMessage,
+		Provider:          provider,
+		Timestamp:         time.Now(),
+		Metadata:          req.Metadata,
+		ReasoningEngineID: req.ReasoningEngineID,
+		MessageType:       req.MessageType,
+		Media:             req.Media,
+	}
+	if queueMessage.Metadata == nil {
+		queueMessage.Metadata = make(map[string]interface{})
+	}
+	if requestID != "" {
+		queueMessage.Metadata["request_id"] = requestID
+	}
+	if _, ok := queueMessage.Metadata["source"]; !ok {
+		queueMessage.Metadata["source"] = "webhook"
+	}
+
+	// Quando CallbackURL está setado (Meta-direct ou caller que precisa de
+	// push), as duas escritas Redis abaixo são DELIVERY-CRITICAL:
+	//   - `task:metadata:*` é como o callback handler (e.g. /meta/dispatch)
+	//     recupera user_number pra mandar a resposta.
+	//   - `StoreCallbackURL` é como o worker descobre que precisa fazer push.
+	// Falha silenciosa aqui = HandleInbound retorna 200 a Meta, Meta para
+	// de retentar, e cidadão nunca recebe resposta. Pra modo callback,
+	// erro nessas escritas vira erro fatal de enqueue.
+	hasCallback := req.CallbackURL != nil && *req.CallbackURL != ""
+	// TTL pra callback-backed messages: precisa cobrir o pior caso de
+	// worker runtime (Google Agent Engine pode rodar ~30min) + retry window.
+	// TaskStatusTTL default (10min) é insuficiente. Usar o maior entre
+	// TaskStatusTTL configurado e 1h.
+	ttl := h.config.Redis.TaskStatusTTL
+	if hasCallback {
+		const minCallbackTTL = 1 * time.Hour
+		if ttl < minCallbackTTL {
+			ttl = minCallbackTTL
+		}
+	}
+
+	metadataForResponse := map[string]interface{}{
+		"user_number": req.UserNumber,
+		"provider":    provider,
+	}
+	metadataBytes, err := json.Marshal(metadataForResponse)
+	if err != nil {
+		return nil, fmt.Errorf("marshal metadata: %w", err)
+	}
+	metadataKey := "task:metadata:" + messageID
+	if err := h.redisService.Set(ctxTimeout, metadataKey, string(metadataBytes), ttl); err != nil {
+		if hasCallback {
+			logger.WithError(err).Error("Failed to store task metadata; aborting (callback path requires it)")
+			return nil, fmt.Errorf("store task metadata: %w", err)
+		}
+		logger.WithError(err).Warn("Failed to store task metadata, continuing (polling-only path)")
+	}
+
+	if hasCallback {
+		if err := h.redisService.StoreCallbackURL(ctxTimeout, messageID, *req.CallbackURL, ttl); err != nil {
+			logger.WithError(err).Error("Failed to store callback URL; aborting enqueue (would silent-drop)")
+			return nil, fmt.Errorf("store callback url: %w", err)
+		}
+	}
+
+	var pubErr error
+	if traceHeaders != nil && h.rabbitMQService != nil {
+		if publisherWithHeaders, ok := h.rabbitMQService.(interface {
+			PublishMessageWithHeaders(ctx context.Context, queueName string, message interface{}, headers map[string]interface{}) error
+		}); ok {
+			pubErr = publisherWithHeaders.PublishMessageWithHeaders(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage, traceHeaders)
+		} else {
+			pubErr = h.rabbitMQService.PublishMessage(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage)
+		}
+	} else {
+		pubErr = h.rabbitMQService.PublishMessage(ctxTimeout, h.config.RabbitMQ.UserMessagesQueue, queueMessage)
+	}
+
+	if pubErr != nil {
+		logger.WithError(pubErr).Error("Failed to queue user message")
+		_ = h.redisService.SetTaskStatus(ctxTimeout, messageID, string(models.TaskStatusFailed), h.config.Redis.TaskStatusTTL)
+		return nil, fmt.Errorf("publish queue: %w", pubErr)
+	}
+
+	logger.Info("User message queued successfully")
+	return &EnqueueResult{
+		MessageID: messageID,
+		Status:    string(models.TaskStatusProcessing),
+	}, nil
+}
+
+// ErrInvalidPayload é um erro 400-class retornado por EnqueueUserMessage
+// quando o payload viola contrato (campos faltando, valores inválidos).
+type ErrInvalidPayload struct {
+	Reason string
+}
+
+func (e ErrInvalidPayload) Error() string {
+	return e.Reason
+}
+
 // HandleUserWebhook processes user messages and queues them for processing
 //
 //	@Summary		Process user message webhook
@@ -149,6 +350,18 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "Invalid callback URL",
 				"message": err.Error(),
+			})
+			return
+		}
+		// Reservar SelfCallbackURL pra path Meta-direct interno. External
+		// callers que tentam fingir Meta-direct receberiam resposta autenticada
+		// no `/meta/dispatch` e poderiam disparar SendText arbitrário ao
+		// próprio user_number via Meta credentials.
+		if h.config.Meta.SelfCallbackURL != "" && *req.CallbackURL == h.config.Meta.SelfCallbackURL {
+			h.logger.WithField("callback_url", *req.CallbackURL).Warn("Rejected external use of internal Meta-direct callback URL")
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":   "Invalid callback URL",
+				"message": "callback URL reserved for internal Meta-direct path",
 			})
 			return
 		}

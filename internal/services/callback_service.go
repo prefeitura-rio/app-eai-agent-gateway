@@ -196,6 +196,17 @@ func (s *CallbackService) sendCallbackRequest(ctx context.Context, callbackURL s
 		req.Header.Set("X-Signature-SHA256", signature)
 	}
 
+	// Meta-direct dispatch secret: o callback do worker pra /meta/dispatch
+	// requer este header. Restrito ao SelfCallbackURL configurado — enviar
+	// o secret pra callbacks user-provided permitiria o receiver logar e
+	// reutilizar pra dispararem outbound Meta arbitrário. Match exato pra
+	// evitar prefix-collision em URLs com path adicional.
+	if s.config.Meta.DispatchSecret != "" &&
+		s.config.Meta.SelfCallbackURL != "" &&
+		callbackURL == s.config.Meta.SelfCallbackURL {
+		req.Header.Set("X-Meta-Dispatch-Secret", s.config.Meta.DispatchSecret)
+	}
+
 	// Send request
 	resp, err := s.httpClient.Do(req)
 	if err != nil {

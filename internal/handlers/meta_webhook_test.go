@@ -2,20 +2,152 @@ package handlers
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	stdio "io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
 )
+
+// ─── Mocks ───────────────────────────────────────────────────────────────
+
+// mockEnqueuer captura chamadas EnqueueUserMessage pra asserir o que foi
+// publicado. shouldFail força erro pra testar o path failed.
+type mockEnqueuer struct {
+	mu          sync.Mutex
+	calls       []models.UserWebhookRequest
+	shouldFail  bool
+	failInvalid bool
+}
+
+func (m *mockEnqueuer) EnqueueUserMessage(
+	_ context.Context, req *models.UserWebhookRequest,
+	_ string, _ map[string]interface{}, _ EnqueueOptions,
+) (*EnqueueResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if req != nil {
+		m.calls = append(m.calls, *req)
+	}
+	if m.failInvalid {
+		return nil, ErrInvalidPayload{Reason: "test invalid"}
+	}
+	if m.shouldFail {
+		return nil, errors.New("enqueue mock failure")
+	}
+	return &EnqueueResult{MessageID: "test-msg-id", Status: "processing"}, nil
+}
+
+func (m *mockEnqueuer) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
+func (m *mockEnqueuer) lastCall() *models.UserWebhookRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.calls) == 0 {
+		return nil
+	}
+	r := m.calls[len(m.calls)-1]
+	return &r
+}
+
+// mockDedup implementa MetaDedupChecker em memória com semântica SETNX +
+// Delete. setNXErr força erro no SetNX (pra testar fallback non-atomic).
+type mockDedup struct {
+	mu       sync.Mutex
+	store    map[string]string
+	setNXErr error
+	delErr   error
+}
+
+func newMockDedup() *mockDedup {
+	return &mockDedup{store: map[string]string{}}
+}
+
+func (m *mockDedup) SetNX(_ context.Context, key string, value string, _ time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.setNXErr != nil {
+		return false, m.setNXErr
+	}
+	if _, exists := m.store[key]; exists {
+		return false, nil
+	}
+	m.store[key] = value
+	return true, nil
+}
+
+func (m *mockDedup) Get(_ context.Context, key string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if v, ok := m.store[key]; ok {
+		return v, nil
+	}
+	return "", nil
+}
+
+func (m *mockDedup) Set(_ context.Context, key string, value string, _ time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store[key] = value
+	return nil
+}
+
+func (m *mockDedup) Delete(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.delErr != nil {
+		return m.delErr
+	}
+	delete(m.store, key)
+	return nil
+}
+
+func (m *mockDedup) putValue(key, val string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.store[key] = val
+}
+
+func (m *mockDedup) has(key string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.store[key]
+	return ok
+}
+
+// newTestHandlerWithDeps — helper que aceita mocks de enqueue + dedup.
+func newTestHandlerWithDeps(t *testing.T, enq MessageEnqueuer, dedup MetaDedupChecker) *MetaWebhookHandler {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	logger := logrus.New()
+	logger.SetOutput(stdio.Discard)
+	cfg := &config.MetaConfig{
+		Enabled:         true,
+		VerifyToken:     "test-verify-token",
+		AppSecret:       "test-app-secret",
+		PhoneNumberID:   "123",
+		SystemUserToken: "tok",
+		GraphAPIVersion: "v21.0",
+	}
+	return NewMetaWebhookHandler(cfg, enq, dedup, logger)
+}
 
 // newTestHandler — helper pra testes; AppSecret/VerifyToken fixos.
 func newTestHandler(t *testing.T) *MetaWebhookHandler {
@@ -31,7 +163,7 @@ func newTestHandler(t *testing.T) *MetaWebhookHandler {
 		SystemUserToken: "tok",
 		GraphAPIVersion: "v21.0",
 	}
-	return NewMetaWebhookHandler(cfg, nil, logger)
+	return NewMetaWebhookHandler(cfg, nil, nil, logger)
 }
 
 // signBody helper — produz "sha256=<hex>".
@@ -83,7 +215,7 @@ func TestVerify_FailsClosedWhenTokenUnset(t *testing.T) {
 	logger.SetOutput(stdio.Discard)
 	// VerifyToken empty na config — request sem token também é empty,
 	// mas deve falhar (fail-closed, codex P2).
-	h := NewMetaWebhookHandler(&config.MetaConfig{VerifyToken: ""}, nil, logger)
+	h := NewMetaWebhookHandler(&config.MetaConfig{VerifyToken: ""}, nil, nil, logger)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodGet,
@@ -180,10 +312,11 @@ func TestInbound_NonWhatsappObject(t *testing.T) {
 	}
 }
 
-func TestInbound_UnsupportedTypeAlsoReturns503(t *testing.T) {
-	h := newTestHandler(t)
-	// image type não suportado no POC; deve retornar 503 (não 200) pra
-	// forçar Meta retry. Sem isso = silent drop (codex P2 round 2).
+func TestInbound_UnsupportedTypeReturns503(t *testing.T) {
+	// Sticker não é suportado no parser — handler retorna routeSkipped que
+	// vira 503 pra Meta retentar. Sem isso = silent drop (codex P2 round 2).
+	enq := &mockEnqueuer{}
+	h := newTestHandlerWithDeps(t, enq, newMockDedup())
 	payload := `{
 	  "object": "whatsapp_business_account",
 	  "entry": [{
@@ -195,10 +328,10 @@ func TestInbound_UnsupportedTypeAlsoReturns503(t *testing.T) {
 	        "metadata": {"display_phone_number": "21", "phone_number_id": "1"},
 	        "messages": [{
 	          "from": "5500",
-	          "id": "wamid.IMG",
+	          "id": "wamid.STK",
 	          "timestamp": "1779225000",
-	          "type": "image",
-	          "image": {"id": "media-id-xxx", "mime_type": "image/jpeg"}
+	          "type": "sticker",
+	          "sticker": {"id": "stk-1", "mime_type": "image/webp"}
 	        }]
 	      }
 	    }]
@@ -210,11 +343,12 @@ func TestInbound_UnsupportedTypeAlsoReturns503(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
 	c.Request.Header.Set("X-Hub-Signature-256", sig)
-
 	h.HandleInbound(c)
-
 	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 (unsupported type), got %d", w.Code)
+		t.Errorf("expected 503 (unsupported sticker), got %d", w.Code)
+	}
+	if enq.callCount() != 0 {
+		t.Errorf("expected zero enqueue calls (unsupported), got %d", enq.callCount())
 	}
 }
 
@@ -255,8 +389,9 @@ func TestInbound_StatusCallbackReturns200(t *testing.T) {
 	}
 }
 
-func TestInbound_TextMessage_Returns503UntilEnqueueWired(t *testing.T) {
-	h := newTestHandler(t)
+func TestInbound_TextMessage_EnqueuesAndReturns200(t *testing.T) {
+	enq := &mockEnqueuer{}
+	h := newTestHandlerWithDeps(t, enq, newMockDedup())
 	payload := `{
 	  "object": "whatsapp_business_account",
 	  "entry": [{
@@ -284,18 +419,421 @@ func TestInbound_TextMessage_Returns503UntilEnqueueWired(t *testing.T) {
 	c, _ := gin.CreateTestContext(w)
 	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
 	c.Request.Header.Set("X-Hub-Signature-256", sig)
-
 	h.HandleInbound(c)
 
-	// POC: text parseado deve retornar 503 (Meta retry) enquanto enqueue
-	// real não está wired (task #106). Sem isso, mensagem seria silent-drop.
-	if w.Code != http.StatusServiceUnavailable {
-		t.Errorf("expected 503 (POC parse-only), got %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (enqueued), got %d body=%s", w.Code, w.Body.String())
 	}
-	var resp map[string]interface{}
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
-	if resp["status"] != "not_ready" {
-		t.Errorf("expected status=not_ready, got %v", resp["status"])
+	if enq.callCount() != 1 {
+		t.Fatalf("expected 1 enqueue call, got %d", enq.callCount())
+	}
+	req := enq.lastCall()
+	if req.UserNumber != "5500000000000" {
+		t.Errorf("expected UserNumber=5500000000000, got %q", req.UserNumber)
+	}
+	if req.Message != "Olá bot" {
+		t.Errorf("expected Message=Olá bot, got %q", req.Message)
+	}
+	if req.Metadata["wamid"] != "wamid.TEST" {
+		t.Errorf("expected metadata.wamid=wamid.TEST, got %v", req.Metadata["wamid"])
+	}
+}
+
+func TestInbound_EnqueueFailureReturns503(t *testing.T) {
+	enq := &mockEnqueuer{shouldFail: true}
+	h := newTestHandlerWithDeps(t, enq, newMockDedup())
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{
+	    "id": "WABA_ID",
+	    "changes": [{
+	      "field": "messages",
+	      "value": {
+	        "messaging_product": "whatsapp",
+	        "metadata": {"display_phone_number": "21", "phone_number_id": "1"},
+	        "messages": [{
+	          "from": "5500",
+	          "id": "wamid.FAIL",
+	          "timestamp": "1",
+	          "type": "text",
+	          "text": {"body": "x"}
+	        }]
+	      }
+	    }]
+	  }]
+	}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (enqueue failure), got %d", w.Code)
+	}
+}
+
+func TestInbound_DedupSkipsSecondCall(t *testing.T) {
+	enq := &mockEnqueuer{}
+	dedup := newMockDedup()
+	h := newTestHandlerWithDeps(t, enq, dedup)
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{
+	    "id": "WABA_ID",
+	    "changes": [{
+	      "field": "messages",
+	      "value": {
+	        "messaging_product": "whatsapp",
+	        "metadata": {"display_phone_number": "21", "phone_number_id": "1"},
+	        "messages": [{
+	          "from": "5500",
+	          "id": "wamid.DUP",
+	          "timestamp": "1",
+	          "type": "text",
+	          "text": {"body": "dup test"}
+	        }]
+	      }
+	    }]
+	  }]
+	}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+
+	// Primeira chamada — enqueue + dedup register
+	{
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+		c.Request.Header.Set("X-Hub-Signature-256", sig)
+		h.HandleInbound(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("first call expected 200, got %d", w.Code)
+		}
+	}
+	// Segunda — dedup hit, sem nova enqueue
+	{
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+		c.Request.Header.Set("X-Hub-Signature-256", sig)
+		h.HandleInbound(c)
+		if w.Code != http.StatusOK {
+			t.Fatalf("second (dup) call expected 200, got %d", w.Code)
+		}
+	}
+	if enq.callCount() != 1 {
+		t.Errorf("expected 1 enqueue (dup skipped), got %d", enq.callCount())
+	}
+}
+
+func TestInbound_ImageMessage_ExtractsMedia(t *testing.T) {
+	enq := &mockEnqueuer{}
+	h := newTestHandlerWithDeps(t, enq, newMockDedup())
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{
+	    "id": "WABA_ID",
+	    "changes": [{
+	      "field": "messages",
+	      "value": {
+	        "messaging_product": "whatsapp",
+	        "metadata": {"display_phone_number": "21", "phone_number_id": "1"},
+	        "messages": [{
+	          "from": "5500",
+	          "id": "wamid.IMG",
+	          "timestamp": "1",
+	          "type": "image",
+	          "image": {"id": "meta-media-123", "mime_type": "image/jpeg", "sha256": "abc"}
+	        }]
+	      }
+	    }]
+	  }]
+	}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	req := enq.lastCall()
+	if req == nil {
+		t.Fatal("expected enqueue call, got none")
+	}
+	if req.MessageType == nil || *req.MessageType != "image" {
+		t.Errorf("expected MessageType=image, got %v", req.MessageType)
+	}
+	if req.Media["meta_media_id"] != "meta-media-123" {
+		t.Errorf("expected meta_media_id=meta-media-123, got %v", req.Media["meta_media_id"])
+	}
+}
+
+func TestInbound_LocationMessage_ExtractsCoords(t *testing.T) {
+	enq := &mockEnqueuer{}
+	h := newTestHandlerWithDeps(t, enq, newMockDedup())
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{
+	    "id": "WABA_ID",
+	    "changes": [{
+	      "field": "messages",
+	      "value": {
+	        "messaging_product": "whatsapp",
+	        "metadata": {"display_phone_number": "21", "phone_number_id": "1"},
+	        "messages": [{
+	          "from": "5500",
+	          "id": "wamid.LOC",
+	          "timestamp": "1",
+	          "type": "location",
+	          "location": {"latitude": -22.9, "longitude": -43.2, "name": "Centro", "address": "RJ"}
+	        }]
+	      }
+	    }]
+	  }]
+	}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	req := enq.lastCall()
+	if req == nil {
+		t.Fatal("expected enqueue call")
+	}
+	if req.MessageType == nil || *req.MessageType != "location" {
+		t.Errorf("expected MessageType=location, got %v", req.MessageType)
+	}
+	if got := req.Media["latitude"]; got != float64(-22.9) {
+		t.Errorf("expected latitude=-22.9, got %v", got)
+	}
+}
+
+func TestInbound_InteractiveButtonReply_DowncastsToText(t *testing.T) {
+	enq := &mockEnqueuer{}
+	h := newTestHandlerWithDeps(t, enq, newMockDedup())
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{
+	    "id": "WABA_ID",
+	    "changes": [{
+	      "field": "messages",
+	      "value": {
+	        "messaging_product": "whatsapp",
+	        "metadata": {"display_phone_number": "21", "phone_number_id": "1"},
+	        "messages": [{
+	          "from": "5500",
+	          "id": "wamid.BTN",
+	          "timestamp": "1",
+	          "type": "interactive",
+	          "interactive": {
+	            "type": "button_reply",
+	            "button_reply": {"id": "btn-1", "title": "Sim"}
+	          }
+	        }]
+	      }
+	    }]
+	  }]
+	}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	req := enq.lastCall()
+	if req == nil || req.Message != "Sim" {
+		t.Errorf("expected Message=Sim, got %v", req)
+	}
+	if req.Metadata["interactive_kind"] != "button_reply" {
+		t.Errorf("expected interactive_kind=button_reply, got %v", req.Metadata["interactive_kind"])
+	}
+	if req.Metadata["interactive_id"] != "btn-1" {
+		t.Errorf("expected interactive_id=btn-1, got %v", req.Metadata["interactive_id"])
+	}
+}
+
+func TestInbound_InFlightClaimReturns503(t *testing.T) {
+	// Codex P2: claim adquirida mas ainda não-done. Dup deve retornar 503
+	// pra Meta retentar (vs 200 que silenciaria a entrega).
+	enq := &mockEnqueuer{}
+	dedup := newMockDedup()
+	dedup.putValue("meta:wamid:wamid.INFLIGHT", "inflight") // simula primeira req in-progress
+	h := newTestHandlerWithDeps(t, enq, dedup)
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{"id": "WABA_ID", "changes": [{"field": "messages",
+	    "value": {"messaging_product":"whatsapp",
+	      "metadata":{"display_phone_number":"21","phone_number_id":"1"},
+	      "messages":[{"from":"5500","id":"wamid.INFLIGHT","timestamp":"1","type":"text","text":{"body":"x"}}]
+	    }}]}]}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (in-flight → retry), got %d", w.Code)
+	}
+}
+
+func TestInbound_CompletedDupReturns200(t *testing.T) {
+	// Mesma claim mas valor "done" → 200 (silent skip, primeira request
+	// já completou e devolveu 200 ao Meta).
+	enq := &mockEnqueuer{}
+	dedup := newMockDedup()
+	dedup.putValue("meta:wamid:wamid.DONE", "done")
+	h := newTestHandlerWithDeps(t, enq, dedup)
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{"id": "WABA_ID", "changes": [{"field": "messages",
+	    "value": {"messaging_product":"whatsapp",
+	      "metadata":{"display_phone_number":"21","phone_number_id":"1"},
+	      "messages":[{"from":"5500","id":"wamid.DONE","timestamp":"1","type":"text","text":{"body":"x"}}]
+	    }}]}]}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 (done → silent dup), got %d", w.Code)
+	}
+	if enq.callCount() != 0 {
+		t.Errorf("expected zero enqueue (already done), got %d", enq.callCount())
+	}
+}
+
+func TestInbound_EnqueueFailureReleasesDedupClaim(t *testing.T) {
+	// Codex P1: claim antes do enqueue cria silent loss se enqueue falha.
+	// Fix: liberar a claim quando outcome=failed/skipped, pra Meta retry
+	// conseguir reprocessar.
+	enq := &mockEnqueuer{shouldFail: true}
+	dedup := newMockDedup()
+	h := newTestHandlerWithDeps(t, enq, dedup)
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{
+	    "id": "WABA_ID",
+	    "changes": [{
+	      "field": "messages",
+	      "value": {
+	        "messaging_product": "whatsapp",
+	        "metadata": {"display_phone_number": "21", "phone_number_id": "1"},
+	        "messages": [{"from": "5500", "id": "wamid.RELEASE", "timestamp": "1", "type": "text", "text": {"body": "x"}}]
+	      }
+	    }]
+	  }]
+	}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (enqueue failed), got %d", w.Code)
+	}
+	// Claim deve ter sido liberada — Meta retry verá ledger limpo.
+	if dedup.has("meta:wamid:wamid.RELEASE") {
+		t.Error("expected dedup claim to be released after enqueue failure; Meta retry would be silently skipped")
+	}
+}
+
+func TestInbound_DedupSetNXErrorContinuesWithoutBlock(t *testing.T) {
+	// SETNX retornando erro não deve bloquear o handler — só logamos e
+	// continuamos sem garantia de dedup. Resilience >	atomicidade quando
+	// Redis flapping.
+	enq := &mockEnqueuer{}
+	dedup := newMockDedup()
+	dedup.setNXErr = errors.New("redis down")
+	h := newTestHandlerWithDeps(t, enq, dedup)
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{
+	    "id": "WABA_ID",
+	    "changes": [{
+	      "field": "messages",
+	      "value": {
+	        "messaging_product": "whatsapp",
+	        "metadata": {"display_phone_number": "21", "phone_number_id": "1"},
+	        "messages": [{"from": "5500", "id": "wamid.SETNXERR", "timestamp": "1", "type": "text", "text": {"body": "x"}}]
+	      }
+	    }]
+	  }]
+	}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 (degraded dedup), got %d", w.Code)
+	}
+	if enq.callCount() != 1 {
+		t.Errorf("expected 1 enqueue (without dedup), got %d", enq.callCount())
+	}
+}
+
+func TestInbound_NoMessageHandlerReturns503(t *testing.T) {
+	// Sem MessageEnqueuer wired, text também cai em routeFailed → 503.
+	gin.SetMode(gin.TestMode)
+	logger := logrus.New()
+	logger.SetOutput(stdio.Discard)
+	cfg := &config.MetaConfig{
+		Enabled: true, VerifyToken: "t", AppSecret: "test-app-secret",
+		PhoneNumberID: "1", SystemUserToken: "tok", GraphAPIVersion: "v21.0",
+	}
+	h := NewMetaWebhookHandler(cfg, nil, newMockDedup(), logger)
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{
+	    "id": "WABA_ID",
+	    "changes": [{
+	      "field": "messages",
+	      "value": {
+	        "messaging_product": "whatsapp",
+	        "metadata": {"display_phone_number": "21", "phone_number_id": "1"},
+	        "messages": [{"from": "5500", "id": "wamid.NIL", "timestamp": "1", "type": "text", "text": {"body": "x"}}]
+	      }
+	    }]
+	  }]
+	}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (no enqueuer), got %d", w.Code)
 	}
 }
 
@@ -316,7 +854,7 @@ func TestValidateSignature_EmptySecretFailsClosed(t *testing.T) {
 	logger.SetOutput(stdio.Discard)
 	h := NewMetaWebhookHandler(
 		&config.MetaConfig{AppSecret: ""},
-		nil, logger,
+		nil, nil, logger,
 	)
 	// Mesmo com header válido, sem AppSecret deve falhar.
 	body := []byte("body")
