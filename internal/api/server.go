@@ -26,6 +26,9 @@ type Server struct {
 	healthHandler       *handlers.HealthHandler
 	messageHandler      *handlers.MessageHandler
 	userActivityHandler *handlers.UserActivityHandler
+	// metaWebhookHandler é nil quando META_DIRECT_ENABLED=false (default).
+	// POC `feat/meta-direct-poc`: substitui Mule como broker entre Meta e Engine.
+	metaWebhookHandler *handlers.MetaWebhookHandler
 	redisService        *services.RedisService
 	rabbitMQService     *services.RabbitMQService
 	postgresService     *services.PostgresService
@@ -88,6 +91,22 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			return nil
 		}()),
 		userActivityHandler: handlers.NewUserActivityHandler(logger, cfg, redisService, postgresService),
+	}
+
+	// Meta direct integration (POC) — só instancia se feature flag ativa.
+	// Tokens validados de forma laxa aqui; handler faz fail-closed em runtime
+	// se AppSecret ausente.
+	if cfg.Meta.Enabled {
+		server.metaWebhookHandler = handlers.NewMetaWebhookHandler(
+			&cfg.Meta, server.messageHandler, logger,
+		)
+		logger.WithFields(logrus.Fields{
+			"event":             "meta_direct_enabled",
+			"verify_token_set":  cfg.Meta.VerifyToken != "",
+			"app_secret_set":    cfg.Meta.AppSecret != "",
+			"phone_id_set":      cfg.Meta.PhoneNumberID != "",
+			"graph_api_version": cfg.Meta.GraphAPIVersion,
+		}).Info("Meta direct integration enabled")
 	}
 
 	// Add Google Agent Engine to health checks if available
@@ -189,6 +208,15 @@ func (s *Server) setupRoutes() {
 		c.Header("Content-Type", "text/html")
 		c.String(200, html)
 	})
+
+	// Meta WhatsApp Business Cloud direct webhook (POC).
+	// Só registra rotas se META_DIRECT_ENABLED=true E handler instanciado.
+	// Substitui Mule como broker quando Callback URL Meta apontar pro Gateway.
+	if s.metaWebhookHandler != nil {
+		s.router.GET("/meta/webhook", s.metaWebhookHandler.HandleVerify)
+		s.router.POST("/meta/webhook", s.metaWebhookHandler.HandleInbound)
+		s.logger.Info("Meta webhook routes registered: GET+POST /meta/webhook")
+	}
 
 	// API routes group
 	api := s.router.Group("/api")
