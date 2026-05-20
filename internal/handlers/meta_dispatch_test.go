@@ -21,17 +21,30 @@ import (
 
 // ─── Mocks ───────────────────────────────────────────────────────────────
 
-type mockSender struct {
-	mu       sync.Mutex
-	calls    []struct{ recipient, body string }
-	wamid    string
-	failErr  error
+type mockSenderCall struct {
+	kind      string // "text" | "media" | "location" | "template" | "interactive" | "reaction"
+	recipient string
+	body      string
+	mediaType string
+	media     services.MediaInput
+	lat, lng  float64
+	tplName   string
+	subtype   string
+	emoji     string
+	wamidPrev string
 }
 
-func (m *mockSender) SendText(_ context.Context, recipient, body string) (string, error) {
+type mockSender struct {
+	mu      sync.Mutex
+	calls   []mockSenderCall
+	wamid   string
+	failErr error
+}
+
+func (m *mockSender) record(call mockSenderCall) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.calls = append(m.calls, struct{ recipient, body string }{recipient, body})
+	m.calls = append(m.calls, call)
 	if m.failErr != nil {
 		return "", m.failErr
 	}
@@ -41,10 +54,54 @@ func (m *mockSender) SendText(_ context.Context, recipient, body string) (string
 	return m.wamid, nil
 }
 
+func (m *mockSender) SendText(_ context.Context, recipient, body string) (string, error) {
+	return m.record(mockSenderCall{kind: "text", recipient: recipient, body: body})
+}
+
+func (m *mockSender) SendMedia(_ context.Context, recipient, mediaType string, in services.MediaInput) (string, error) {
+	return m.record(mockSenderCall{kind: "media", recipient: recipient, mediaType: mediaType, media: in})
+}
+
+func (m *mockSender) SendLocation(_ context.Context, recipient string, lat, lng float64, name, address string) (string, error) {
+	return m.record(mockSenderCall{kind: "location", recipient: recipient, lat: lat, lng: lng, body: name + "|" + address})
+}
+
+func (m *mockSender) SendTemplate(_ context.Context, recipient, name, langCode string, _ []map[string]interface{}) (string, error) {
+	return m.record(mockSenderCall{kind: "template", recipient: recipient, tplName: name, body: langCode})
+}
+
+func (m *mockSender) SendInteractive(_ context.Context, recipient, subtype string, _, _, _, _ map[string]interface{}) (string, error) {
+	return m.record(mockSenderCall{kind: "interactive", recipient: recipient, subtype: subtype})
+}
+
+func (m *mockSender) SendReaction(_ context.Context, recipient, wamid, emoji string) (string, error) {
+	return m.record(mockSenderCall{kind: "reaction", recipient: recipient, wamidPrev: wamid, emoji: emoji})
+}
+
+func (m *mockSender) UploadMedia(_ context.Context, mimeType string, content []byte, _ string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, mockSenderCall{kind: "upload", mediaType: mimeType, body: string(content)})
+	if m.failErr != nil {
+		return "", m.failErr
+	}
+	return "uploaded-media-id-1", nil
+}
+
 func (m *mockSender) callCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.calls)
+}
+
+func (m *mockSender) lastCall() *mockSenderCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.calls) == 0 {
+		return nil
+	}
+	c := m.calls[len(m.calls)-1]
+	return &c
 }
 
 type mockRedisGet struct {
@@ -323,6 +380,188 @@ func TestDispatch_RejectsWhenSecretUnset(t *testing.T) {
 	h.HandleDispatch(c)
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401 (fail-closed), got %d", w.Code)
+	}
+}
+
+// ─── Dispatch routing by message_type ────────────────────────────────────
+
+func dispatchPayload(messages ...interface{}) MetaDispatchPayload {
+	return MetaDispatchPayload{
+		MessageID: "msg-1",
+		Status:    "completed",
+		Data:      map[string]interface{}{"messages": messages},
+	}
+}
+
+func TestDispatch_RoutesImageEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_media",
+			"content":      `{"status":"ok","type":"image","url":"https://example.com/img.jpg","caption":"foto"}`,
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "media" || last.mediaType != "image" {
+		t.Errorf("expected media/image, got %+v", last)
+	}
+	if last.media.Link != "https://example.com/img.jpg" {
+		t.Errorf("expected link, got %q", last.media.Link)
+	}
+}
+
+func TestDispatch_RoutesAudioFromGenerateAudioResponse(t *testing.T) {
+	// audio_base64 → UploadMedia → SendMedia(ID=uploaded-id). Verifica que
+	// envelope base64 não falha em "media requires either id or link".
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	// "AAAA" base64-decoded = 3 bytes nulos
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "generate_audio_response",
+			"content":      `{"status":"ok","audio_base64":"SGVsbG8=","mime_type":"audio/ogg"}`,
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	// Deve ter chamado UploadMedia + SendMedia (2 calls)
+	if sender.callCount() != 2 {
+		t.Fatalf("expected 2 calls (upload+send), got %d", sender.callCount())
+	}
+	if sender.calls[0].kind != "upload" {
+		t.Errorf("expected first call upload, got %+v", sender.calls[0])
+	}
+	if sender.calls[1].kind != "media" || sender.calls[1].mediaType != "audio" {
+		t.Errorf("expected second call media/audio, got %+v", sender.calls[1])
+	}
+	if sender.calls[1].media.ID != "uploaded-media-id-1" {
+		t.Errorf("expected media.ID=uploaded-media-id-1, got %q", sender.calls[1].media.ID)
+	}
+}
+
+func TestDispatch_RoutesLocationEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_media",
+			"content":      `{"status":"ok","type":"location","latitude":-22.9,"longitude":-43.2,"name":"Praça"}`,
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "location" {
+		t.Fatalf("expected location, got %+v", last)
+	}
+	if last.lat != -22.9 || last.lng != -43.2 {
+		t.Errorf("expected coords, got lat=%v lng=%v", last.lat, last.lng)
+	}
+}
+
+func TestDispatch_RoutesInteractiveEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_buttons",
+			"content": map[string]interface{}{
+				"status": "ok",
+				"type":   "interactive",
+				"interactive": map[string]interface{}{
+					"subtype": "button",
+					"body":    map[string]interface{}{"text": "Confirma?"},
+					"action": map[string]interface{}{
+						"buttons": []map[string]interface{}{
+							{"type": "reply", "reply": map[string]string{"id": "yes", "title": "Sim"}},
+						},
+					},
+				},
+			},
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "interactive" || last.subtype != "button" {
+		t.Errorf("expected interactive/button, got %+v", last)
+	}
+}
+
+func TestDispatch_RoutesReactionEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_media",
+			"content":      `{"status":"ok","type":"reaction","reaction_to_message_id":"wamid.PREV","emoji":"❤️"}`,
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "reaction" || last.emoji != "❤️" || last.wamidPrev != "wamid.PREV" {
+		t.Errorf("expected reaction, got %+v", last)
+	}
+}
+
+func TestDispatch_FallsBackToTextWhenNoEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{"content": "Olá!", "role": "ai"},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "text" || last.body != "Olá!" {
+		t.Errorf("expected text Olá!, got %+v", last)
+	}
+}
+
+func TestDispatch_LocationEnvelopeMissingCoordsReturns502(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_media",
+			"content":      `{"status":"ok","type":"location","name":"Sem coords"}`,
+		},
+	))
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", w.Code)
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends, got %d", sender.callCount())
 	}
 }
 

@@ -81,6 +81,16 @@ type MetaConfig struct {
 	// Fail-closed: vazio/placeholder → endpoint sempre rejeita 401 (sem auth =
 	// sem outbound).
 	DispatchSecret string `mapstructure:"META_DISPATCH_SECRET"`
+	// FlowRegistry mapeia flow_name → service_name pra WhatsApp Flow inbound
+	// (`nfm_reply`). Espelha Property Mule `whatsapp.flow.registry`
+	// (ADR-024). Formato: `flow_name1:service_name1;flow_name2:service_name2`.
+	// Match é case-insensitive + substring-tolerante (ex: flow "Luminária
+	// Quebrada" casa com entry "luminaria"). Vazio = pular lookup,
+	// metadata.service_name = "defaultService" config.
+	FlowRegistry string `mapstructure:"META_FLOW_REGISTRY"`
+	// FlowDefaultService é o service_name fallback quando flow_name não bate
+	// nada no FlowRegistry. Match Mule `whatsapp.flow.defaultService`.
+	FlowDefaultService string `mapstructure:"META_FLOW_DEFAULT_SERVICE"`
 }
 
 type ServerConfig struct {
@@ -472,6 +482,8 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("META_GRAPH_API_VERSION")
 	_ = viper.BindEnv("META_SELF_CALLBACK_URL")
 	_ = viper.BindEnv("META_DISPATCH_SECRET")
+	_ = viper.BindEnv("META_FLOW_REGISTRY")
+	_ = viper.BindEnv("META_FLOW_DEFAULT_SERVICE")
 
 	// Core Application
 	_ = viper.BindEnv("APP_PREFIX")

@@ -141,6 +141,91 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			logger.WithError(err).Error("Failed to update task status to processing")
 		}
 
+		// Per-phone lock pra serializar processamento por cidadão. Múltiplos
+		// workers (MAX_PARALLEL=8) consomem a mesma queue, então duas mensagens
+		// do mesmo user_number podem ser processadas concorrentes — risco de
+		// reordering visível ao cidadão.
+		//
+		// TTL alinhado com RabbitMQ.MessageTimeout (worker run máximo). Se
+		// MessageTimeout não setado, defaulta 30min. Goroutine de renewal
+		// estende o TTL a cada TTL/3 enquanto processamento estiver vivo,
+		// evitando que lock expire mid-Engine-call e outra mensagem do mesmo
+		// user_number entre concorrentemente.
+		if queueMsg.UserNumber != "" {
+			lockKey := "worker:phone-lock:" + queueMsg.UserNumber
+			lockHolder := queueMsg.ID
+			lockTTL := deps.Config.RabbitMQ.MessageTimeout
+			if lockTTL < 5*time.Minute {
+				lockTTL = 30 * time.Minute
+			}
+			const (
+				lockMaxAttempts  = 50
+				lockBackoff      = 100 * time.Millisecond
+				lockTotalTimeout = 10 * time.Second
+			)
+			lockAcquired := false
+			lockCtx, lockCancel := context.WithTimeout(ctx, lockTotalTimeout)
+			for attempt := 0; attempt < lockMaxAttempts; attempt++ {
+				ok, lockErr := deps.RedisService.AcquireLock(lockCtx, lockKey, lockHolder, lockTTL)
+				if lockErr != nil {
+					logger.WithError(lockErr).Warn("phone-lock acquire error (degraded); proceeding without lock")
+					break
+				}
+				if ok {
+					lockAcquired = true
+					break
+				}
+				select {
+				case <-lockCtx.Done():
+					attempt = lockMaxAttempts
+				case <-time.After(lockBackoff):
+				}
+			}
+			lockCancel()
+			if lockAcquired {
+				// Renewal goroutine: SETEX a cada TTL/3 enquanto processamento
+				// está vivo. Stops quando defer fecha doneCh ou ReleaseLock
+				// finaliza. Sem isso, Engine call demorada (>TTL) faz outro
+				// worker pegar lock expirado e processar concorrente — quebra
+				// a serialização que o lock prometia.
+				renewInterval := lockTTL / 3
+				if renewInterval < 30*time.Second {
+					renewInterval = 30 * time.Second
+				}
+				doneCh := make(chan struct{})
+				go func() {
+					ticker := time.NewTicker(renewInterval)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-doneCh:
+							return
+						case <-ticker.C:
+							renewCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							// Renewal via SetNX falha (key exists) — usar Set
+							// direto pra atualizar TTL (mantém o holder igual).
+							_ = deps.RedisService.Set(renewCtx, lockKey, lockHolder, lockTTL)
+							cancel()
+						}
+					}
+				}()
+				defer func() {
+					close(doneCh)
+					relCtx, relCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer relCancel()
+					if relErr := deps.RedisService.ReleaseLock(relCtx, lockKey, lockHolder); relErr != nil {
+						logger.WithError(relErr).Debug("phone-lock release (likely TTL expired, ok)")
+					}
+				}()
+			} else if queueMsg.UserNumber != "" {
+				logger.WithFields(logrus.Fields{
+					"user_number": queueMsg.UserNumber,
+					"message_id":  queueMsg.ID,
+				}).Warn("phone-lock not acquired in time; requeueing message")
+				return fmt.Errorf("phone-lock contention for %s; requeue", queueMsg.UserNumber)
+			}
+		}
+
 		// Process the user message with optional OTel tracing
 		var response string
 		var err error

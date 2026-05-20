@@ -22,6 +22,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -43,10 +44,17 @@ func secureEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-// MetaSender — contrato mínimo pra dispatcher. MetaGraphService satisfaz
-// essa interface. Permite mock em testes sem subir HTTP fake completo.
+// MetaSender — contrato pra dispatcher. MetaGraphService satisfaz nativamente.
+// Inclui todos os tipos outbound que o Engine pode pedir via tool returns.
+// Mock em testes precisa cobrir só os métodos exercitados.
 type MetaSender interface {
 	SendText(ctx context.Context, recipient, body string) (string, error)
+	SendMedia(ctx context.Context, recipient, mediaType string, in services.MediaInput) (string, error)
+	SendLocation(ctx context.Context, recipient string, lat, lng float64, name, address string) (string, error)
+	SendTemplate(ctx context.Context, recipient, name, langCode string, components []map[string]interface{}) (string, error)
+	SendInteractive(ctx context.Context, recipient, subtype string, header, body, footer, action map[string]interface{}) (string, error)
+	SendReaction(ctx context.Context, recipient, wamid, emoji string) (string, error)
+	UploadMedia(ctx context.Context, mimeType string, content []byte, filename string) (string, error)
 }
 
 // SendClaimer — interface estendida pra dedup atômico do dispatch path.
@@ -249,21 +257,36 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 		return
 	}
 
-	// Extrai texto da resposta. Worker storage shape:
-	//   data.messages = [{ "content": "...", "role": "ai", ... }, ...]
-	// Pega o último (ou apenas o primeiro item se só tem um).
-	body := extractMessageText(payload.Data)
-	if body == "" {
-		h.logger.WithField("message_id", payload.MessageID).
-			Warn("meta_dispatch: no text content in callback data; nothing to send")
-		c.JSON(http.StatusOK, gin.H{"status": "no_content"})
-		return
+	// Extrai envelope canônico de tool_return_message (send_whatsapp_media,
+	// generate_audio_response, send_whatsapp_flow/_buttons/_list). Quando
+	// presente, roteia por tipo. Quando ausente, cai pra texto puro do reply.
+	envelope := ExtractAgentMedia(payload.Data)
+
+	var (
+		wamid    string
+		sendKind string
+		sendErr  error
+	)
+	if envelope.Type != "" {
+		sendKind = envelope.Type
+		wamid, sendErr = h.sendByEnvelope(ctx, userNumber, envelope)
+	} else {
+		body := extractMessageText(payload.Data)
+		if body == "" {
+			h.logger.WithField("message_id", payload.MessageID).
+				Warn("meta_dispatch: no text content and no media envelope; nothing to send")
+			c.JSON(http.StatusOK, gin.H{"status": "no_content"})
+			return
+		}
+		sendKind = "text"
+		wamid, sendErr = h.sender.SendText(ctx, userNumber, body)
 	}
 
-	wamid, err := h.sender.SendText(ctx, userNumber, body)
-	if err != nil {
-		h.logger.WithError(err).WithField("message_id", payload.MessageID).
-			Error("meta_dispatch: SendText failed")
+	if sendErr != nil {
+		h.logger.WithError(sendErr).WithFields(logrus.Fields{
+			"message_id": payload.MessageID,
+			"send_kind":  sendKind,
+		}).Error("meta_dispatch: Send failed")
 		c.JSON(http.StatusBadGateway, gin.H{"error": "meta send failed"})
 		return
 	}
@@ -285,8 +308,75 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 		"event":      "meta_dispatch_sent",
 		"message_id": payload.MessageID,
 		"wamid":      wamid,
+		"send_kind":  sendKind,
 	}).Info("Meta dispatch outbound sent")
-	c.JSON(http.StatusOK, gin.H{"status": "sent", "wamid": wamid})
+	c.JSON(http.StatusOK, gin.H{"status": "sent", "wamid": wamid, "kind": sendKind})
+}
+
+// sendByEnvelope roteia o envelope canônico pro método apropriado do sender.
+// Cada tipo aceita um subset distinto de campos; o helper mapeia + valida
+// mínimamente. Erros são propagados puros pra caller decidir HTTP status.
+func (h *MetaDispatchHandler) sendByEnvelope(
+	ctx context.Context, recipient string, env AgentMediaEnvelope,
+) (string, error) {
+	switch env.Type {
+	case "audio", "image", "video", "document", "sticker":
+		// Roteia por canal preferido:
+		//   1. URL direto (link público): Meta busca o conteúdo
+		//   2. Base64 inline: Gateway faz upload pra /media e usa media_id
+		// Sem nenhum dos dois, SendMedia retornaria erro genérico; tratamos
+		// explicitamente aqui.
+		input := services.MediaInput{
+			Caption:  env.Caption,
+			Filename: env.Filename,
+			Voice:    env.Voice,
+		}
+		switch {
+		case env.URL != "":
+			input.Link = env.URL
+		case env.Base64 != "":
+			content, err := services.DecodeBase64(env.Base64)
+			if err != nil {
+				return "", fmt.Errorf("decode base64 audio: %w", err)
+			}
+			mediaID, err := h.sender.UploadMedia(ctx, env.MimeType, content, env.Filename)
+			if err != nil {
+				return "", fmt.Errorf("upload media to Meta: %w", err)
+			}
+			input.ID = mediaID
+		default:
+			return "", errors.New("media envelope has neither url nor base64; nothing to send")
+		}
+		return h.sender.SendMedia(ctx, recipient, env.Type, input)
+
+	case "location":
+		if env.Latitude == nil || env.Longitude == nil {
+			return "", errors.New("location envelope missing latitude or longitude")
+		}
+		return h.sender.SendLocation(ctx, recipient, *env.Latitude, *env.Longitude, env.Name, env.Address)
+
+	case "template":
+		if env.Template == nil {
+			return "", errors.New("template envelope missing template object")
+		}
+		return h.sender.SendTemplate(ctx, recipient, env.Template.Name, env.Template.LangCode, env.Template.Components)
+
+	case "interactive":
+		if env.Interactive == nil {
+			return "", errors.New("interactive envelope missing interactive object")
+		}
+		return h.sender.SendInteractive(ctx, recipient, env.Interactive.Subtype,
+			env.Interactive.Header, env.Interactive.Body, env.Interactive.Footer, env.Interactive.Action)
+
+	case "reaction":
+		if env.ReactionToMessageID == "" {
+			return "", errors.New("reaction envelope missing reaction_to_message_id")
+		}
+		return h.sender.SendReaction(ctx, recipient, env.ReactionToMessageID, env.Emoji)
+
+	default:
+		return "", errors.New("unsupported envelope type: " + env.Type)
+	}
 }
 
 // extractMessageText puxa a string de conteúdo do payload do worker.

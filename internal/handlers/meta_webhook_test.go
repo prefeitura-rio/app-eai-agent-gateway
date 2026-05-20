@@ -801,6 +801,117 @@ func TestInbound_DedupSetNXErrorContinuesWithoutBlock(t *testing.T) {
 	}
 }
 
+func TestInbound_AntiLoopGuardDropsSelfMessages(t *testing.T) {
+	// Mensagem em que `from` bate com `display_phone_number` da WABA = bot
+	// se respondendo a si mesmo. Drop pra evitar cascade infinita.
+	enq := &mockEnqueuer{}
+	h := newTestHandlerWithDeps(t, enq, newMockDedup())
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{"id": "WABA_ID", "changes": [{"field": "messages",
+	    "value": {"messaging_product":"whatsapp",
+	      "metadata":{"display_phone_number":"5521989091014","phone_number_id":"1"},
+	      "messages":[{"from":"5521989091014","id":"wamid.LOOP","timestamp":"1","type":"text","text":{"body":"loop"}}]
+	    }}]}]}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 (dropped self-loop), got %d", w.Code)
+	}
+	if enq.callCount() != 0 {
+		t.Errorf("expected zero enqueues (self-loop drop), got %d", enq.callCount())
+	}
+}
+
+func TestInbound_NfmReplyAppliesFlowRegistry(t *testing.T) {
+	// Submissão de Flow "Luminária" deve adicionar service_name pra Engine
+	// rotear pelo MCP correto.
+	enq := &mockEnqueuer{}
+	dedup := newMockDedup()
+	gin.SetMode(gin.TestMode)
+	logger := logrus.New()
+	logger.SetOutput(stdio.Discard)
+	cfg := &config.MetaConfig{
+		Enabled: true, VerifyToken: "t", AppSecret: "test-app-secret",
+		PhoneNumberID: "1", SystemUserToken: "tok", GraphAPIVersion: "v21.0",
+		FlowRegistry:       "luminaria:reparo_luminaria;saude:agenda_saude",
+		FlowDefaultService: "default_service",
+	}
+	h := NewMetaWebhookHandler(cfg, enq, dedup, logger)
+
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{"id": "WABA_ID", "changes": [{"field": "messages",
+	    "value": {"messaging_product":"whatsapp",
+	      "metadata":{"display_phone_number":"21","phone_number_id":"1"},
+	      "messages":[{"from":"5500","id":"wamid.FLOW","timestamp":"1","type":"interactive",
+	        "interactive":{
+	          "type":"nfm_reply",
+	          "nfm_reply":{
+	            "name":"Luminária Quebrada",
+	            "response_json":"{\"endereco\":\"Rua X, 100\",\"defeito\":\"piscando\"}"
+	          }
+	        }}]
+	    }}]}]}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	req := enq.lastCall()
+	if req == nil {
+		t.Fatal("expected enqueue call")
+	}
+	if req.Metadata["service_name"] != "reparo_luminaria" {
+		t.Errorf("expected service_name=reparo_luminaria, got %v", req.Metadata["service_name"])
+	}
+	form, ok := req.Metadata["form_submission"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected form_submission map, got %T", req.Metadata["form_submission"])
+	}
+	if form["endereco"] != "Rua X, 100" {
+		t.Errorf("expected form_submission.endereco=Rua X, 100, got %v", form["endereco"])
+	}
+}
+
+func TestInbound_StatusCallbackPersistsToDedup(t *testing.T) {
+	// Status callbacks devem ser persistidos no Redis (key meta:status:<wamid>)
+	// pra Engine/operadores consultarem delivery state.
+	dedup := newMockDedup()
+	h := newTestHandlerWithDeps(t, &mockEnqueuer{}, dedup)
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{"id": "WABA_ID", "changes": [{"field": "messages",
+	    "value": {"messaging_product":"whatsapp",
+	      "metadata":{"display_phone_number":"21","phone_number_id":"1"},
+	      "statuses":[{"id":"wamid.SENT","status":"delivered","timestamp":"1","recipient_id":"5500"}]
+	    }}]}]}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if !dedup.has("meta:status:wamid.SENT") {
+		t.Error("expected status callback persisted to dedup store")
+	}
+}
+
 func TestInbound_NoMessageHandlerReturns503(t *testing.T) {
 	// Sem MessageEnqueuer wired, text também cai em routeFailed → 503.
 	gin.SetMode(gin.TestMode)

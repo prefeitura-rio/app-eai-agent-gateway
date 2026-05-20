@@ -89,6 +89,7 @@ type MetaWebhookHandler struct {
 	cfg            *config.MetaConfig
 	messageHandler MessageEnqueuer
 	dedup          MetaDedupChecker
+	flowRegistry   *FlowRegistry
 	logger         *logrus.Logger
 }
 
@@ -107,6 +108,7 @@ func NewMetaWebhookHandler(
 		cfg:            cfg,
 		messageHandler: messageHandler,
 		dedup:          dedup,
+		flowRegistry:   NewFlowRegistry(cfg.FlowRegistry, cfg.FlowDefaultService),
 		logger:         logger,
 	}
 }
@@ -301,15 +303,29 @@ func (h *MetaWebhookHandler) processEntries(
 					failed++
 				}
 			}
-			// Status callbacks (delivered/read/failed) logados como telemetria.
-			// Não disparam Engine — apenas observabilidade.
+			// Status callbacks (delivered/read/failed): emitir como evento
+			// estruturado pra observabilidade + persistir failure status no
+			// Redis pra worker/Engine consultarem se quiser. Não dispara
+			// Engine outbound — apenas signal.
 			for _, st := range change.Value.Statuses {
+				lvl := logrus.InfoLevel
+				if st.Status == "failed" {
+					lvl = logrus.WarnLevel
+				}
 				h.logger.WithFields(logrus.Fields{
-					"event":     "meta_status_callback",
-					"wamid":     st.ID,
-					"status":    st.Status,
-					"recipient": st.RecipientID,
-				}).Debug("Meta status callback")
+					"event":            "meta_status_callback",
+					"wamid":            st.ID,
+					"status":           st.Status,
+					"recipient_prefix": maskPhone(st.RecipientID),
+				}).Log(lvl, "Meta status callback")
+
+				// Persistir delivery status no Redis pra Engine/operadores
+				// poderem consultar quando handoff humano precisa saber se
+				// notice chegou. Best-effort; falha não bloqueia 200 ao Meta.
+				if h.dedup != nil && st.ID != "" {
+					key := "meta:status:" + st.ID
+					_ = h.dedup.Set(ctx, key, st.Status, dedupTTL)
+				}
 			}
 		}
 	}
@@ -325,6 +341,50 @@ const (
 	routeSkipped
 	routeFailed
 )
+
+// isFromBotItself — anti-loop guard: detecta inbound originário do próprio
+// número WABA do bot. Ocorre quando outbound wamid retorna como webhook
+// (raro em produção mas observado em sandboxes); processar como mensagem
+// cidadã faria o bot se responder em loop. Match comparing msg.From com
+// metadata.PhoneNumberID OU metadata.DisplayPhoneNumber.
+func isFromBotItself(value *models.MetaChangeValue, msg *models.MetaMessage) bool {
+	if msg == nil || msg.From == "" {
+		return false
+	}
+	// PhoneNumberID é o id interno da WABA (não bate com From, que é o
+	// número E.164 sem '+'). DisplayPhoneNumber é o número formatado pra
+	// display ("5521989091014" ou "55 21 9 8909-1014"). Normalize ambos pra
+	// dígitos antes de comparar.
+	from := normalizeDigits(msg.From)
+	if from == "" {
+		return false
+	}
+	if normalizeDigits(value.Metadata.DisplayPhoneNumber) == from {
+		return true
+	}
+	return false
+}
+
+// normalizeDigits remove tudo exceto dígitos. "55 21 9 8909-1014" → "5521989091014".
+func normalizeDigits(s string) string {
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			out = append(out, s[i])
+		}
+	}
+	return string(out)
+}
+
+// maskPhone mascara LGPD: "5521989091014" → "55219890…". Para status
+// callbacks logging onde recipient não-PII é suficiente.
+func maskPhone(phone string) string {
+	digits := normalizeDigits(phone)
+	if len(digits) <= 8 {
+		return digits
+	}
+	return digits[:8] + "…"
+}
 
 // handleMessage: claim atômico (SETNX) → parse → enqueue → release on failure.
 //
@@ -346,6 +406,18 @@ func (h *MetaWebhookHandler) handleMessage(
 	value *models.MetaChangeValue,
 	msg *models.MetaMessage,
 ) routeOutcome {
+	// Anti-loop guard: dropar mensagens originadas do próprio bot. Evita
+	// cascade bot→bot caso outbound vire inbound por erro de config Meta.
+	if isFromBotItself(value, msg) {
+		h.logger.WithFields(logrus.Fields{
+			"event":     "meta_inbound_self_loop_drop",
+			"wamid":     msg.ID,
+			"from":      msg.From,
+			"waba_display": value.Metadata.DisplayPhoneNumber,
+		}).Warn("Meta inbound: message from own WABA number; drop to break loop")
+		return routeDup // 200 OK semantics — não retentar essa
+	}
+
 	var (
 		claimed     bool
 		dedupKey    string
@@ -555,7 +627,7 @@ func (h *MetaWebhookHandler) parseMessage(
 		// button_reply / list_reply / nfm_reply (WhatsApp Flow) — downcast pra
 		// text preservando id em extra_metadata pra Engine roteiar pelo
 		// Flow registry ou pelo botão clicado.
-		body, extra := flattenInteractive(msg.Interactive)
+		body, extra := h.flattenInteractive(msg.Interactive)
 		if body == "" {
 			return nil, routeSkipped
 		}
@@ -617,8 +689,9 @@ func mediaFromMeta(msg *models.MetaMessage) map[string]interface{} {
 
 // flattenInteractive converte interactive payload (button_reply / list_reply
 // / nfm_reply) numa string + metadata extra. Retorna ("", nil) se shape
-// desconhecido.
-func flattenInteractive(intr *models.MetaInteractive) (string, map[string]interface{}) {
+// desconhecido. Pra nfm_reply, usa flowRegistry pra resolver service_name
+// e parsear response_json em metadata.form_submission estruturado (ADR-024).
+func (h *MetaWebhookHandler) flattenInteractive(intr *models.MetaInteractive) (string, map[string]interface{}) {
 	if intr == nil {
 		return "", nil
 	}
@@ -636,13 +709,14 @@ func flattenInteractive(intr *models.MetaInteractive) (string, map[string]interf
 			return "", nil
 		}
 		return intr.ListReply.Title, map[string]interface{}{
-			"interactive_kind":          "list_reply",
-			"interactive_id":            intr.ListReply.ID,
-			"interactive_description":   intr.ListReply.Description,
+			"interactive_kind":        "list_reply",
+			"interactive_id":          intr.ListReply.ID,
+			"interactive_description": intr.ListReply.Description,
 		}
 	case "nfm_reply":
-		// WhatsApp Flow submission. response_json carrega o form completo;
-		// downcast pra text preservando o JSON cru em metadata.
+		// WhatsApp Flow submission. Resolve service_name via registry e
+		// inclui form_submission estruturado (parse response_json). Engine
+		// dispatch pra MCP correto sem precisar inspecionar raw JSON.
 		if intr.NFMReply == nil {
 			return "", nil
 		}
@@ -650,11 +724,21 @@ func flattenInteractive(intr *models.MetaInteractive) (string, map[string]interf
 		if intr.NFMReply.Body != "" {
 			body = intr.NFMReply.Body
 		}
-		return body, map[string]interface{}{
+		extra := map[string]interface{}{
 			"interactive_kind":  "nfm_reply",
 			"flow_name":         intr.NFMReply.Name,
 			"flow_response_raw": intr.NFMReply.ResponseJSON,
 		}
+		if intr.NFMReply.FlowToken != "" {
+			extra["flow_token"] = intr.NFMReply.FlowToken
+		}
+		if service := h.flowRegistry.Resolve(intr.NFMReply.Name); service != "" {
+			extra["service_name"] = service
+		}
+		if parsed := ParseFlowResponse(intr.NFMReply.ResponseJSON); parsed != nil {
+			extra["form_submission"] = parsed
+		}
+		return body, extra
 	}
 	return "", nil
 }

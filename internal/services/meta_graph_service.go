@@ -19,9 +19,11 @@ package services
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"time"
 
@@ -29,6 +31,16 @@ import (
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 )
+
+// DecodeBase64 é helper público pra callers decodificarem o base64 do
+// envelope antes de chamar UploadMedia. Centraliza pra evitar imports
+// extras em packages handlers.
+func DecodeBase64(s string) ([]byte, error) {
+	if s == "" {
+		return nil, fmt.Errorf("base64 string empty")
+	}
+	return base64.StdEncoding.DecodeString(s)
+}
 
 // MetaGraphService — client HTTP para Meta WhatsApp Business Cloud API.
 type MetaGraphService struct {
@@ -590,6 +602,100 @@ func (s *MetaGraphService) DownloadMedia(ctx context.Context, signedURL string, 
 		"duration_ms": time.Since(start).Milliseconds(),
 	}).Info("Meta media downloaded")
 	return bs, nil
+}
+
+// UploadMedia faz POST multipart pra `/{phone_number_id}/media` e retorna
+// o `media_id` (handle reusável em SendMedia.ID). Usado quando Engine emite
+// bytes inline (base64) que precisam ser servidos pelo Meta (sem URL pública).
+//
+// `mimeType` deve bater com `bytes` (Meta valida). `filename` é opcional —
+// Meta gera um nome default. `messaging_product=whatsapp` é fixado no body.
+//
+// Limites Meta (referência v21.0):
+//   - audio: 16 MB
+//   - image: 5 MB
+//   - video: 16 MB
+//   - document: 100 MB
+//
+// Bytes maiores que o cap ainda enviam (Meta retorna 4xx). Gateway não pre-
+// valida pra evitar duplicação — caller pode comparar `len(bytes)` antes.
+func (s *MetaGraphService) UploadMedia(ctx context.Context, mimeType string, content []byte, filename string) (string, error) {
+	if err := s.credentialsReady(); err != nil {
+		return "", err
+	}
+	if mimeType == "" {
+		return "", fmt.Errorf("mimeType required")
+	}
+	if len(content) == 0 {
+		return "", fmt.Errorf("content empty")
+	}
+	if filename == "" {
+		filename = "upload" // Meta aceita default; usado só pra debug header
+	}
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	_ = writer.WriteField("messaging_product", "whatsapp")
+	_ = writer.WriteField("type", mimeType)
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return "", fmt.Errorf("multipart create file part: %w", err)
+	}
+	if _, err := part.Write(content); err != nil {
+		return "", fmt.Errorf("multipart write content: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("multipart close: %w", err)
+	}
+
+	url := fmt.Sprintf(
+		"https://graph.facebook.com/%s/%s/media",
+		s.cfg.GraphAPIVersion, s.cfg.PhoneNumberID,
+	)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	if err != nil {
+		return "", fmt.Errorf("create upload request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.SystemUserToken)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	start := time.Now()
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"event":       "meta_media_upload_error",
+			"mime_type":   mimeType,
+			"bytes":       len(content),
+			"duration_ms": time.Since(start).Milliseconds(),
+		}).Error("Meta media upload failed")
+		return "", fmt.Errorf("upload http: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		snippet := string(respBody)
+		if len(snippet) > 200 {
+			snippet = snippet[:200] + "...(truncated)"
+		}
+		return "", fmt.Errorf("media upload status %d: %s", resp.StatusCode, snippet)
+	}
+	var parsed struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		return "", fmt.Errorf("parse upload response: %w", err)
+	}
+	if parsed.ID == "" {
+		return "", fmt.Errorf("upload response missing id")
+	}
+	s.logger.WithFields(logrus.Fields{
+		"event":       "meta_media_upload_ok",
+		"media_id":    parsed.ID,
+		"mime_type":   mimeType,
+		"bytes":       len(content),
+		"duration_ms": time.Since(start).Milliseconds(),
+	}).Info("Meta media uploaded")
+	return parsed.ID, nil
 }
 
 // doSend é o transport comum: serializa, POST, parse wamid.
