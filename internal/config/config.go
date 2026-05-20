@@ -50,6 +50,23 @@ type Config struct {
 
 	// PostgreSQL (Agent Engine Database)
 	Postgres PostgresConfig `mapstructure:",squash"`
+
+	// Meta (WhatsApp Business Cloud API) — direct integration without Mule broker.
+	// Habilita /meta/webhook GET (verify) + POST (inbound) + outbound via Meta Graph.
+	// Feature flag ENABLED desliga tudo se não houver tokens configurados.
+	Meta MetaConfig `mapstructure:",squash"`
+}
+
+// MetaConfig — credenciais e flags pra Meta WhatsApp Business Cloud API direta.
+// Quando ENABLED=true e tokens válidos presentes, Gateway aceita webhook Meta
+// direto (substituindo Mule como broker do meio).
+type MetaConfig struct {
+	Enabled         bool   `mapstructure:"META_DIRECT_ENABLED"`
+	VerifyToken     string `mapstructure:"META_WEBHOOK_VERIFY_TOKEN"`
+	AppSecret       string `mapstructure:"META_WEBHOOK_APP_SECRET"`
+	SystemUserToken string `mapstructure:"META_SYSTEM_USER_TOKEN"`
+	PhoneNumberID   string `mapstructure:"META_PHONE_NUMBER_ID"`
+	GraphAPIVersion string `mapstructure:"META_GRAPH_API_VERSION"`
 }
 
 type ServerConfig struct {
@@ -262,6 +279,10 @@ func Load() (*Config, error) {
 }
 
 func setDefaults() {
+	// Meta direct integration — defaults off; ativa setando vars no env.
+	viper.SetDefault("META_DIRECT_ENABLED", false)
+	viper.SetDefault("META_GRAPH_API_VERSION", "v21.0")
+
 	// Core Application
 	viper.SetDefault("MAX_PARALLEL", 8)
 
@@ -428,6 +449,14 @@ func validateRequired(config *Config) error {
 // bindEnvironmentVariables explicitly binds environment variables to viper keys
 // This is needed because viper.AutomaticEnv() doesn't work well with nested structs
 func bindEnvironmentVariables() {
+	// Meta direct integration (POC feat/meta-direct-poc)
+	_ = viper.BindEnv("META_DIRECT_ENABLED")
+	_ = viper.BindEnv("META_WEBHOOK_VERIFY_TOKEN")
+	_ = viper.BindEnv("META_WEBHOOK_APP_SECRET")
+	_ = viper.BindEnv("META_SYSTEM_USER_TOKEN")
+	_ = viper.BindEnv("META_PHONE_NUMBER_ID")
+	_ = viper.BindEnv("META_GRAPH_API_VERSION")
+
 	// Core Application
 	_ = viper.BindEnv("APP_PREFIX")
 	_ = viper.BindEnv("MAX_PARALLEL")
