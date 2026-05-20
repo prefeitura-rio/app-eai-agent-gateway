@@ -30,6 +30,11 @@ func DefaultCORSConfig() CORSConfig {
 			"X-Forwarded-For",
 			"X-Real-IP",
 			"User-Agent",
+			// Headers custom Meta-direct (PR #32)
+			"X-Hub-Signature-256",
+			"X-Meta-Dispatch-Secret",
+			// Header custom broadcast (POC /admin/broadcast)
+			"X-Broadcast-Secret",
 		},
 		AllowCredentials: false,
 	}

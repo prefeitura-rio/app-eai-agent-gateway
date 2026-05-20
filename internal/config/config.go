@@ -91,6 +91,11 @@ type MetaConfig struct {
 	// FlowDefaultService é o service_name fallback quando flow_name não bate
 	// nada no FlowRegistry. Match Mule `whatsapp.flow.defaultService`.
 	FlowDefaultService string `mapstructure:"META_FLOW_DEFAULT_SERVICE"`
+	// BroadcastSecret habilita `/admin/broadcast` endpoint (POC ADR-028
+	// opção (a)). Permite operador disparar templates Meta em massa pra
+	// cidadãos, viabilizando cortar Marketing Cloud. Vazio = endpoint
+	// fail-closed (401 todas requests). Header: `X-Broadcast-Secret`.
+	BroadcastSecret string `mapstructure:"META_BROADCAST_SECRET"`
 }
 
 type ServerConfig struct {
@@ -484,6 +489,7 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("META_DISPATCH_SECRET")
 	_ = viper.BindEnv("META_FLOW_REGISTRY")
 	_ = viper.BindEnv("META_FLOW_DEFAULT_SERVICE")
+	_ = viper.BindEnv("META_BROADCAST_SECRET")
 
 	// Core Application
 	_ = viper.BindEnv("APP_PREFIX")

@@ -28,8 +28,9 @@ type Server struct {
 	userActivityHandler *handlers.UserActivityHandler
 	// metaWebhookHandler é nil quando META_DIRECT_ENABLED=false (default).
 	// POC `feat/meta-direct-poc`: substitui Mule como broker entre Meta e Engine.
-	metaWebhookHandler  *handlers.MetaWebhookHandler
-	metaDispatchHandler *handlers.MetaDispatchHandler
+	metaWebhookHandler   *handlers.MetaWebhookHandler
+	metaDispatchHandler  *handlers.MetaDispatchHandler
+	adminBroadcastHandler *handlers.AdminBroadcastHandler
 	redisService        *services.RedisService
 	rabbitMQService     *services.RabbitMQService
 	postgresService     *services.PostgresService
@@ -116,6 +117,14 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			sender = services.NewMetaGraphService(&cfg.Meta, logger)
 		}
 		server.metaDispatchHandler = handlers.NewMetaDispatchHandler(sender, redisService, cfg.Meta.DispatchSecret, logger)
+		// Broadcast endpoint: reusa o mesmo MetaGraphService (sender).
+		// Auth via secret próprio (`META_BROADCAST_SECRET`) — diferente do
+		// dispatch secret pra ter rotação independente.
+		var broadcastSender handlers.BroadcastSender
+		if sender != nil {
+			broadcastSender = sender.(handlers.BroadcastSender)
+		}
+		server.adminBroadcastHandler = handlers.NewAdminBroadcastHandler(broadcastSender, cfg.Meta.BroadcastSecret, logger)
 		logger.WithFields(logrus.Fields{
 			"event":             "meta_direct_enabled",
 			"verify_token_set":  cfg.Meta.VerifyToken != "",
@@ -170,6 +179,10 @@ func (s *Server) setupMiddleware() {
 			AllowedHeaders: []string{
 				"Origin", "Content-Type", "Content-Length", "Accept-Encoding",
 				"Authorization", "X-Requested-With", "X-Request-ID",
+				// Headers custom Meta-direct (PR #32)
+				"X-Hub-Signature-256", "X-Meta-Dispatch-Secret",
+				// Header custom broadcast (POC /admin/broadcast)
+				"X-Broadcast-Secret",
 			},
 			AllowCredentials: false,
 		}
@@ -236,6 +249,10 @@ func (s *Server) setupRoutes() {
 	if s.metaDispatchHandler != nil {
 		s.router.POST("/meta/dispatch", s.metaDispatchHandler.HandleDispatch)
 		s.logger.Info("Meta dispatch route registered: POST /meta/dispatch")
+	}
+	if s.adminBroadcastHandler != nil {
+		s.router.POST("/admin/broadcast", s.adminBroadcastHandler.HandleBroadcast)
+		s.logger.Info("Admin broadcast route registered: POST /admin/broadcast")
 	}
 
 	// API routes group
