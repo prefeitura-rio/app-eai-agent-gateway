@@ -288,6 +288,32 @@ func (r *RedisService) AcquireLock(ctx context.Context, key, holder string, ttl 
 	return ok, nil
 }
 
+// RenewLock estende TTL apenas se o caller ainda é o titular (Compare-And-
+// Set via Lua atômico). Retorna true se renovou, false se outro processo
+// pegou o lock (TTL expirou). Use periodicamente enquanto processamento
+// estiver vivo pra evitar lock expirar mid-operation.
+func (r *RedisService) RenewLock(ctx context.Context, key, holder string, ttl time.Duration) (bool, error) {
+	r.recordOperation()
+	// CAS: só renova se holder atual bate. Lua atômico garante que
+	// renovação não roba lock após expiração + reacquire por outro.
+	const script = `
+		if redis.call("get", KEYS[1]) == ARGV[1] then
+			return redis.call("pexpire", KEYS[1], ARGV[2])
+		else
+			return 0
+		end`
+	ms := ttl.Milliseconds()
+	res, err := r.client.Eval(ctx, script, []string{key}, holder, ms).Result()
+	if err != nil {
+		r.recordError()
+		return false, fmt.Errorf("redis renew lock error: %w", err)
+	}
+	if n, ok := res.(int64); ok && n == 1 {
+		return true, nil
+	}
+	return false, nil
+}
+
 // ReleaseLock libera o mutex apenas se o caller é o titular (Compare-And-
 // Delete via Lua atômico). Retorna ErrLockNotHeld se valor atual difere
 // (outro processo tomou posse após TTL).

@@ -202,10 +202,17 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 							return
 						case <-ticker.C:
 							renewCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-							// Renewal via SetNX falha (key exists) — usar Set
-							// direto pra atualizar TTL (mantém o holder igual).
-							_ = deps.RedisService.Set(renewCtx, lockKey, lockHolder, lockTTL)
+							// CAS Lua: só renova se ainda somos o titular.
+							// Sem isso, Set unconditional roubaria lock de
+							// outro worker se TTL expirou mid-process.
+							ok, renewErr := deps.RedisService.RenewLock(renewCtx, lockKey, lockHolder, lockTTL)
 							cancel()
+							if renewErr != nil {
+								logger.WithError(renewErr).Debug("phone-lock renewal error (continuing)")
+							} else if !ok {
+								logger.Warn("phone-lock lost during processing (TTL expired or stolen)")
+								return // parar renovação — não somos mais donos
+							}
 						}
 					}
 				}()

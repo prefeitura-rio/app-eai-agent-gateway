@@ -25,6 +25,7 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -637,7 +638,13 @@ func (s *MetaGraphService) UploadMedia(ctx context.Context, mimeType string, con
 	writer := multipart.NewWriter(body)
 	_ = writer.WriteField("messaging_product", "whatsapp")
 	_ = writer.WriteField("type", mimeType)
-	part, err := writer.CreateFormFile("file", filename)
+	// CreateFormFile usa application/octet-stream por default. Meta exige
+	// que o multipart file part tenha Content-Type igual ao `type` field;
+	// caso contrário, upload é rejeitado. Construir o MIMEHeader manualmente.
+	mh := make(textproto.MIMEHeader)
+	mh.Set("Content-Disposition", fmt.Sprintf(`form-data; name="file"; filename=%q`, filename))
+	mh.Set("Content-Type", mimeType)
+	part, err := writer.CreatePart(mh)
 	if err != nil {
 		return "", fmt.Errorf("multipart create file part: %w", err)
 	}
