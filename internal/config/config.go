@@ -45,6 +45,9 @@ type Config struct {
 	// Callback
 	Callback CallbackConfig `mapstructure:",squash"`
 
+	// Gov.br OAuth2/PKCE Authentication
+	GovBr GovBrConfig `mapstructure:",squash"`
+
 	// Data Relay
 	DataRelay DataRelayConfig `mapstructure:",squash"`
 
@@ -215,6 +218,17 @@ type CallbackConfig struct {
 	RequireHTTPS  bool   `mapstructure:"CALLBACK_REQUIRE_HTTPS"`
 	AllowedDomain string `mapstructure:"CALLBACK_ALLOWED_DOMAIN"`
 	AuthToken     string `mapstructure:"CALLBACK_AUTH_TOKEN"`
+}
+
+// GovBrConfig holds configuration for Gov.br OAuth2/PKCE authentication
+type GovBrConfig struct {
+	ClientID      string `mapstructure:"GOVBR_CLIENT_ID"`
+	ClientSecret  string `mapstructure:"GOVBR_CLIENT_SECRET"`
+	RedirectURI   string `mapstructure:"GOVBR_REDIRECT_URI"`
+	AuthURL       string `mapstructure:"GOVBR_AUTH_URL"`
+	TokenURL      string `mapstructure:"GOVBR_TOKEN_URL"`
+	Scope         string `mapstructure:"GOVBR_SCOPE"`
+	AuthStateTTL  int    `mapstructure:"GOVBR_AUTH_STATE_TTL"` // seconds
 }
 
 type DataRelayConfig struct {
