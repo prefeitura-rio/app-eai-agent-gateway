@@ -26,6 +26,7 @@ type Server struct {
 	healthHandler       *handlers.HealthHandler
 	messageHandler      *handlers.MessageHandler
 	userActivityHandler *handlers.UserActivityHandler
+	govBrCallbackHandler *handlers.GovBrCallbackHandler
 	redisService        *services.RedisService
 	rabbitMQService     *services.RabbitMQService
 	postgresService     *services.PostgresService
@@ -88,7 +89,11 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			return nil
 		}()),
 		userActivityHandler: handlers.NewUserActivityHandler(logger, cfg, redisService, postgresService),
+		govBrCallbackHandler: handlers.NewGovBrCallbackHandler(logger, cfg, redisService),
 	}
+
+	// Load HTML templates for Gov.br auth callbacks
+	server.router.LoadHTMLGlob("templates/*.html")
 
 	// Add Google Agent Engine to health checks if available
 	if googleAgentService != nil {
@@ -189,6 +194,16 @@ func (s *Server) setupRoutes() {
 		c.Header("Content-Type", "text/html")
 		c.String(200, html)
 	})
+
+	// Gov.br OAuth2/PKCE callback endpoint (outside /api group)
+	// Public endpoint that receives callbacks from Identidade Carioca
+	auth := s.router.Group("/auth")
+	{
+		govbr := auth.Group("/govbr")
+		{
+			govbr.GET("/callback", s.govBrCallbackHandler.HandleCallback)
+		}
+	}
 
 	// API routes group
 	api := s.router.Group("/api")
