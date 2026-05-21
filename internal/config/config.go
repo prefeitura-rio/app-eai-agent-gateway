@@ -573,6 +573,14 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("CALLBACK_ALLOWED_DOMAIN")
 	_ = viper.BindEnv("CALLBACK_AUTH_TOKEN")
 
+	_ = viper.BindEnv("GOVBR_CLIENT_ID")
+	_ = viper.BindEnv("GOVBR_CLIENT_SECRET")
+	_ = viper.BindEnv("GOVBR_REDIRECT_URI")
+	_ = viper.BindEnv("GOVBR_AUTH_URL")
+	_ = viper.BindEnv("GOVBR_TOKEN_URL")
+	_ = viper.BindEnv("GOVBR_SCOPE")
+	_ = viper.BindEnv("GOVBR_AUTH_STATE_TTL")
+
 	// Data Relay
 	_ = viper.BindEnv("DATA_RELAY_ENABLED")
 	_ = viper.BindEnv("DATA_RELAY_BASE_URL")
