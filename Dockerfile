@@ -56,6 +56,8 @@ COPY --from=builder /app/worker /app/worker
 # Copy generated Swagger documentation
 COPY --from=builder /app/docs /app/docs
 
+COPY --from=builder /app/templates /app/templates
+
 # Set proper permissions
 RUN chmod +x /app/gateway /app/worker && \
     chown appuser:appuser /app/gateway /app/worker
