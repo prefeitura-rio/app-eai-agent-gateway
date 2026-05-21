@@ -641,13 +641,9 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("CALLBACK_ALLOWED_DOMAIN")
 	_ = viper.BindEnv("CALLBACK_AUTH_TOKEN")
 
-	_ = viper.BindEnv("GOVBR_CLIENT_ID")
-	_ = viper.BindEnv("GOVBR_CLIENT_SECRET")
-	_ = viper.BindEnv("GOVBR_REDIRECT_URI")
-	_ = viper.BindEnv("GOVBR_AUTH_URL")
-	_ = viper.BindEnv("GOVBR_TOKEN_URL")
-	_ = viper.BindEnv("GOVBR_SCOPE")
-	_ = viper.BindEnv("GOVBR_AUTH_STATE_TTL")
+	// Gov.br OAuth2/PKCE — canonical list lives no bloco mais acima nessa função.
+	// (mantenha lá pra evitar drift; este placeholder existe só pra clareza
+	// quando alguém adicionar Callback envs novas e procurar onde pôr GOVBR.)
 
 	// Data Relay
 	_ = viper.BindEnv("DATA_RELAY_ENABLED")
