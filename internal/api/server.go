@@ -28,8 +28,9 @@ type Server struct {
 	userActivityHandler *handlers.UserActivityHandler
 	// metaWebhookHandler é nil quando META_DIRECT_ENABLED=false (default).
 	// POC `feat/meta-direct-poc`: substitui Mule como broker entre Meta e Engine.
-	metaWebhookHandler  *handlers.MetaWebhookHandler
-	metaDispatchHandler *handlers.MetaDispatchHandler
+	metaWebhookHandler   *handlers.MetaWebhookHandler
+	metaDispatchHandler  *handlers.MetaDispatchHandler
+	govBrCallbackHandler *handlers.GovBrCallbackHandler
 	redisService        *services.RedisService
 	rabbitMQService     *services.RabbitMQService
 	postgresService     *services.PostgresService
@@ -92,7 +93,11 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			return nil
 		}()),
 		userActivityHandler: handlers.NewUserActivityHandler(logger, cfg, redisService, postgresService),
+		govBrCallbackHandler: handlers.NewGovBrCallbackHandler(logger, cfg, redisService),
 	}
+
+	// Load HTML templates for Gov.br auth callbacks
+	server.router.LoadHTMLGlob("templates/*.html")
 
 	// Meta direct integration (POC) — só instancia se feature flag ativa.
 	// Tokens validados de forma laxa aqui; handler faz fail-closed em runtime
@@ -236,6 +241,16 @@ func (s *Server) setupRoutes() {
 	if s.metaDispatchHandler != nil {
 		s.router.POST("/meta/dispatch", s.metaDispatchHandler.HandleDispatch)
 		s.logger.Info("Meta dispatch route registered: POST /meta/dispatch")
+	}
+
+	// Gov.br OAuth2/PKCE callback endpoint (outside /api group)
+	// Public endpoint that receives callbacks from Identidade Carioca
+	auth := s.router.Group("/auth")
+	{
+		govbr := auth.Group("/govbr")
+		{
+			govbr.GET("/callback", s.govBrCallbackHandler.HandleCallback)
+		}
 	}
 
 	// API routes group

@@ -1,6 +1,6 @@
 basePath: /
 definitions:
-  models.HistoryMessage:
+  github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.HistoryMessage:
     properties:
       content:
         example: Hello, World!
@@ -12,11 +12,11 @@ definitions:
     - content
     - role
     type: object
-  models.HistoryUpdateWebhookRequest:
+  github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.HistoryUpdateWebhookRequest:
     properties:
       messages:
         items:
-          $ref: '#/definitions/models.HistoryMessage'
+          $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.HistoryMessage'
         minItems: 1
         type: array
       metadata:
@@ -32,7 +32,7 @@ definitions:
     - messages
     - user_number
     type: object
-  models.MessageResponse:
+  github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.MessageResponse:
     description: Message processing response
     properties:
       data:
@@ -44,7 +44,7 @@ definitions:
         example: completed
         type: string
     type: object
-  models.TaskDebugInfo:
+  github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.TaskDebugInfo:
     properties:
       created_at:
         type: string
@@ -62,11 +62,11 @@ definitions:
       retry_count:
         type: integer
       status:
-        $ref: '#/definitions/models.TaskStatus'
+        $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.TaskStatus'
       updated_at:
         type: string
     type: object
-  models.TaskStatus:
+  github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.TaskStatus:
     enum:
     - pending
     - processing
@@ -78,7 +78,7 @@ definitions:
     - TaskStatusProcessing
     - TaskStatusCompleted
     - TaskStatusFailed
-  models.UserLastActivityResponse:
+  github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.UserLastActivityResponse:
     properties:
       cached:
         example: true
@@ -93,7 +93,7 @@ definitions:
         example: "5521999999999"
         type: string
     type: object
-  models.UserWebhookRequest:
+  github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.UserWebhookRequest:
     properties:
       callback_url:
         example: https://example.com/webhook/callback
@@ -126,6 +126,9 @@ definitions:
             - address              (string, opcional)
             - name                 (string, opcional — point-of-interest)
 
+          Pra interactive: Media carrega sub-shapes de WhatsApp interactive inbound
+          (button_reply, list_reply, nfm_reply/Flow submission) sem validação local.
+
           Pra unsupported/unknown: Media pode ser nil ou {} — tipo já carrega o
           signal suficiente, sem metadata útil pra MCP processar.
         type: object
@@ -141,11 +144,12 @@ definitions:
       message_type:
         description: |-
           MessageType discriminates inbound media kinds when caller (Mule, etc.) sends
-          non-text payloads. Values: "text" (default), "image", "audio", "video", "location",
-          "unsupported", "unknown". Worker uses it to enrich `Message` with an
-          [INBOUND_MEDIA] prefix so the downstream LLM can call the MCP tool
-          `register_inbound_media`. Optional; absent or "text" preserves legacy
-          behavior.
+          non-text payloads. Inbound-capable values follow the canonical registry in
+          prefeitura-rio/app-mcp-server/media-types.yaml: "text", "audio", "image",
+          "video", "location", "interactive". Gateway also accepts sentinel values
+          "unsupported" and "unknown". Worker uses it to enrich `Message` with an
+          [INBOUND_MEDIA] prefix so the downstream LLM can call MCP tools. Optional;
+          absent or "text" preserves legacy behavior.
         example: image
         type: string
       metadata:
@@ -166,7 +170,7 @@ definitions:
     required:
     - user_number
     type: object
-  models.WebhookResponse:
+  github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.WebhookResponse:
     properties:
       message_id:
         example: 123e4567-e89b-12d3-a456-426614174000
@@ -209,7 +213,7 @@ paths:
         "200":
           description: Task debug information
           schema:
-            $ref: '#/definitions/models.TaskDebugInfo'
+            $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.TaskDebugInfo'
         "400":
           description: Invalid request or message ID format
           schema:
@@ -244,7 +248,7 @@ paths:
         "200":
           description: Last activity timestamp found
           schema:
-            $ref: '#/definitions/models.UserLastActivityResponse'
+            $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.UserLastActivityResponse'
         "400":
           description: Invalid request
           schema:
@@ -280,11 +284,11 @@ paths:
         "200":
           description: Message completed or failed
           schema:
-            $ref: '#/definitions/models.MessageResponse'
+            $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.MessageResponse'
         "202":
           description: Message still processing
           schema:
-            $ref: '#/definitions/models.MessageResponse'
+            $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.MessageResponse'
         "400":
           description: Invalid request or message ID format
           schema:
@@ -314,7 +318,7 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/models.HistoryUpdateWebhookRequest'
+          $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.HistoryUpdateWebhookRequest'
       produces:
       - application/json
       responses:
@@ -347,14 +351,14 @@ paths:
         name: request
         required: true
         schema:
-          $ref: '#/definitions/models.UserWebhookRequest'
+          $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.UserWebhookRequest'
       produces:
       - application/json
       responses:
         "202":
           description: Message queued successfully
           schema:
-            $ref: '#/definitions/models.WebhookResponse'
+            $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.WebhookResponse'
         "400":
           description: Invalid request
           schema:
