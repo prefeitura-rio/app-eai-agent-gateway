@@ -205,6 +205,14 @@ func (s *Server) setupRoutes() {
 		}
 	}
 
+	authInternal := s.router.Group("/api/v1/auth")
+	{
+		govbrInternal := authInternal.Group("/govbr")
+		{
+			govbrInternal.POST("/initiate", s.govBrCallbackHandler.HandleInitiate)
+		}
+	}
+
 	// API routes group
 	api := s.router.Group("/api")
 	{
