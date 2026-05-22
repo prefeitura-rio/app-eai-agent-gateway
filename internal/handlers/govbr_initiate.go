@@ -29,18 +29,7 @@ type govBrInitiateResponse struct {
 }
 
 func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
-	// 1. Authenticate request (Bearer token)
-	authHeader := c.GetHeader("Authorization")
-	expectedToken := fmt.Sprintf("Bearer %s", h.config.GovBr.InitiateAuthToken)
-	if authHeader == "" || authHeader != expectedToken {
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":   "unauthorized",
-			"message": "Missing or invalid Authorization header",
-		})
-		return
-	}
-
-	// 2. Parse request body
+	// 1. Parse request body
 	var req govBrInitiateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
@@ -53,7 +42,7 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 		"handler":         "govbr_initiate",
 	})
 
-	// 3. Validate phone number format (E.164: 10-15 digits)
+	// 2. Validate phone number format (E.164: 10-15 digits)
 	cleaned := strings.TrimPrefix(req.UserNumber, "+")
 	isValid := len(cleaned) >= 10 && len(cleaned) <= 15
 	for _, r := range cleaned {
@@ -71,7 +60,7 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 		return
 	}
 
-	// 4. Check rate limit (5 attempts per hour per user)
+	// 3. Check rate limit (5 attempts per hour per user)
 	ctx := c.Request.Context()
 	rateKey := fmt.Sprintf("govbr_auth_rate:%s", req.UserNumber)
 	countStr, _ := h.redisService.Get(ctx, rateKey)

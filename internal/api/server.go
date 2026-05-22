@@ -42,10 +42,16 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Initialize Redis service
+	// Initialize Redis service (main)
 	redisService, err := services.NewRedisService(cfg, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize Redis service: %w", err)
+	}
+
+	// Initialize Gov.br Redis service (shared with MCP)
+	govbrRedisService, err := services.NewRedisServiceWithURL(cfg.GovBr.RedisURL, logger)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Gov.br Redis service: %w", err)
 	}
 
 	// Initialize RabbitMQ service
@@ -89,7 +95,7 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			return nil
 		}()),
 		userActivityHandler: handlers.NewUserActivityHandler(logger, cfg, redisService, postgresService),
-		govBrCallbackHandler: handlers.NewGovBrCallbackHandler(logger, cfg, redisService),
+		govBrCallbackHandler: handlers.NewGovBrCallbackHandler(logger, cfg, redisService, govbrRedisService),
 	}
 
 	// Load HTML templates for Gov.br auth callbacks

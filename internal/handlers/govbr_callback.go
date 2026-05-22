@@ -18,9 +18,10 @@ import (
 
 // GovBrCallbackHandler handles Gov.br OAuth2/PKCE callback
 type GovBrCallbackHandler struct {
-	logger       *logrus.Logger
-	config       *config.Config
-	redisService RedisServiceInterface
+	logger            *logrus.Logger
+	config            *config.Config
+	redisService      RedisServiceInterface      // Main Redis (for auth state)
+	govbrRedisService RedisServiceInterface      // Gov.br specific Redis (for tokens, shared with MCP)
 }
 
 // GovBrTokenResponse represents the token response from Identidade Carioca
@@ -47,11 +48,13 @@ func NewGovBrCallbackHandler(
 	logger *logrus.Logger,
 	config *config.Config,
 	redisService RedisServiceInterface,
+	govbrRedisService RedisServiceInterface,
 ) *GovBrCallbackHandler {
 	return &GovBrCallbackHandler{
-		logger:       logger,
-		config:       config,
-		redisService: redisService,
+		logger:            logger,
+		config:            config,
+		redisService:      redisService,
+		govbrRedisService: govbrRedisService,
 	}
 }
 
@@ -292,12 +295,12 @@ func (h *GovBrCallbackHandler) storeTokens(
 		return fmt.Errorf("failed to marshal token data: %w", err)
 	}
 
-	// Store in Redis with TTL = access token expiry
+	// Store in Gov.br Redis (shared with MCP) with TTL = access token expiry
 	tokenKey := fmt.Sprintf("govbr_token:%s", sanitizedPhone)
 	ttl := time.Duration(tokenResp.ExpiresIn) * time.Second
 
-	if err := h.redisService.Set(ctx, tokenKey, string(tokenJSON), ttl); err != nil {
-		return fmt.Errorf("failed to store token in Redis: %w", err)
+	if err := h.govbrRedisService.Set(ctx, tokenKey, string(tokenJSON), ttl); err != nil {
+		return fmt.Errorf("failed to store token in Gov.br Redis: %w", err)
 	}
 
 	h.logger.WithFields(logrus.Fields{
