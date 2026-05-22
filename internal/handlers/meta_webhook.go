@@ -39,11 +39,6 @@ import (
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
 )
 
-// dedupTTL define quanto tempo um wamid fica marcado como "já processado"
-// no Redis. Meta retenta agressivamente nos primeiros minutos; 24h é o
-// máximo nominal de uma session window do WhatsApp Business.
-const dedupTTL = 24 * time.Hour
-
 // MetaDedupChecker — interface mínima que o handler precisa pra idempotência.
 //   - `SetNX` faz claim atômico (SET key value NX EX ttl) — retorna true se
 //     claim foi adquirida (chave não existia), false se já estava ocupada.
@@ -61,20 +56,7 @@ type MetaDedupChecker interface {
 	Delete(ctx context.Context, key string) error
 }
 
-// Sentinelas pra value da claim no Redis. "inflight" significa que o
-// request original ainda está processando (não devolveu 200 ao Meta ainda),
-// então duplicatas devem retornar 503 pra Meta continuar retentando. "done"
-// significa que primeiro request já confirmou — duplicatas viram 200 sem
-// reprocessar.
-const (
-	dedupValueInflight = "inflight"
-	dedupValueDone     = "done"
-	// dedupValueNoContent — sentinela terminal no `meta:dispatch:sent:<id>`
-	// quando o dispatch decide não enviar (callback sem texto nem media
-	// envelope). Diferente de `dedupValueInflight`: concurrent retries veem
-	// "already_sent" em vez de 503, evitando ficar presos até o TTL de 24h.
-	dedupValueNoContent = "no_content"
-)
+// Constantes de dedup (TTL + sentinelas) em meta_dedup_consts.go.
 
 // MessageEnqueuer — contrato mínimo que MetaWebhookHandler precisa pra
 // publicar mensagens no MessageHandler. Existe pra permitir mock em testes.
@@ -467,19 +449,28 @@ func (h *MetaWebhookHandler) handleMessage(
 	// Sentinela: na saída, claim recebe:
 	//   - routeFailed/routeSkipped → Delete (libera, Meta retry consegue replay)
 	//   - routeOK → Set("done") com mesmo TTL (upgrade in-flight → done)
+	//
+	// Nota: NÃO usamos o pattern `success := false; defer if !success {...}` do
+	// meta_dispatch.go porque aqui temos 3 ações terminais (don't-touch /
+	// Delete / Set-done), não 2 (release / keep). `outcome routeOutcome` carrega
+	// essa cardinalidade direta; reduzir a binário perderia clareza. Ctx
+	// independente no defer pelo mesmo motivo do dispatch — cliente pode estar
+	// desconectado quando o release roda.
 	outcome := routeFailed
 	defer func() {
 		if !claimed {
 			return
 		}
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 		switch outcome {
 		case routeFailed, routeSkipped:
-			if err := h.dedup.Delete(ctx, dedupKey); err != nil {
+			if err := h.dedup.Delete(releaseCtx, dedupKey); err != nil {
 				h.logger.WithError(err).WithField("wamid", msg.ID).
 					Warn("meta_inbound: dedup release failed; retries blocked até TTL")
 			}
 		case routeOK:
-			if err := h.dedup.Set(ctx, dedupKey, dedupValueDone, dedupTTL); err != nil {
+			if err := h.dedup.Set(releaseCtx, dedupKey, dedupValueDone, dedupTTL); err != nil {
 				h.logger.WithError(err).WithField("wamid", msg.ID).
 					Warn("meta_inbound: dedup upgrade to done failed; duplicates can still be in-flight")
 			}

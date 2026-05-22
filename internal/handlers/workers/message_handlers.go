@@ -217,12 +217,19 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 							cancel()
 							if renewErr != nil {
 								failures++
-								logger.WithError(renewErr).WithField("consecutive_failures", failures).Warn("phone-lock renewal error")
-								if failures >= maxConsecutiveFailures {
-									logger.WithField("consecutive_failures", failures).Error("phone-lock renewal failed repeatedly — Redis outage suspected; lock effectively lost")
-									return
+								// Severidade graduada: 1ª/2ª falhas são quase certo
+								// blip transitório (Redis reconnect, mTLS handshake);
+								// Debug evita spam de alerta em CloudHub. 3ª já é
+								// outage prolongada (~3× renewInterval = ~30min com
+								// lockTTL=30min) — promover pra Error + return.
+								if failures < maxConsecutiveFailures {
+									logger.WithError(renewErr).WithField("consecutive_failures", failures).
+										Debug("phone-lock renewal transient error (retrying)")
+									continue
 								}
-								continue
+								logger.WithError(renewErr).WithField("consecutive_failures", failures).
+									Error("phone-lock renewal failed repeatedly — Redis outage suspected; lock effectively lost")
+								return
 							}
 							failures = 0 // reset após sucesso
 							if !ok {

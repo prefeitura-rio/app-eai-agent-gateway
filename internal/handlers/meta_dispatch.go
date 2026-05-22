@@ -33,10 +33,8 @@ import (
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
 
-// dispatchSentMarkerTTL — TTL do marker "já enviado por message_id" no
-// Redis. Pra duplicates do worker callback (e.g. HTTP timeout no client
-// fazendo retry), o handler checa esse marker antes de chamar Meta de novo.
-const dispatchSentMarkerTTL = 24 * time.Hour
+// dispatchSentMarkerTTL + dedupValue* em meta_dedup_consts.go (compartilhado
+// com meta_webhook.go — ambos os keyspaces usam o mesmo conjunto de sentinelas).
 
 // secureEqual compara duas strings em tempo constante (proteção contra
 // timing-attack em validação de secret).
@@ -287,8 +285,13 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 			// no branch acima). Concurrent retry vê valor diferente de inflight
 			// e cai no path "already_sent" 200. Se o Set falhar (Redis blip), NÃO
 			// preservamos a claim — deixar o defer liberar pra retry refazer com
-			// estado limpo, evita ficar travado em inflight por 24h.
-			if setErr := h.redis.Set(ctx, sentKey, dedupValueNoContent, dispatchSentMarkerTTL); setErr != nil {
+			// estado limpo, evita ficar travado em inflight por 24h. Ctx
+			// independente (não o request ctx do gin) pra sobreviver a cliente
+			// desconectado pós-decisão — mesma justificativa do defer release.
+			markerCtx, markerCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			setErr := h.redis.Set(markerCtx, sentKey, dedupValueNoContent, dispatchSentMarkerTTL)
+			markerCancel()
+			if setErr != nil {
 				h.logger.WithError(setErr).WithField("message_id", payload.MessageID).
 					Warn("meta_dispatch: failed to write no_content marker; releasing claim via defer")
 			} else {
@@ -314,11 +317,14 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 	// concurrent retries verem "done". Best-effort: erro no Set não bloqueia
 	// retorno (retentar 5xx faria worker retry causando o duplicate que
 	// estamos tentando evitar). Cancela o defer de release (claim agora é
-	// "done" sentinela, não in-flight).
-	if setErr := h.redis.Set(ctx, sentKey, wamid, dispatchSentMarkerTTL); setErr != nil {
+	// "done" sentinela, não in-flight). Ctx independente — mesmo motivo
+	// do defer release (cliente pode estar desconectado).
+	sentCtx, sentCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	if setErr := h.redis.Set(sentCtx, sentKey, wamid, dispatchSentMarkerTTL); setErr != nil {
 		h.logger.WithError(setErr).WithField("message_id", payload.MessageID).
 			Warn("meta_dispatch: failed to write sent marker; duplicates possible on worker retry")
 	}
+	sentCancel()
 	// Set sucesso/fail — qualquer caso, NÃO releasar a claim (queremos manter
 	// pra dedup de concurrent retries). success=true desabilita o defer.
 	success = true
