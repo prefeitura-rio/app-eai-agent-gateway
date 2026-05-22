@@ -168,6 +168,14 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			// Discrimina infra-failure de contention pura — só contention sem
 			// erro vira transient requeue; infra-failure proceeds degraded
 			// (sem lock) pra evitar hot-loop de requeue indefinido.
+			//
+			// INVARIANTE LOAD-BEARING: o `break` na branch lockErr != nil é
+			// crítico. lockStoreErr é setado APENAS uma vez; se removermos o
+			// break (e.g. pra "tentar de novo após erro"), um attempt posterior
+			// que sucede silenciosamente sobrescreveria a semântica — o branch
+			// `else if lockStoreErr != nil` (linha ~258) classifica erro de
+			// infra distintamente de contention. Não remover o break sem
+            // reavaliar essa lógica.
 			var lockStoreErr error
 			lockCtx, lockCancel := context.WithTimeout(ctx, lockTotalTimeout)
 			for attempt := 0; attempt < lockMaxAttempts; attempt++ {
@@ -175,7 +183,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				if lockErr != nil {
 					lockStoreErr = lockErr
 					logger.WithError(lockErr).Warn("phone-lock acquire error (degraded); proceeding without lock")
-					break
+					break // INVARIANTE — ver bloco acima.
 				}
 				if ok {
 					lockAcquired = true
@@ -458,8 +466,6 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		"has_previous_message": msg.PreviousMessage != nil,
 		"provider":             msg.Provider,
 	}).Info("Processing user message")
-
-	logger.Info("DEBUG: Starting processUserMessage function execution")
 
 	// Validate provider - currently only support google_agent_engine
 	if msg.Provider != "google_agent_engine" {

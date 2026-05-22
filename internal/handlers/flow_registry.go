@@ -15,6 +15,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"sort"
 	"strings"
 	"unicode"
 
@@ -77,12 +78,23 @@ func NewFlowRegistry(config, defaultService string) *FlowRegistry {
 			serviceName:        service,
 		})
 	}
+	// Ordena longest-first pra resolver match por especificidade, não por
+	// ordem de declaração. Sem isso, registry "luz:eletrica;luminaria:reparo"
+	// com flow_name "Luminária Quebrada" casaria "luz" primeiro (substring),
+	// retornando "eletrica" em vez de "reparo". Risco operacional invisível
+	// pro operador setando o registry. Longest-first elimina a armadilha:
+	// entries mais específicas (mais longas) sempre ganham.
+	sort.SliceStable(r.entries, func(i, j int) bool {
+		return len(r.entries[i].flowNameNormalized) > len(r.entries[j].flowNameNormalized)
+	})
 	return r
 }
 
 // Resolve retorna o service_name pra um flow_name. Match em ordem:
-//  1. substring case-insensitive + diacritic-insensitive (registry entry
-//     "luminaria" bate flow_name "Luminária Quebrada"). Primeiro match wins.
+//  1. substring case-insensitive + diacritic-insensitive, ENTRIES ORDENADAS
+//     LONGEST-FIRST. Entry "luminaria" bate flow_name "Luminária Quebrada".
+//     Longest-first garante que registry "luz:X;luminaria:Y" resolve
+//     "Luminária Quebrada" pra "Y" (não pra "X") — match por especificidade.
 //  2. defaultService se nada bater.
 //  3. "" se default também vazio.
 func (r *FlowRegistry) Resolve(flowName string) string {

@@ -195,6 +195,17 @@ func recipientPrefix(phone string) string {
 	return phone[:8] + "…"
 }
 
+// mediaIDPrefix mascara `meta_media_id` pra log. Não é PII strictly,
+// mas combinado com timestamps de inbound permite reconstruir
+// conversa-por-conversa. Por consistência LGPD, aplicar mesma redução.
+// "1234567890123456" → "12345678…" (8 chars + suffix).
+func mediaIDPrefix(mediaID string) string {
+	if len(mediaID) <= 8 {
+		return mediaID
+	}
+	return mediaID[:8] + "…"
+}
+
 // ─── Media outbound ──────────────────────────────────────────────────────
 //
 // Pattern Meta /messages pra media é:
@@ -521,7 +532,7 @@ func (s *MetaGraphService) LookupMedia(ctx context.Context, metaMediaID string) 
 	if err != nil {
 		s.logger.WithFields(logrus.Fields{
 			"event":         "meta_media_lookup_error",
-			"meta_media_id": metaMediaID,
+			"meta_media_id": mediaIDPrefix(metaMediaID),
 			"duration_ms":   time.Since(start).Milliseconds(),
 			"error":         err.Error(),
 		}).Error("Meta media lookup failed")
@@ -536,7 +547,7 @@ func (s *MetaGraphService) LookupMedia(ctx context.Context, metaMediaID string) 
 		}
 		s.logger.WithFields(logrus.Fields{
 			"event":         "meta_media_lookup_non_2xx",
-			"meta_media_id": metaMediaID,
+			"meta_media_id": mediaIDPrefix(metaMediaID),
 			"status_code":   resp.StatusCode,
 			"error_body":    snippet,
 		}).Error("Meta media lookup non-2xx")

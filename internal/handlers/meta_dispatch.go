@@ -163,9 +163,18 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 	//     Concurrent retries veem isso e retornam 503 (worker retenta após).
 	//   - "<wamid>": SendText completou. Concurrent retries retornam 200 sem
 	//     reenviar (idempotência efetiva).
+	//   - "done": fallback terminal quando Set(wamid) falha pós-send OK.
+	//   - "no_content": payload sem texto nem media — terminal.
 	//   - missing: ninguém tentou ainda; claim com SetNX.
 	//
 	// Sem SETNX (claimer nil), cai pra Get+Set best-effort (vulnerável a race).
+	//
+	// ORDEM: claim ANTES do metadata lookup é intencional. Inverter (lookup
+	// primeiro) abriria janela onde 2 workers concorrentes ambos passam pelo
+	// Get OK + ambos fazem SendText → duplicate ao cidadão. Trade-off: se o
+	// metadata expirou (404), o sentKey fica "inflight" até o defer liberar
+	// (~µs); concurrent retry nesse intervalo vê inflight e retorna 503, é OK
+	// porque vai retentar próximo round.
 	sentKey := "meta:dispatch:sent:" + payload.MessageID
 	// success default-false: defer libera claim em qualquer return early
 	// (failure path SendText, panic, etc.). Apenas paths que PRESERVAM
@@ -211,7 +220,18 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 		}()
 	} else {
 		// Fallback non-atomic: Get + Set. Vulnerável a race em concurrent
-		// retries, mas funciona em deployments sem RedisService.SetNX.
+		// retries — DOIS workers podem ver Get vazio e ambos fazer SendText.
+		//
+		// IMPORTANT: este branch é dead code em produção. `RedisService`
+		// (o único redis injetado em runtime via DI) satisfaz `SendClaimer`
+		// (implementa SetNX + Delete), então a type assertion em
+		// NewMetaDispatchHandler sempre seta `h.claimer != nil`. O branch só
+		// é exercitado por testes que passam `mockRedisGet` pelado.
+		// Mantido como rede de segurança defensiva caso alguém substitua o
+		// redis service no futuro. Se este código for invocado em
+		// produção, indica regressão arquitetural — log Warn loud.
+		h.logger.WithField("message_id", payload.MessageID).
+			Warn("meta_dispatch: SendClaimer NÃO disponível — operando em modo non-atomic (risco de duplicate send em concurrent retry)")
 		if existing, err := h.redis.Get(ctx, sentKey); err == nil && existing != "" {
 			h.logger.WithField("message_id", payload.MessageID).
 				Info("meta_dispatch: send marker exists (non-atomic); skipping duplicate")
@@ -451,6 +471,16 @@ func extractMessageText(data map[string]interface{}) string {
 					continue
 				}
 				if _, isStats := m["usage_statistics"]; isStats {
+					continue
+				}
+				// Defesa em profundidade: aceitar apenas message_type vazio
+				// (compat com shape legacy) ou explicitamente "assistant_message".
+				// tool_call_message, tool_return_message, reasoning_message
+				// carregam JSON cru no `content` — enviar isso pra Meta como
+				// texto vazaria internals ao cidadão. ExtractAgentMedia já lida
+				// com o caso assistant + envelope; este fallback só roda quando
+				// envelope.Type == "" (defensivo).
+				if mt, _ := m["message_type"].(string); mt != "" && mt != "assistant_message" {
 					continue
 				}
 				if c, ok := m["content"].(string); ok && c != "" {

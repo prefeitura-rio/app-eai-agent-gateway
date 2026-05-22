@@ -320,7 +320,14 @@ func (c *Consumer) handleRequeueShutdown(msg amqp.Delivery, kind, signal string,
 	logger.WithFields(logrus.Fields{"kind": kind, "signal": signal}).
 		Info("Requeue backoff interrupted by shutdown; nack+requeue")
 	if nackErr := msg.Nack(false, true); nackErr != nil {
-		logger.WithError(nackErr).Error("Failed to NACK during shutdown")
+		// Mesma análise do delivery_stuck no requeueWithDelay: NACK falhando
+		// durante shutdown deixa a delivery presa até reconnect. Log Error
+		// + event canônico pra alerting.
+		logger.WithError(nackErr).WithFields(logrus.Fields{
+			"event":  "delivery_stuck_pending_redelivery",
+			"kind":   kind,
+			"signal": signal,
+		}).Error("Failed to NACK during shutdown — delivery unacked")
 	}
 }
 
@@ -359,7 +366,15 @@ func (c *Consumer) requeueWithDelay(
 		logger.WithError(pubErr).WithField("kind", kind).
 			Error("publishRetryMessage failed; nack+requeue pra evitar loss")
 		if nackErr := msg.Nack(false, true); nackErr != nil {
-			logger.WithError(nackErr).Error("Failed to NACK after publish failure")
+			// Pior caso: NACK também falhou (Rabbit channel já caiu). Delivery
+			// fica unacked, presa até channel reset / reconnect. Rabbit redelivers
+			// automaticamente quando o channel recovers, mas em CloudHub isso
+			// pode demorar segundos. Log Error explícito + event canônico permite
+			// alerting (e.g. CloudWatch/Splunk threshold) detectar acumulo em prod.
+			logger.WithError(nackErr).WithFields(logrus.Fields{
+				"event": "delivery_stuck_pending_redelivery",
+				"kind":  kind,
+			}).Error("Failed to NACK after publish failure — delivery unacked, awaiting Rabbit channel recovery")
 		}
 		return
 	}
