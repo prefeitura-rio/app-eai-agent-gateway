@@ -162,6 +162,70 @@ func (m *mockRedisGet) GetUserLastActivityTTL(_ context.Context, _ string) (time
 }
 func (m *mockRedisGet) Ping(_ context.Context) error { return nil }
 
+// mockSendClaimer estende mockRedisGet com SetNX + Delete atômicos pra
+// satisfazer SendClaimer e exercitar o atomic-dedup path do dispatcher
+// (mockRedisGet pelado faz type-assertion falhar → cai pro fallback non-
+// atomic, e os branches do success/no_content marker não rodam).
+type mockSendClaimer struct {
+	mockRedisGet
+	setNXErr    error
+	deleteErr   error
+	setNXCalls  int
+	deleteCalls int
+}
+
+// SetNX só grava se a chave não existe. Retorna ok=true se gravou,
+// false se já existia. Match RedisService.SetNX semantics.
+func (m *mockSendClaimer) SetNX(_ context.Context, key, value string, _ time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setNXCalls++
+	if m.setNXErr != nil {
+		return false, m.setNXErr
+	}
+	if m.store == nil {
+		m.store = map[string]string{}
+	}
+	if _, exists := m.store[key]; exists {
+		return false, nil
+	}
+	m.store[key] = value
+	return true, nil
+}
+
+func (m *mockSendClaimer) Delete(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleteCalls++
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	delete(m.store, key)
+	return nil
+}
+
+// Override Set pra realmente persistir (mockRedisGet.Set é no-op stub).
+// Necessário pros testes do dedup path verem o marker `inflight` → `wamid`
+// ou `inflight` → `no_content` que o dispatcher escreve pós-claim.
+func (m *mockSendClaimer) Set(_ context.Context, key, value string, _ time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.store == nil {
+		m.store = map[string]string{}
+	}
+	m.store[key] = value
+	return nil
+}
+
+// peek lê o valor atual do store sem passar pelo Get (que retornaria
+// ErrKeyNotFound em miss). Usado pelos testes pra inspecionar o marker.
+func (m *mockSendClaimer) peek(key string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.store[key]
+	return v, ok
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
 const testDispatchSecret = "test-dispatch-secret"
@@ -606,5 +670,138 @@ func TestExtractMessageText(t *testing.T) {
 				t.Errorf("got %q want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// ─── SendClaimer path tests ─────────────────────────────────────────────
+//
+// Cobrem o atomic-dedup branch que mockRedisGet pelado nunca exercita
+// (type assertion falha → fallback non-atomic). Validam:
+//   - SETNX OK + SendText OK   → marker = wamid, claim preservada (não Delete)
+//   - SETNX OK + SendText fail → defer release Delete (sem marker)
+//   - SETNX OK + no_content    → marker = "no_content" (sentinela terminal)
+//   - SETNX false / pré-marker → 503 (inflight) | 200 already_sent (terminal)
+
+func TestDispatch_AtomicDedup_SuccessSetsMarkerToWamid(t *testing.T) {
+	sender := &mockSender{wamid: "wamid.OUT.123"}
+	claimer := &mockSendClaimer{}
+	claimer.put("task:metadata:msg-A", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-A",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá", "role": "ai"}},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 1 {
+		t.Fatalf("expected 1 send, got %d", sender.callCount())
+	}
+	if claimer.setNXCalls != 1 {
+		t.Errorf("expected 1 SETNX, got %d", claimer.setNXCalls)
+	}
+	if claimer.deleteCalls != 0 {
+		t.Errorf("expected zero Delete (claim preserved on success), got %d", claimer.deleteCalls)
+	}
+	if v, _ := claimer.peek("meta:dispatch:sent:msg-A"); v != "wamid.OUT.123" {
+		t.Errorf("expected marker=wamid.OUT.123, got %q", v)
+	}
+}
+
+func TestDispatch_AtomicDedup_SendFailureReleasesClaim(t *testing.T) {
+	sender := &mockSender{failErr: errors.New("Meta 5xx")}
+	claimer := &mockSendClaimer{}
+	claimer.put("task:metadata:msg-B", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-B",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá"}},
+		},
+	})
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", w.Code)
+	}
+	if claimer.deleteCalls != 1 {
+		t.Errorf("expected 1 Delete (claim released for retry), got %d", claimer.deleteCalls)
+	}
+	if _, ok := claimer.peek("meta:dispatch:sent:msg-B"); ok {
+		t.Errorf("expected marker cleared after defer release, but still present")
+	}
+}
+
+func TestDispatch_AtomicDedup_NoContentSetsTerminalMarker(t *testing.T) {
+	// Payload sem text e sem media envelope → no_content path. Marker
+	// deve virar "no_content" (sentinela terminal) pra concurrent retries
+	// caírem em already_sent, não inflight=503.
+	sender := &mockSender{}
+	claimer := &mockSendClaimer{}
+	claimer.put("task:metadata:msg-C", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-C",
+		Status:    "completed",
+		Data:      map[string]interface{}{"messages": []interface{}{}},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (no_content), got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends (no content), got %d", sender.callCount())
+	}
+	if claimer.deleteCalls != 0 {
+		t.Errorf("expected zero Delete (marker preserved on no_content), got %d", claimer.deleteCalls)
+	}
+	v, ok := claimer.peek("meta:dispatch:sent:msg-C")
+	if !ok {
+		t.Fatal("expected no_content marker present, got missing")
+	}
+	if v != dedupValueNoContent {
+		t.Errorf("expected marker=%q, got %q", dedupValueNoContent, v)
+	}
+}
+
+func TestDispatch_AtomicDedup_ConcurrentRetrySeesNoContentAndAcks(t *testing.T) {
+	// 1ª chamada: no_content → marker grava "no_content".
+	// 2ª chamada (concurrent retry do mesmo message_id): SETNX false →
+	// Get vê "no_content" (≠ inflight) → cai no path already_sent 200,
+	// não 503. Sem essa garantia, retries ficariam presos em 503 por 24h.
+	sender := &mockSender{}
+	claimer := &mockSendClaimer{}
+	claimer.put("task:metadata:msg-D", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w1 := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-D",
+		Status:    "completed",
+		Data:      map[string]interface{}{"messages": []interface{}{}},
+	})
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first call: expected 200, got %d", w1.Code)
+	}
+
+	w2 := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-D",
+		Status:    "completed",
+		Data:      map[string]interface{}{"messages": []interface{}{}},
+	})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("retry call: expected 200 (already_sent), got %d body=%s", w2.Code, w2.Body.String())
+	}
+	if !bytes.Contains(w2.Body.Bytes(), []byte(`"already_sent"`)) {
+		t.Errorf("retry should report already_sent, got body=%s", w2.Body.String())
+	}
+	if claimer.setNXCalls != 2 {
+		t.Errorf("expected 2 SETNX attempts, got %d", claimer.setNXCalls)
 	}
 }

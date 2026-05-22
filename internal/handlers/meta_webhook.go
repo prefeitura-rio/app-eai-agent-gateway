@@ -494,25 +494,23 @@ func (h *MetaWebhookHandler) handleMessage(
 	}
 
 	// Wire callback apenas quando TODA a chain dispatch está pronta: URL +
-	// secret + Meta credentials. Wire parcial (URL setado mas dispatch falha
-	// auth ou Meta credentials ausentes) faz Meta receber 200 do webhook
-	// inbound e a resposta jamais chega ao cidadão.
-	if h.dispatchReady() {
-		url := h.cfg.SelfCallbackURL
-		req.CallbackURL = &url
-	} else if h.cfg.SelfCallbackURL != "" {
-		// Operator configurou intenção de Meta-direct (SelfCallbackURL setado)
-		// mas chain incompleta (secret ou Meta credentials). Refusar a enqueue
-		// pra forçar Meta retry — sem isso a mensagem fica órfã no Redis.
+	// secret + Meta credentials. Sem isso a mensagem entra na fila sem callback,
+	// worker armazena resposta em Redis, e nunca volta pro cidadão (órfã).
+	// O webhook só é registrado quando META_DIRECT_ENABLED=true → qualquer
+	// chain incompleta aqui é misconfiguration; rejeita pra forçar Meta retry.
+	if !h.dispatchReady() {
 		h.logger.WithFields(logrus.Fields{
-			"event":              "meta_inbound_dispatch_not_ready",
-			"wamid":              msg.ID,
-			"has_dispatch_secret": h.cfg.DispatchSecret != "",
-			"has_meta_creds":     h.cfg.SystemUserToken != "" && h.cfg.PhoneNumberID != "",
+			"event":                 "meta_inbound_dispatch_not_ready",
+			"wamid":                 msg.ID,
+			"self_callback_url_set": h.cfg.SelfCallbackURL != "",
+			"has_dispatch_secret":   h.cfg.DispatchSecret != "",
+			"has_meta_creds":        h.cfg.SystemUserToken != "" && h.cfg.PhoneNumberID != "",
 		}).Error("Meta inbound: dispatch chain incomplete; rejecting to force Meta retry")
 		outcome = routeFailed
 		return outcome
 	}
+	url := h.cfg.SelfCallbackURL
+	req.CallbackURL = &url
 
 	// Enqueue real via MessageHandler (mesmo path do /api/v1/message/webhook/user).
 	if h.messageHandler == nil {

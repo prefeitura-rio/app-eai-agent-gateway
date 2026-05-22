@@ -145,6 +145,12 @@ func newTestHandlerWithDeps(t *testing.T, enq MessageEnqueuer, dedup MetaDedupCh
 		PhoneNumberID:   "123",
 		SystemUserToken: "tok",
 		GraphAPIVersion: "v21.0",
+		// dispatchReady() exige chain completa pra wire callback nas mensagens
+		// enfileiradas. Sem isso o webhook devolve 503 (fail-loud em vez de
+		// silenciar respostas órfãs). Helpers expõem chain válida por default;
+		// tests específicos de "chain incompleta" sobrescrevem antes de chamar.
+		SelfCallbackURL: "https://test/callback",
+		DispatchSecret:  "test-dispatch-secret",
 	}
 	return NewMetaWebhookHandler(cfg, enq, dedup, logger)
 }
@@ -162,6 +168,12 @@ func newTestHandler(t *testing.T) *MetaWebhookHandler {
 		PhoneNumberID:   "123",
 		SystemUserToken: "tok",
 		GraphAPIVersion: "v21.0",
+		// dispatchReady() exige chain completa pra wire callback nas mensagens
+		// enfileiradas. Sem isso o webhook devolve 503 (fail-loud em vez de
+		// silenciar respostas órfãs). Helpers expõem chain válida por default;
+		// tests específicos de "chain incompleta" sobrescrevem antes de chamar.
+		SelfCallbackURL: "https://test/callback",
+		DispatchSecret:  "test-dispatch-secret",
 	}
 	return NewMetaWebhookHandler(cfg, nil, nil, logger)
 }
@@ -839,6 +851,8 @@ func TestInbound_NfmReplyAppliesFlowRegistry(t *testing.T) {
 	cfg := &config.MetaConfig{
 		Enabled: true, VerifyToken: "t", AppSecret: "test-app-secret",
 		PhoneNumberID: "1", SystemUserToken: "tok", GraphAPIVersion: "v21.0",
+		SelfCallbackURL:    "https://test/callback",
+		DispatchSecret:     "test-dispatch-secret",
 		FlowRegistry:       "luminaria:reparo_luminaria;saude:agenda_saude",
 		FlowDefaultService: "default_service",
 	}

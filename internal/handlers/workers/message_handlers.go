@@ -164,10 +164,16 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				lockTotalTimeout = 10 * time.Second
 			)
 			lockAcquired := false
+			// lockStoreErr captura erro de infra (Redis down, ctx cancelado).
+			// Discrimina infra-failure de contention pura — só contention sem
+			// erro vira transient requeue; infra-failure proceeds degraded
+			// (sem lock) pra evitar hot-loop de requeue indefinido.
+			var lockStoreErr error
 			lockCtx, lockCancel := context.WithTimeout(ctx, lockTotalTimeout)
 			for attempt := 0; attempt < lockMaxAttempts; attempt++ {
 				ok, lockErr := deps.RedisService.AcquireLock(lockCtx, lockKey, lockHolder, lockTTL)
 				if lockErr != nil {
+					lockStoreErr = lockErr
 					logger.WithError(lockErr).Warn("phone-lock acquire error (degraded); proceeding without lock")
 					break
 				}
@@ -234,16 +240,28 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 						logger.WithError(relErr).Debug("phone-lock release (likely TTL expired, ok)")
 					}
 				}()
+			} else if lockStoreErr != nil {
+				// Redis indisponível: o resto do pipeline (SetTaskResult,
+				// GetCallbackURL) também depende de Redis e só loga erro
+				// sem propagar. Prosseguir aqui ACKaria a mensagem com
+				// resposta perdida. Retornar erro normal pro consumer fazer
+				// retry/DLQ accounting padrão.
+				logger.WithError(lockStoreErr).WithField("message_id", queueMsg.ID).
+					Error("phone-lock acquire failed (Redis outage); returning error for normal retry/DLQ accounting")
+				return fmt.Errorf("phone-lock acquire failed: %w", lockStoreErr)
 			} else if queueMsg.UserNumber != "" {
 				logger.WithFields(logrus.Fields{
 					"user_number": queueMsg.UserNumber,
 					"message_id":  queueMsg.ID,
-				}).Warn("phone-lock not acquired in time; backing off before requeue")
-				// Backoff antes do return pra evitar tight loop entre 2 workers
-				// disputando o mesmo phone-lock — sem isso, NACK+requeue imediato
-				// vira hot loop até timeout/DLQ. 2s alinhado ao lockTimeout típico.
-				time.Sleep(2 * time.Second)
-				return fmt.Errorf("phone-lock contention for %s; requeue", queueMsg.UserNumber)
+				}).Info("phone-lock not acquired in time; transient requeue (lock held by sibling worker)")
+				// Contention pura (sem erro de infra) é fluxo normal — outro
+				// worker tem o lock do mesmo cidadão. Retornar erro genérico
+				// aqui faria o consumer queimar retry budget e, com
+				// RABBITMQ_MAX_RETRIES=-1 (default), mandaria rajadas do mesmo
+				// número direto pra DLQ na primeira tentativa. Sinaliza
+				// transient requeue: consumer republica preservando retryCount,
+				// com backoff explícito (não tight loop).
+				return lockContentionRequeue{userNumber: queueMsg.UserNumber}
 			}
 		}
 
