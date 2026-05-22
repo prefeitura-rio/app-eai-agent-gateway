@@ -58,6 +58,12 @@ type Config struct {
 	// Habilita /meta/webhook GET (verify) + POST (inbound) + outbound via Meta Graph.
 	// Feature flag ENABLED desliga tudo se não houver tokens configurados.
 	Meta MetaConfig `mapstructure:",squash"`
+
+	// Broker — master switch arquitetural pra alternar entre "Salesforce como
+	// broker" (path legacy, Apex+Mule+SCRT) e "100% Meta direto" (Gateway broker).
+	// Source of truth dessa flag é env var via Infisical; outras camadas (Mule)
+	// consultam o endpoint /admin/broker-mode pra propagação <1min sem redeploy.
+	Broker BrokerConfig `mapstructure:",squash"`
 }
 
 // MetaConfig — credenciais e flags pra Meta WhatsApp Business Cloud API direta.
@@ -94,6 +100,27 @@ type MetaConfig struct {
 	// FlowDefaultService é o service_name fallback quando flow_name não bate
 	// nada no FlowRegistry. Match Mule `whatsapp.flow.defaultService`.
 	FlowDefaultService string `mapstructure:"META_FLOW_DEFAULT_SERVICE"`
+}
+
+// BrokerConfig — master switch do papel arquitetural do Salesforce.
+//
+// SalesforceBrokerEnabled=true (default, staging atual):
+//   - Apex Trigger + ConversationPollSchedulable + MuleCalloutQueueable ativos
+//   - Mule /sc/inbound aceita callouts do Apex
+//   - Outbound via SCRT quando hasCorrelation=true
+//   - Case creation no handoff
+//
+// SalesforceBrokerEnabled=false:
+//   - Mule /sc/inbound rejeita 503 (Apex callout vira no-op silencioso)
+//   - Outbound sempre via Meta Graph (skip SCRT mesmo com correlation)
+//   - Handoff não cria Case
+//   - Path canônico é Meta→Mule/Gateway /meta/webhook → Engine → Meta Graph
+//
+// AdminAPIToken protege o endpoint GET /admin/broker-mode (consultado pelo
+// Mule a cada 30s). Fail-closed: vazio/placeholder = endpoint sempre 401.
+type BrokerConfig struct {
+	SalesforceBrokerEnabled bool   `mapstructure:"SALESFORCE_BROKER_ENABLED"`
+	AdminAPIToken           string `mapstructure:"ADMIN_API_TOKEN"`
 }
 
 type ServerConfig struct {
@@ -322,6 +349,12 @@ func setDefaults() {
 	viper.SetDefault("META_DIRECT_ENABLED", false)
 	viper.SetDefault("META_GRAPH_API_VERSION", "v21.0")
 
+	// Broker master switch — default true preserva comportamento atual de
+	// staging (Salesforce broker ativo). Operator vira false via Infisical
+	// pra rodar 100% Meta-direto sem redeploy. Endpoint /admin/broker-mode
+	// requer ADMIN_API_TOKEN (sem default — fail-closed se não setado).
+	viper.SetDefault("SALESFORCE_BROKER_ENABLED", true)
+
 	// Core Application
 	viper.SetDefault("MAX_PARALLEL", 8)
 
@@ -499,6 +532,10 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("META_DISPATCH_SECRET")
 	_ = viper.BindEnv("META_FLOW_REGISTRY")
 	_ = viper.BindEnv("META_FLOW_DEFAULT_SERVICE")
+
+	// Broker master switch (Salesforce as broker vs 100% Meta-direct)
+	_ = viper.BindEnv("SALESFORCE_BROKER_ENABLED")
+	_ = viper.BindEnv("ADMIN_API_TOKEN")
 
 	// Gov.br OAuth2/PKCE
 	_ = viper.BindEnv("GOVBR_CLIENT_ID")

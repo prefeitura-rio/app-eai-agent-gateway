@@ -31,6 +31,9 @@ type Server struct {
 	metaWebhookHandler   *handlers.MetaWebhookHandler
 	metaDispatchHandler  *handlers.MetaDispatchHandler
 	govBrCallbackHandler *handlers.GovBrCallbackHandler
+	// adminBrokerModeHandler — expõe GET /admin/broker-mode pra Mule pollar
+	// e descobrir o estado do master switch SALESFORCE_BROKER_ENABLED.
+	adminBrokerModeHandler *handlers.AdminBrokerModeHandler
 	redisService        *services.RedisService
 	rabbitMQService     *services.RabbitMQService
 	postgresService     *services.PostgresService
@@ -150,6 +153,19 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 		}
 	}
 
+	// Admin endpoint — Mule poll a cada 30s pra descobrir broker mode.
+	// Sempre instanciado (mesmo sem ADMIN_API_TOKEN configurado, handler
+	// retorna 503 explícito em vez de 404 indeciso).
+	server.adminBrokerModeHandler = handlers.NewAdminBrokerModeHandler(&cfg.Broker, logger)
+	logger.WithFields(logrus.Fields{
+		"event":                     "broker_mode_initialized",
+		"salesforce_broker_enabled": cfg.Broker.SalesforceBrokerEnabled,
+		"admin_token_configured":    cfg.Broker.AdminAPIToken != "" && cfg.Broker.AdminAPIToken != "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES",
+	}).Info("Broker master switch loaded")
+	if cfg.Broker.AdminAPIToken == "" || cfg.Broker.AdminAPIToken == "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES" {
+		logger.Warn("ADMIN_API_TOKEN not configured; GET /admin/broker-mode will return 503 (Mule cannot poll broker state)")
+	}
+
 	// Add Google Agent Engine to health checks if available
 	if googleAgentService != nil {
 		server.healthHandler.AddChecker("google_agent_engine", googleAgentService)
@@ -262,6 +278,11 @@ func (s *Server) setupRoutes() {
 		s.router.POST("/meta/dispatch", s.metaDispatchHandler.HandleDispatch)
 		s.logger.Info("Meta dispatch route registered: POST /meta/dispatch")
 	}
+
+	// Admin — broker mode (Mule polls this every 30s pra propagar o master
+	// switch SALESFORCE_BROKER_ENABLED em <1min sem redeploy).
+	s.router.GET("/admin/broker-mode", s.adminBrokerModeHandler.HandleGet)
+	s.logger.Info("Admin route registered: GET /admin/broker-mode")
 
 	// Gov.br OAuth2/PKCE callback endpoint (outside /api group)
 	// Public endpoint that receives callbacks from Identidade Carioca
