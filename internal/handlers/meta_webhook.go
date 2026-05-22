@@ -37,6 +37,7 @@ import (
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
 
 // MetaDedupChecker — interface mínima que o handler precisa pra idempotência.
@@ -332,24 +333,36 @@ const (
 // isFromBotItself — anti-loop guard: detecta inbound originário do próprio
 // número WABA do bot. Ocorre quando outbound wamid retorna como webhook
 // (raro em produção mas observado em sandboxes); processar como mensagem
-// cidadã faria o bot se responder em loop. Match comparing msg.From com
-// metadata.PhoneNumberID OU metadata.DisplayPhoneNumber.
-func isFromBotItself(value *models.MetaChangeValue, msg *models.MetaMessage) bool {
+// cidadã faria o bot se responder em loop.
+//
+// Comparação possível APENAS via `metadata.DisplayPhoneNumber` (E.164 sem '+',
+// mesmo formato de `msg.From`). `metadata.PhoneNumberID` é id interno da WABA
+// (numérico, "1112484171945154"), nunca bate com From. Logo é um guard
+// best-effort: se Meta entregar webhook com `DisplayPhoneNumber` vazio
+// (observado em alguns sandboxes), o guard silencia — registramos Warn pra
+// dar visibilidade ao operador.
+func (h *MetaWebhookHandler) isFromBotItself(value *models.MetaChangeValue, msg *models.MetaMessage) bool {
 	if msg == nil || msg.From == "" {
 		return false
 	}
-	// PhoneNumberID é o id interno da WABA (não bate com From, que é o
-	// número E.164 sem '+'). DisplayPhoneNumber é o número formatado pra
-	// display ("5521989091014" ou "55 21 9 8909-1014"). Normalize ambos pra
-	// dígitos antes de comparar.
 	from := normalizeDigits(msg.From)
 	if from == "" {
 		return false
 	}
-	if normalizeDigits(value.Metadata.DisplayPhoneNumber) == from {
-		return true
+	displayDigits := normalizeDigits(value.Metadata.DisplayPhoneNumber)
+	if displayDigits == "" {
+		// Sandbox/edge case: Meta omitiu DisplayPhoneNumber. Sem ele não
+		// dá pra comparar E.164 confiável (PhoneNumberID é id interno).
+		// Log Warn pra operador notar se isso virar comum em prod.
+		h.logger.WithFields(logrus.Fields{
+			"event":            "meta_inbound_anti_loop_degraded",
+			"wamid":            msg.ID,
+			"phone_number_id":  value.Metadata.PhoneNumberID,
+			"reason":           "DisplayPhoneNumber vazio, guard desativado pra essa msg",
+		}).Warn("meta_inbound: anti-loop guard cannot compare; allowing message through")
+		return false
 	}
-	return false
+	return displayDigits == from
 }
 
 // normalizeDigits remove tudo exceto dígitos. "55 21 9 8909-1014" → "5521989091014".
@@ -395,7 +408,7 @@ func (h *MetaWebhookHandler) handleMessage(
 ) routeOutcome {
 	// Anti-loop guard: dropar mensagens originadas do próprio bot. Evita
 	// cascade bot→bot caso outbound vire inbound por erro de config Meta.
-	if isFromBotItself(value, msg) {
+	if h.isFromBotItself(value, msg) {
 		h.logger.WithFields(logrus.Fields{
 			"event":     "meta_inbound_self_loop_drop",
 			"wamid":     msg.ID,
@@ -422,6 +435,19 @@ func (h *MetaWebhookHandler) handleMessage(
 			// retentar; se done, primeira request deu 200 ao Meta e dup é
 			// silent skip.
 			existing, getErr := h.dedup.Get(ctx, dedupKey)
+			if errors.Is(getErr, services.ErrKeyNotFound) {
+				// Race: SETNX falhou mas o Get retornou not-found. Significa
+				// que a chave foi evicted (Redis LRU pressure) ou TTL expirou
+				// entre as duas chamadas. Comportamento semanticamente correto
+				// é assumir "sem claim" — retornar routeFailed faria Meta
+				// retentar desnecessariamente. Mas como NÃO temos a claim
+				// (SETNX deu false), seguir o fluxo de enqueue criaria
+				// inconsistência. Trate como in-flight; o Meta retry resolve
+				// no próximo round com SETNX limpo.
+				h.logger.WithField("wamid", msg.ID).
+					Warn("meta_inbound: SETNX false but Get not-found (Redis LRU evict/race); will return 503 for Meta retry")
+				return routeFailed
+			}
 			if getErr != nil {
 				h.logger.WithError(getErr).WithField("wamid", msg.ID).
 					Warn("meta_inbound: dedup Get failed; treating as in-flight (will return 503)")

@@ -20,6 +20,7 @@ import (
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
 
 // ─── Mocks ───────────────────────────────────────────────────────────────
@@ -705,6 +706,81 @@ func TestInbound_InFlightClaimReturns503(t *testing.T) {
 	h.HandleInbound(c)
 	if w.Code != http.StatusServiceUnavailable {
 		t.Errorf("expected 503 (in-flight → retry), got %d", w.Code)
+	}
+}
+
+// raceDedup força SETNX false + Get retornando services.ErrKeyNotFound,
+// simulando race onde a chave foi evicted (Redis LRU pressure / TTL expiry)
+// entre o SETNX false e o Get subsequente. RedisService real retorna esse
+// erro nesse caso; o mockDedup vanilla retorna ("", nil) e ofusca o path.
+type raceDedup struct{ mockDedup }
+
+func (r *raceDedup) SetNX(_ context.Context, _ string, _ string, _ time.Duration) (bool, error) {
+	return false, nil
+}
+func (r *raceDedup) Get(_ context.Context, _ string) (string, error) {
+	return "", services.ErrKeyNotFound
+}
+
+func TestInbound_SetNXFalseGetNotFoundReturns503(t *testing.T) {
+	// Race: SETNX retorna false (chave existia no momento da chamada) mas
+	// Get retorna ErrKeyNotFound (Redis LRU evict entre as 2 chamadas).
+	// Handler trate como in-flight → 503 pra Meta retentar; sem isso o
+	// log antigo dizia "Get failed" semanticamente incorreto e mascarava
+	// o diagnóstico.
+	enq := &mockEnqueuer{}
+	dedup := &raceDedup{}
+	h := newTestHandlerWithDeps(t, enq, dedup)
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{"id": "WABA_ID", "changes": [{"field": "messages",
+	    "value": {"messaging_product":"whatsapp",
+	      "metadata":{"display_phone_number":"21","phone_number_id":"1"},
+	      "messages":[{"from":"5500","id":"wamid.RACE","timestamp":"1","type":"text","text":{"body":"x"}}]
+	    }}]}]}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (SETNX false + Get not-found → retry), got %d", w.Code)
+	}
+	if enq.callCount() != 0 {
+		t.Errorf("expected zero enqueues, got %d", enq.callCount())
+	}
+}
+
+func TestInbound_SelfLoopGuardAllowsThroughOnEmptyDisplayPhone(t *testing.T) {
+	// Sandbox edge case: Meta entrega webhook com display_phone_number vazio.
+	// Anti-loop guard não consegue comparar E.164; logamos Warn e seguimos
+	// (não rejeitamos a mensagem). Asserta path completo: msg passa pelo
+	// guard sem block e chega no enqueue.
+	enq := &mockEnqueuer{}
+	dedup := newMockDedup()
+	h := newTestHandlerWithDeps(t, enq, dedup)
+	// from == display_phone_number normalizaria mas display vazio.
+	payload := `{
+	  "object": "whatsapp_business_account",
+	  "entry": [{"id": "WABA_ID", "changes": [{"field": "messages",
+	    "value": {"messaging_product":"whatsapp",
+	      "metadata":{"display_phone_number":"","phone_number_id":"1"},
+	      "messages":[{"from":"5521989091014","id":"wamid.NODISP","timestamp":"1","type":"text","text":{"body":"hello"}}]
+	    }}]}]}`
+	body := []byte(payload)
+	sig := signBody(t, body, "test-app-secret")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/webhook", bytes.NewReader(body))
+	c.Request.Header.Set("X-Hub-Signature-256", sig)
+	h.HandleInbound(c)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 (guard degraded but msg flows), got %d body=%s", w.Code, w.Body.String())
+	}
+	if enq.callCount() != 1 {
+		t.Errorf("expected 1 enqueue (guard didn't block), got %d", enq.callCount())
 	}
 }
 
