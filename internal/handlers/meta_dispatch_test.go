@@ -172,6 +172,9 @@ type mockSendClaimer struct {
 	deleteErr   error
 	setNXCalls  int
 	deleteCalls int
+	// failKeys: lista de keys cujo Set vai falhar (uma vez por entry).
+	// Permite simular Redis blip seletivo pra testar fallback path.
+	failKeys []string
 }
 
 // SetNX só grava se a chave não existe. Retorna ok=true se gravou,
@@ -207,9 +210,18 @@ func (m *mockSendClaimer) Delete(_ context.Context, key string) error {
 // Override Set pra realmente persistir (mockRedisGet.Set é no-op stub).
 // Necessário pros testes do dedup path verem o marker `inflight` → `wamid`
 // ou `inflight` → `no_content` que o dispatcher escreve pós-claim.
+//
+// Se key estiver em failKeys, consome a primeira entry matching e retorna
+// erro (simula Redis blip transitório que se recupera no próximo Set).
 func (m *mockSendClaimer) Set(_ context.Context, key, value string, _ time.Duration) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for i, fk := range m.failKeys {
+		if fk == key {
+			m.failKeys = append(m.failKeys[:i], m.failKeys[i+1:]...)
+			return errors.New("simulated redis blip")
+		}
+	}
 	if m.store == nil {
 		m.store = map[string]string{}
 	}
@@ -803,5 +815,77 @@ func TestDispatch_AtomicDedup_ConcurrentRetrySeesNoContentAndAcks(t *testing.T) 
 	}
 	if claimer.setNXCalls != 2 {
 		t.Errorf("expected 2 SETNX attempts, got %d", claimer.setNXCalls)
+	}
+}
+
+func TestDispatch_AtomicDedup_WamidSetFailFallbackToDone(t *testing.T) {
+	// Codex round 2 P2: quando o Set(sentKey, wamid) falha pós-send OK,
+	// tentar fallback Set(sentKey, dedupValueDone) antes de deletar a claim.
+	// Concurrent retries veem "done" → 200 already_sent (não 503 forever).
+	sender := &mockSender{wamid: "wamid.RECOVER"}
+	claimer := &mockSendClaimer{
+		// 1º Set falha (com wamid), 2º Set succeed (fallback "done").
+		failKeys: []string{"meta:dispatch:sent:msg-E"},
+	}
+	claimer.put("task:metadata:msg-E", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-E",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá", "role": "ai"}},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (send OK, marker fallback OK), got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 1 {
+		t.Errorf("expected 1 send (mensagem foi entregue), got %d", sender.callCount())
+	}
+	if claimer.deleteCalls != 0 {
+		t.Errorf("expected zero Delete (claim preserved via fallback), got %d", claimer.deleteCalls)
+	}
+	v, ok := claimer.peek("meta:dispatch:sent:msg-E")
+	if !ok {
+		t.Fatal("expected fallback marker present, got missing")
+	}
+	if v != dedupValueDone {
+		t.Errorf("expected fallback marker=%q (sentinel terminal), got %q", dedupValueDone, v)
+	}
+}
+
+func TestDispatch_AtomicDedup_WamidAndFallbackBothFailReleasesClaim(t *testing.T) {
+	// Cenário extremo (Redis fora prolongado): BOTH wamid Set AND fallback
+	// done Set falham. Claim é deletada pelo defer — aceita risco de duplicate
+	// send em concurrent retry, mas evita inflight stuck 24h. Log Error explícito.
+	sender := &mockSender{wamid: "wamid.LOST"}
+	claimer := &mockSendClaimer{
+		// Ambos Sets do sentKey falham (1º = wamid, 2º = fallback done).
+		failKeys: []string{
+			"meta:dispatch:sent:msg-F",
+			"meta:dispatch:sent:msg-F",
+		},
+	}
+	claimer.put("task:metadata:msg-F", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-F",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá"}},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (send OK), got %d body=%s", w.Code, w.Body.String())
+	}
+	if claimer.deleteCalls != 1 {
+		t.Errorf("expected 1 Delete (claim released after both Sets failed), got %d", claimer.deleteCalls)
+	}
+	if _, ok := claimer.peek("meta:dispatch:sent:msg-F"); ok {
+		t.Errorf("expected marker cleared after fallback fail + defer release")
 	}
 }

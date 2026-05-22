@@ -314,20 +314,43 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 	}
 
 	// Marca sent ANTES de devolver 200. Sobreescreve "inflight" → wamid pra
-	// concurrent retries verem "done". Best-effort: erro no Set não bloqueia
-	// retorno (retentar 5xx faria worker retry causando o duplicate que
-	// estamos tentando evitar). Cancela o defer de release (claim agora é
-	// "done" sentinela, não in-flight). Ctx independente — mesmo motivo
-	// do defer release (cliente pode estar desconectado).
+	// concurrent retries verem "done". Ctx independente — cliente pode estar
+	// desconectado quando o Set roda (mesmo motivo do defer release).
+	//
+	// Quando Set falha (Redis blip pós-send OK), NÃO podemos:
+	//   1. Deixar `success=true` cego — claim fica "inflight" 24h, retries do
+	//      callback_service caem em 503 indefinidamente e viram falso-positivo
+	//      DLQ.
+	//   2. Deletar a claim — concurrent retry chamaria Meta DE NOVO (mensagem
+	//      JÁ foi entregue ao cidadão); duplicate send é o cenário pior.
+	// Fallback: tentar Set com sentinel `dedupValueDone` (estado terminal sem
+	// o wamid específico). Concurrent retries veem "done" → 200 already_sent
+	// em vez de 503 ou re-send. Se AMBOS falharem (Redis fora prolongado),
+	// log Error + claim é deletada pelo defer — aceita o risco de duplicate
+	// como cenário extremo (operador atua via Redis flush manual).
 	sentCtx, sentCancel := context.WithTimeout(context.Background(), 2*time.Second)
-	if setErr := h.redis.Set(sentCtx, sentKey, wamid, dispatchSentMarkerTTL); setErr != nil {
-		h.logger.WithError(setErr).WithField("message_id", payload.MessageID).
-			Warn("meta_dispatch: failed to write sent marker; duplicates possible on worker retry")
-	}
+	markerErr := h.redis.Set(sentCtx, sentKey, wamid, dispatchSentMarkerTTL)
 	sentCancel()
-	// Set sucesso/fail — qualquer caso, NÃO releasar a claim (queremos manter
-	// pra dedup de concurrent retries). success=true desabilita o defer.
-	success = true
+	if markerErr != nil {
+		fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		fallbackErr := h.redis.Set(fallbackCtx, sentKey, dedupValueDone, dispatchSentMarkerTTL)
+		fallbackCancel()
+		if fallbackErr != nil {
+			h.logger.WithFields(logrus.Fields{
+				"message_id":   payload.MessageID,
+				"wamid":        wamid,
+				"marker_err":   markerErr.Error(),
+				"fallback_err": fallbackErr.Error(),
+			}).Error("meta_dispatch: BOTH wamid Set AND fallback 'done' Set failed; claim será deletada pelo defer — RISCO de duplicate send se Meta retentar callback")
+			// success continua false → defer Delete libera a claim.
+		} else {
+			h.logger.WithError(markerErr).WithField("message_id", payload.MessageID).
+				Warn("meta_dispatch: wamid Set failed; fallback 'done' marker armazenado — concurrent retries verão already_sent")
+			success = true
+		}
+	} else {
+		success = true
+	}
 
 	h.logger.WithFields(logrus.Fields{
 		"event":      "meta_dispatch_sent",
