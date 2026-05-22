@@ -23,11 +23,12 @@ type Server struct {
 	logger              *logrus.Logger
 	router              *gin.Engine
 	httpServer          *http.Server
-	healthHandler       *handlers.HealthHandler
-	messageHandler      *handlers.MessageHandler
-	userActivityHandler *handlers.UserActivityHandler
+	healthHandler        *handlers.HealthHandler
+	messageHandler       *handlers.MessageHandler
+	userActivityHandler  *handlers.UserActivityHandler
 	govBrCallbackHandler *handlers.GovBrCallbackHandler
-	redisService        *services.RedisService
+	govBrInitiateHandler *handlers.GovBrInitiateHandler
+	redisService         *services.RedisService
 	rabbitMQService     *services.RabbitMQService
 	postgresService     *services.PostgresService
 	otelService         *services.OTelService // Optional OTel service
@@ -88,8 +89,9 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			}
 			return nil
 		}()),
-		userActivityHandler: handlers.NewUserActivityHandler(logger, cfg, redisService, postgresService),
+		userActivityHandler:  handlers.NewUserActivityHandler(logger, cfg, redisService, postgresService),
 		govBrCallbackHandler: handlers.NewGovBrCallbackHandler(logger, cfg, redisService),
+		govBrInitiateHandler: handlers.NewGovBrInitiateHandler(logger, cfg, redisService),
 	}
 
 	// Load HTML templates for Gov.br auth callbacks
@@ -218,6 +220,15 @@ func (s *Server) setupRoutes() {
 				message.GET("/response", s.messageHandler.HandleMessageResponse)
 				message.GET("/debug/task-status", s.messageHandler.HandleDebugTaskStatus)
 				message.GET("/last-activity", s.userActivityHandler.HandleLastActivity)
+			}
+
+			// Gov.br authentication endpoints
+			authGroup := v1.Group("/auth")
+			{
+				govbr := authGroup.Group("/govbr")
+				{
+					govbr.POST("/initiate", s.govBrInitiateHandler.HandleInitiate)
+				}
 			}
 
 			// Note: Agent management endpoints removed - were Letta-specific

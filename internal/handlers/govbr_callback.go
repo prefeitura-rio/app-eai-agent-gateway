@@ -309,25 +309,5 @@ func (h *GovBrCallbackHandler) storeTokens(
 	return nil
 }
 
-// sanitizePhoneNumber removes non-numeric characters from phone number
-//
-// Security: Prevents Redis key injection by ensuring only digits
-func sanitizePhoneNumber(phone string) string {
-	var result strings.Builder
-	for _, r := range phone {
-		if r >= '0' && r <= '9' {
-			result.WriteRune(r)
-		}
-	}
-	return result.String()
-}
-
-// maskPhoneNumber masks part of phone number for logging
-//
-// Example: +5521999999999 -> +5521999***
-func maskPhoneNumber(phone string) string {
-	if len(phone) < 8 {
-		return "****"
-	}
-	return phone[:len(phone)-6] + "***"
-}
+// Note: sanitizePhoneNumber and maskPhoneNumber functions are now in govbr_helpers.go
+// and shared between govbr_initiate.go and govbr_callback.go handlers
