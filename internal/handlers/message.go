@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -846,14 +847,31 @@ func validateCallbackURL(callbackURL string) error {
 		return fmt.Errorf("callback URL must use HTTP or HTTPS protocol")
 	}
 
-	// Check for localhost and private IP addresses
+	// Check for localhost (string-form). IP-form loopback ("127.0.0.1", "::1",
+	// "::ffff:127.0.0.1", "::ffff:7f00:1") é coberto pelo `IsLoopback()` no
+	// bloco abaixo — string-equality cobre só o caso "localhost" (DNS).
 	host := parsedURL.Hostname()
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+	if strings.EqualFold(host, "localhost") {
 		return fmt.Errorf("callback URL cannot use localhost")
 	}
 
-	// Check if host is an IP address and if it's private
-	if ip := net.ParseIP(host); ip != nil {
+	// Strip IPv6 zone index ("fe80::1%eth0" → "fe80::1") antes do parse —
+	// net.ParseIP retorna nil em string com zone. Sem stripping, atacante
+	// pode bypass via `http://[::1%25lo0]/` (URL-encoded %25 vira %) que o
+	// Go http.Client resolve pra IPv6 loopback via zone lo0. Hostname() já
+	// devolve sem `%25`, então só temos que tratar o `%` literal.
+	ipStr := host
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		ipStr = host[:i]
+	}
+	// Check if host is an IP address. Tratamento robusto a IPv4-mapped IPv6
+	// (`::ffff:127.0.0.1`, `::ffff:10.0.0.1`) — net.ParseIP normaliza pra
+	// IPv4 atrás, mas string match em "127.0.0.1" não captura.
+	// IsLoopback/IsUnspecified/IsPrivate cobrem todas as formas.
+	if ip := net.ParseIP(ipStr); ip != nil {
+		if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+			return fmt.Errorf("callback URL cannot use loopback, unspecified, or link-local IP")
+		}
 		if isPrivateIP(ip) {
 			return fmt.Errorf("callback URL cannot use private IP addresses")
 		}
@@ -862,8 +880,17 @@ func validateCallbackURL(callbackURL string) error {
 	return nil
 }
 
-// isPrivateIP checks if an IP address is in a private range
+// isPrivateIP checks if an IP address is in a private range.
+//
+// Normaliza IPv4-mapped IPv6 (`::ffff:a.b.c.d`) antes do match — sem isso,
+// atacante poderia bypass via `http://[::ffff:10.0.0.1]/...` (Go transport
+// resolve pro IPv4 atrás, mas o CIDR match em `10.0.0.0/8` falha porque
+// `network.Contains(::ffff:10.0.0.1)` retorna false). Stdlib `net.IP.To4()`
+// devolve o IPv4 puro se disponível; caso contrário mantém o IPv6 original.
 func isPrivateIP(ip net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
 	privateRanges := []string{
 		"10.0.0.0/8",
 		"172.16.0.0/12",

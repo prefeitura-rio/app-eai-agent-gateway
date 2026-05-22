@@ -219,15 +219,27 @@ func (h *MetaWebhookHandler) HandleInbound(c *gin.Context) {
 // pronta: callback URL setado + dispatch secret válido + Meta credentials.
 // Se incompleto, MetaWebhookHandler entra em "polling-only mode" (não wire
 // callback) em vez de devolver 200 ao Meta e silenciar a resposta depois.
+//
+// Placeholder `REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES` é tratado como vazio
+// em TODOS os campos sensíveis. Sem isso, operador que esquece de hidratar
+// uma das variáveis no Infisical/SecretManager teria a chain "passando" no
+// gate mas falhando no runtime quando Meta Graph rejeita Bearer token literal
+// "REPLACE_...".
 func (h *MetaWebhookHandler) dispatchReady() bool {
-	if h.cfg.SelfCallbackURL == "" {
+	if h.cfg.SelfCallbackURL == "" ||
+		h.cfg.SelfCallbackURL == "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES" {
 		return false
 	}
 	if h.cfg.DispatchSecret == "" ||
 		h.cfg.DispatchSecret == "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES" {
 		return false
 	}
-	if h.cfg.SystemUserToken == "" || h.cfg.PhoneNumberID == "" {
+	if h.cfg.SystemUserToken == "" ||
+		h.cfg.SystemUserToken == "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES" {
+		return false
+	}
+	if h.cfg.PhoneNumberID == "" ||
+		h.cfg.PhoneNumberID == "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES" {
 		return false
 	}
 	return true
@@ -309,10 +321,17 @@ func (h *MetaWebhookHandler) processEntries(
 
 				// Persistir delivery status no Redis pra Engine/operadores
 				// poderem consultar quando handoff humano precisa saber se
-				// notice chegou. Best-effort; falha não bloqueia 200 ao Meta.
+				// notice chegou. Best-effort; falha não bloqueia 200 ao Meta —
+				// log Warn pra rastreabilidade caso Redis blip degrade o trail.
 				if h.dedup != nil && st.ID != "" {
 					key := "meta:status:" + st.ID
-					_ = h.dedup.Set(ctx, key, st.Status, dedupTTL)
+					if err := h.dedup.Set(ctx, key, st.Status, dedupTTL); err != nil {
+						h.logger.WithError(err).WithFields(logrus.Fields{
+							"event":  "meta_status_persist_failed",
+							"wamid":  st.ID,
+							"status": st.Status,
+						}).Warn("meta_inbound: failed to persist status callback (best-effort)")
+					}
 				}
 			}
 		}

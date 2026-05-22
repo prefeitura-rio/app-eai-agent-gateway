@@ -889,3 +889,89 @@ func TestDispatch_AtomicDedup_WamidAndFallbackBothFailReleasesClaim(t *testing.T
 		t.Errorf("expected marker cleared after fallback fail + defer release")
 	}
 }
+
+// raceClaimer simula o caso onde SETNX retorna false (chave existe no
+// momento) mas o Get subsequente vê a chave evicted (Redis LRU pressure /
+// TTL expiry no microsegundo entre as 2 chamadas). RedisService real
+// retorna `ErrKeyNotFound` nesse caso — mockSendClaimer vanilla retornaria
+// `("", nil)` que falsamente cairia no path "already sent" com wamid vazio.
+type raceClaimer struct{ mockSendClaimer }
+
+func (r *raceClaimer) SetNX(_ context.Context, _ string, _ string, _ time.Duration) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setNXCalls++
+	return false, nil
+}
+
+func (r *raceClaimer) Get(_ context.Context, _ string) (string, error) {
+	return "", services.ErrKeyNotFound
+}
+
+func TestDispatch_AtomicDedup_SetNXFalseGetNotFoundReturns503(t *testing.T) {
+	// Race: SETNX false (sinaliza "chave existia") + Get retorna ErrKeyNotFound
+	// (chave evicted entre as 2 chamadas). SEM o fix, handler caía no path
+	// "already_sent" com wamid vazio e 200 — mascarava o caso e o cidadão
+	// não recebia resposta. COM fix: retorna 503 pra worker retentar com
+	// SETNX limpo no próximo round.
+	sender := &mockSender{}
+	claimer := &raceClaimer{}
+	claimer.put("task:metadata:msg-RACE", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-RACE",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá"}},
+		},
+	})
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (SETNX false + Get not-found → retry), got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends (claim state lost), got %d", sender.callCount())
+	}
+}
+
+// transientGetClaimer simula Redis blip onde SETNX false + Get retorna erro
+// não-sentinela (e.g. connection timeout). RedisService real propagaria o erro.
+// Handler deve cair em 503 (vs 200 silencioso).
+type transientGetClaimer struct{ mockSendClaimer }
+
+func (r *transientGetClaimer) SetNX(_ context.Context, _ string, _ string, _ time.Duration) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setNXCalls++
+	return false, nil
+}
+
+func (r *transientGetClaimer) Get(_ context.Context, _ string) (string, error) {
+	return "", errors.New("redis: connection refused")
+}
+
+func TestDispatch_AtomicDedup_SetNXFalseGetErrorReturns503(t *testing.T) {
+	// SETNX false + Get com erro transient (Redis blip): handler deve
+	// retornar 503 pra worker retentar. Sem isso, erro era engolido pelo `_`
+	// e o caller tinha 200 silencioso.
+	sender := &mockSender{}
+	claimer := &transientGetClaimer{}
+	claimer.put("task:metadata:msg-TRGET", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-TRGET",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá"}},
+		},
+	})
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (Get error → retry), got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends (lookup failed), got %d", sender.callCount())
+	}
+}

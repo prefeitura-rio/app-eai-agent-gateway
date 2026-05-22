@@ -1065,3 +1065,91 @@ func TestValidateSignature_EmptySecretFailsClosed(t *testing.T) {
 	}
 }
 
+// ────────────────────────────────────────────────────────────
+// dispatchReady — placeholder handling
+// ────────────────────────────────────────────────────────────
+
+func TestDispatchReady_RejectsPlaceholderInAnyField(t *testing.T) {
+	// Operador pode esquecer de hidratar um secret no Infisical. Sem o
+	// placeholder gate em TODOS os 4 campos, dispatchReady() retornaria true
+	// e o webhook tentaria autenticar Meta Graph com Bearer token literal
+	// "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES" — falha runtime opaca, não
+	// gate de startup.
+	const placeholder = "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES"
+	base := &config.MetaConfig{
+		Enabled:         true,
+		VerifyToken:     "vt",
+		AppSecret:       "secret",
+		SelfCallbackURL: "https://gateway/dispatch",
+		DispatchSecret:  "ds",
+		SystemUserToken: "tok",
+		PhoneNumberID:   "pid",
+		GraphAPIVersion: "v21.0",
+	}
+	gin.SetMode(gin.TestMode)
+	logger := logrus.New()
+	logger.SetOutput(stdio.Discard)
+
+	// Sanity: base é completo, dispatchReady true.
+	hOK := NewMetaWebhookHandler(base, nil, nil, logger)
+	if !hOK.dispatchReady() {
+		t.Fatal("base config should be dispatchReady; check helper")
+	}
+
+	cases := []struct {
+		field string
+		mut   func(*config.MetaConfig)
+	}{
+		{"SelfCallbackURL", func(c *config.MetaConfig) { c.SelfCallbackURL = placeholder }},
+		{"DispatchSecret", func(c *config.MetaConfig) { c.DispatchSecret = placeholder }},
+		{"SystemUserToken", func(c *config.MetaConfig) { c.SystemUserToken = placeholder }},
+		{"PhoneNumberID", func(c *config.MetaConfig) { c.PhoneNumberID = placeholder }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			cfg := *base // copy
+			tc.mut(&cfg)
+			h := NewMetaWebhookHandler(&cfg, nil, nil, logger)
+			if h.dispatchReady() {
+				t.Errorf("dispatchReady() should return false when %s is placeholder", tc.field)
+			}
+		})
+	}
+}
+
+func TestDispatchReady_RejectsEmptyInAnyField(t *testing.T) {
+	base := &config.MetaConfig{
+		Enabled:         true,
+		VerifyToken:     "vt",
+		AppSecret:       "secret",
+		SelfCallbackURL: "https://gateway/dispatch",
+		DispatchSecret:  "ds",
+		SystemUserToken: "tok",
+		PhoneNumberID:   "pid",
+		GraphAPIVersion: "v21.0",
+	}
+	gin.SetMode(gin.TestMode)
+	logger := logrus.New()
+	logger.SetOutput(stdio.Discard)
+
+	cases := []struct {
+		field string
+		mut   func(*config.MetaConfig)
+	}{
+		{"SelfCallbackURL", func(c *config.MetaConfig) { c.SelfCallbackURL = "" }},
+		{"DispatchSecret", func(c *config.MetaConfig) { c.DispatchSecret = "" }},
+		{"SystemUserToken", func(c *config.MetaConfig) { c.SystemUserToken = "" }},
+		{"PhoneNumberID", func(c *config.MetaConfig) { c.PhoneNumberID = "" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.field, func(t *testing.T) {
+			cfg := *base
+			tc.mut(&cfg)
+			h := NewMetaWebhookHandler(&cfg, nil, nil, logger)
+			if h.dispatchReady() {
+				t.Errorf("dispatchReady() should return false when %s is empty", tc.field)
+			}
+		})
+	}
+}
+

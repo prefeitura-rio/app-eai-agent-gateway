@@ -175,7 +175,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			// que sucede silenciosamente sobrescreveria a semântica — o branch
 			// `else if lockStoreErr != nil` (linha ~258) classifica erro de
 			// infra distintamente de contention. Não remover o break sem
-            // reavaliar essa lógica.
+			// reavaliar essa lógica.
 			var lockStoreErr error
 			lockCtx, lockCancel := context.WithTimeout(ctx, lockTotalTimeout)
 			for attempt := 0; attempt < lockMaxAttempts; attempt++ {

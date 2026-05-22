@@ -42,8 +42,13 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "initiate secret not configured"})
 		return
 	}
+	// SHA256 ambos antes de subtle.ConstantTimeCompare: length-uniforme evita
+	// timing leak via length mismatch (ConstantTimeCompare retorna 0 imediato
+	// se lens diferem). Hashing aplaina pra 32 bytes em todos os casos.
 	provided := c.GetHeader(govBrInitiateSecretHeader)
-	if provided == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+	providedHash := sha256.Sum256([]byte(provided))
+	expectedHash := sha256.Sum256([]byte(expected))
+	if subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) != 1 {
 		h.logger.WithField("event", "govbr_initiate_unauthorized").Warn("govbr_initiate: missing/invalid secret header")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return

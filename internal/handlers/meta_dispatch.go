@@ -19,6 +19,7 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -38,8 +39,15 @@ import (
 
 // secureEqual compara duas strings em tempo constante (proteção contra
 // timing-attack em validação de secret).
+//
+// Hash SHA256 ambos antes do compare pra eliminar leak de length:
+// `subtle.ConstantTimeCompare` retorna 0 imediatamente em length mismatch,
+// permitindo atacante deduzir comprimento do secret esperado via timing.
+// Hashing aplaina pra 32 bytes em todos os casos.
 func secureEqual(a, b string) bool {
-	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+	ah := sha256.Sum256([]byte(a))
+	bh := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ah[:], bh[:]) == 1
 }
 
 // MetaSender — contrato pra dispatcher. MetaGraphService satisfaz nativamente.
@@ -114,8 +122,11 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "dispatch secret not configured"})
 		return
 	}
+	// Compare uniforme em TODOS os paths (incluindo header vazio) via secureEqual.
+	// SHA256 dentro de secureEqual aplaina length, e o compare é constant-time.
+	// Early-return em provided=="" introduzia timing diff distinguível.
 	provided := c.GetHeader(dispatchSecretHeader)
-	if provided == "" || !secureEqual(provided, h.secret) {
+	if !secureEqual(provided, h.secret) {
 		h.logger.WithField("event", "meta_dispatch_unauthorized").Warn("Meta dispatch: invalid or missing secret header")
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -193,7 +204,26 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 			return
 		}
 		if !ok {
-			existing, _ := h.redis.Get(ctx, sentKey)
+			// SETNX false: a chave existia no momento da chamada. Inspecionar
+			// estado via Get pra discriminar in-flight / terminal / evict.
+			existing, getErr := h.redis.Get(ctx, sentKey)
+			if errors.Is(getErr, services.ErrKeyNotFound) {
+				// Race: chave evicted (Redis LRU pressure) ou TTL expirou
+				// entre SETNX false e Get. Sem claim e sem estado terminal —
+				// retornar 503 pra worker retentar; SETNX limpo no próximo
+				// round resolve. Sem isso, 200 com wamid vazio mascara o caso
+				// e o cidadão não recebe a resposta.
+				h.logger.WithField("message_id", payload.MessageID).
+					Warn("meta_dispatch: SETNX false but Get not-found (Redis LRU evict/race); will return 503 for retry")
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "claim state lost; retry"})
+				return
+			}
+			if getErr != nil {
+				h.logger.WithError(getErr).WithField("message_id", payload.MessageID).
+					Error("meta_dispatch: SETNX false + Get failed (Redis transient); will return 503")
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "redis lookup failed"})
+				return
+			}
 			if existing == dedupValueInflight {
 				h.logger.WithField("message_id", payload.MessageID).
 					Info("meta_dispatch: send in-flight; concurrent request, worker should retry")

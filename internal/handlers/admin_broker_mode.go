@@ -9,6 +9,7 @@
 package handlers
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
 	"time"
@@ -47,6 +48,15 @@ func NewAdminBrokerModeHandler(cfg *config.BrokerConfig, logger *logrus.Logger) 
 //	200 → {"salesforce_broker_enabled": true, "updated_at": "2026-05-22T..."}
 //	401 → token ausente/inválido (fail-closed)
 //	503 → endpoint sem token configurado (não habilitado neste deploy)
+//
+// Defesa em camadas contra timing attack:
+//  1. SHA256 dos dois operandos antes do compare — garante length-uniforme
+//     (subtle.ConstantTimeCompare retorna 0 imediatamente em length mismatch,
+//     leaking length do token expected). Atacante observando duração do
+//     handshake pode brute-force length antes do byte-by-byte ataque.
+//  2. subtle.ConstantTimeCompare sobre os hashes (sempre 32 bytes).
+//  3. Compare uniforme em TODOS os paths (incluindo header vazio) — sem
+//     early-return precoce que distinguia "missing" de "wrong".
 func (h *AdminBrokerModeHandler) HandleGet(c *gin.Context) {
 	if h.cfg.AdminAPIToken == "" || h.cfg.AdminAPIToken == "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES" {
 		h.logger.Warn("admin_broker_mode: ADMIN_API_TOKEN not configured; endpoint disabled")
@@ -54,14 +64,19 @@ func (h *AdminBrokerModeHandler) HandleGet(c *gin.Context) {
 		return
 	}
 	provided := c.GetHeader(adminTokenHeader)
-	if provided == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing X-Admin-Token"})
-		return
-	}
-	if subtle.ConstantTimeCompare([]byte(provided), []byte(h.cfg.AdminAPIToken)) != 1 {
-		h.logger.WithField("event", "admin_broker_mode_unauthorized").
-			Warn("admin_broker_mode: token mismatch")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid X-Admin-Token"})
+	providedHash := sha256.Sum256([]byte(provided))
+	expectedHash := sha256.Sum256([]byte(h.cfg.AdminAPIToken))
+	if subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) != 1 {
+		// Loga separadamente provided vazio (lib client desconfigurado) vs
+		// preenchido (provavelmente attempt malicioso); preserva observability
+		// sem reintroduzir o early-return de cima.
+		reason := "missing X-Admin-Token"
+		if provided != "" {
+			reason = "invalid X-Admin-Token"
+			h.logger.WithField("event", "admin_broker_mode_unauthorized").
+				Warn("admin_broker_mode: token mismatch")
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": reason})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

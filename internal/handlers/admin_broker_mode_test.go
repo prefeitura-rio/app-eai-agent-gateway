@@ -128,3 +128,46 @@ func TestAdminBrokerMode_PlaceholderTokenReturns503(t *testing.T) {
 		t.Errorf("expected 503 (placeholder treated as unconfigured), got %d", w.Code)
 	}
 }
+
+func TestAdminBrokerMode_EmptyHeaderReturns401WithSpecificMessage(t *testing.T) {
+	// Constant-time path: header vazio cai no compare, retorna 401 com
+	// reason="missing X-Admin-Token" (vs "invalid X-Admin-Token" pra valor
+	// errado). Garante diferenciação semântica preservada pós-fix de timing leak.
+	h := newAdminHandler(t, config.BrokerConfig{
+		SalesforceBrokerEnabled: true,
+		AdminAPIToken:           "sec",
+	})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/admin/broker-mode", nil)
+	// sem header (provided == "")
+	h.HandleGet(c)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if got, _ := resp["error"].(string); got != "missing X-Admin-Token" {
+		t.Errorf("expected error=missing X-Admin-Token, got %q", got)
+	}
+}
+
+func TestAdminBrokerMode_WrongTokenReturns401WithSpecificMessage(t *testing.T) {
+	h := newAdminHandler(t, config.BrokerConfig{
+		SalesforceBrokerEnabled: true,
+		AdminAPIToken:           "sec",
+	})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/admin/broker-mode", nil)
+	c.Request.Header.Set(adminTokenHeader, "wrong")
+	h.HandleGet(c)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	var resp map[string]interface{}
+	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if got, _ := resp["error"].(string); got != "invalid X-Admin-Token" {
+		t.Errorf("expected error=invalid X-Admin-Token, got %q", got)
+	}
+}
