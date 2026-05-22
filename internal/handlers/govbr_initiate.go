@@ -31,7 +31,7 @@ type govBrInitiateResponse struct {
 func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 	// 1. Authenticate request (Bearer token)
 	authHeader := c.GetHeader("Authorization")
-	expectedToken := fmt.Sprintf("Bearer %s", h.config.Callback.AuthToken)
+	expectedToken := fmt.Sprintf("Bearer %s", h.config.GovBr.InitiateAuthToken)
 	if authHeader == "" || authHeader != expectedToken {
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":   "unauthorized",
