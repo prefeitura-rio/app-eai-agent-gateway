@@ -128,6 +128,17 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			"phone_id_set":      cfg.Meta.PhoneNumberID != "",
 			"graph_api_version": cfg.Meta.GraphAPIVersion,
 		}).Info("Meta direct integration enabled")
+		// Fail-loud no startup quando flag liga mas chain outbound está
+		// incompleta — sem esse warn, descobre-se só em produção quando
+		// o webhook devolve 503 pra todo inbound (meta_webhook.go:495).
+		if cfg.Meta.DispatchSecret == "" || cfg.Meta.SystemUserToken == "" || cfg.Meta.PhoneNumberID == "" {
+			logger.WithFields(logrus.Fields{
+				"event":                 "meta_direct_chain_incomplete",
+				"dispatch_secret_set":   cfg.Meta.DispatchSecret != "",
+				"system_user_token_set": cfg.Meta.SystemUserToken != "",
+				"phone_id_set":          cfg.Meta.PhoneNumberID != "",
+			}).Warn("META_DIRECT_ENABLED=true but outbound chain is incomplete; /meta/webhook will reject inbound with 503 until configured")
+		}
 	}
 
 	// Add Google Agent Engine to health checks if available

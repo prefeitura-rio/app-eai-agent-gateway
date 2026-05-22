@@ -169,7 +169,14 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 	//
 	// Sem SETNX (claimer nil), cai pra Get+Set best-effort (vulnerável a race).
 	sentKey := "meta:dispatch:sent:" + payload.MessageID
-	claimed := false
+	// success default-false: defer libera claim em qualquer return early
+	// (failure path SendText, panic, etc.). Apenas paths que PRESERVAM
+	// a claim (Set wamid bem-sucedido OU no_content — significa "vimos
+	// esse message_id e decidimos não enviar; concurrent retry deve ver
+	// inflight e ser deduped") setam success=true antes do return.
+	// Padrão é mais defensivo a edits futuros que adicionariam novas
+	// branches de retorno entre o claim e o Set final.
+	success := false
 	if h.claimer != nil {
 		ok, err := h.claimer.SetNX(ctx, sentKey, dedupValueInflight, dispatchSentMarkerTTL)
 		if err != nil {
@@ -191,16 +198,15 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"status": "already_sent", "wamid": existing})
 			return
 		}
-		claimed = true
-		// Release claim em caso de falha no SendText abaixo. Sucesso reescreve
-		// o value pro wamid (pra concurrent retries verem "done").
+		// Release claim em failure paths via defer com ctx independente
+		// (request ctx do gin pode estar cancelado quando o defer roda).
 		defer func() {
-			if !claimed {
+			if success {
 				return
 			}
-			// claimed=true significa que NÃO chegamos no Set final (SendText
-			// falhou ou algo entre claim e Set). Liberar pra Meta retentar.
-			if err := h.claimer.Delete(ctx, sentKey); err != nil {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if err := h.claimer.Delete(releaseCtx, sentKey); err != nil {
 				h.logger.WithError(err).WithField("message_id", payload.MessageID).
 					Warn("meta_dispatch: failed to release claim on failure path")
 			}
@@ -275,6 +281,19 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 		if body == "" {
 			h.logger.WithField("message_id", payload.MessageID).
 				Warn("meta_dispatch: no text content and no media envelope; nothing to send")
+			// Sobreescrever marker `inflight` → sentinela terminal ("no_content")
+			// pra dedupar concurrent retries do mesmo message_id sem deixá-los
+			// presos em 503 até o TTL de 24h (`existing == dedupValueInflight`
+			// no branch acima). Concurrent retry vê valor diferente de inflight
+			// e cai no path "already_sent" 200. Se o Set falhar (Redis blip), NÃO
+			// preservamos a claim — deixar o defer liberar pra retry refazer com
+			// estado limpo, evita ficar travado em inflight por 24h.
+			if setErr := h.redis.Set(ctx, sentKey, dedupValueNoContent, dispatchSentMarkerTTL); setErr != nil {
+				h.logger.WithError(setErr).WithField("message_id", payload.MessageID).
+					Warn("meta_dispatch: failed to write no_content marker; releasing claim via defer")
+			} else {
+				success = true
+			}
 			c.JSON(http.StatusOK, gin.H{"status": "no_content"})
 			return
 		}
@@ -301,8 +320,8 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 			Warn("meta_dispatch: failed to write sent marker; duplicates possible on worker retry")
 	}
 	// Set sucesso/fail — qualquer caso, NÃO releasar a claim (queremos manter
-	// pra dedup de concurrent retries). Flag claimed=false desabilita o defer.
-	claimed = false
+	// pra dedup de concurrent retries). success=true desabilita o defer.
+	success = true
 
 	h.logger.WithFields(logrus.Fields{
 		"event":      "meta_dispatch_sent",

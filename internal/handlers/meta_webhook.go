@@ -69,6 +69,11 @@ type MetaDedupChecker interface {
 const (
 	dedupValueInflight = "inflight"
 	dedupValueDone     = "done"
+	// dedupValueNoContent — sentinela terminal no `meta:dispatch:sent:<id>`
+	// quando o dispatch decide não enviar (callback sem texto nem media
+	// envelope). Diferente de `dedupValueInflight`: concurrent retries veem
+	// "already_sent" em vez de 503, evitando ficar presos até o TTL de 24h.
+	dedupValueNoContent = "no_content"
 )
 
 // MessageEnqueuer — contrato mínimo que MetaWebhookHandler precisa pra

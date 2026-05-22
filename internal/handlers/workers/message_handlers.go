@@ -196,6 +196,8 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				go func() {
 					ticker := time.NewTicker(renewInterval)
 					defer ticker.Stop()
+					const maxConsecutiveFailures = 3
+					failures := 0
 					for {
 						select {
 						case <-doneCh:
@@ -208,8 +210,16 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 							ok, renewErr := deps.RedisService.RenewLock(renewCtx, lockKey, lockHolder, lockTTL)
 							cancel()
 							if renewErr != nil {
-								logger.WithError(renewErr).Debug("phone-lock renewal error (continuing)")
-							} else if !ok {
+								failures++
+								logger.WithError(renewErr).WithField("consecutive_failures", failures).Warn("phone-lock renewal error")
+								if failures >= maxConsecutiveFailures {
+									logger.WithField("consecutive_failures", failures).Error("phone-lock renewal failed repeatedly — Redis outage suspected; lock effectively lost")
+									return
+								}
+								continue
+							}
+							failures = 0 // reset após sucesso
+							if !ok {
 								logger.Warn("phone-lock lost during processing (TTL expired or stolen)")
 								return // parar renovação — não somos mais donos
 							}
@@ -228,7 +238,11 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				logger.WithFields(logrus.Fields{
 					"user_number": queueMsg.UserNumber,
 					"message_id":  queueMsg.ID,
-				}).Warn("phone-lock not acquired in time; requeueing message")
+				}).Warn("phone-lock not acquired in time; backing off before requeue")
+				// Backoff antes do return pra evitar tight loop entre 2 workers
+				// disputando o mesmo phone-lock — sem isso, NACK+requeue imediato
+				// vira hot loop até timeout/DLQ. 2s alinhado ao lockTimeout típico.
+				time.Sleep(2 * time.Second)
 				return fmt.Errorf("phone-lock contention for %s; requeue", queueMsg.UserNumber)
 			}
 		}
