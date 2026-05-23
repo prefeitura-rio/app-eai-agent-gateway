@@ -86,6 +86,10 @@ func main() {
 			OTLPEndpoint:   cfg.Observability.OTelCollectorURL,
 			Insecure:       true, // Use insecure connection for local development
 			Headers:        make(map[string]string),
+			// Plano-bot-2026 Fase 0 I10 — adaptive sampling.
+			SamplingStrategy:       cfg.Observability.OTelSamplingStrategy,
+			SamplingRatio:          cfg.Observability.OTelSamplingRatio,
+			LatencySlowThresholdMs: cfg.Observability.OTelLatencySlowThresholdMs,
 		}
 
 		otelService, err = services.NewOTelService(context.Background(), otelConfig)

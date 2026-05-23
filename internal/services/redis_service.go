@@ -479,6 +479,61 @@ func (r *RedisService) Ping(ctx context.Context) error {
 	return nil
 }
 
+// Increment atomically increments the value at `key` by 1. Returns the new
+// value. Used pelo DoSRateLimiterService pra sliding-window counters
+// (key per E.164 + bucket). Não seta TTL — caller deve chamar Expire na
+// primeira hit (counter==1) pra evitar key eterna.
+//
+// Redis garante atomicidade do INCR mesmo sob concorrência — múltiplas
+// requests do mesmo bucket incrementam serializadamente.
+func (r *RedisService) Increment(ctx context.Context, key string) (int64, error) {
+	r.recordOperation()
+	val, err := r.client.Incr(ctx, key).Result()
+	if err != nil {
+		r.recordError()
+		r.logger.WithError(err).WithField("key", key).Error("Failed to increment value in Redis")
+		return 0, fmt.Errorf("redis incr error: %w", err)
+	}
+	r.recordSet()
+	return val, nil
+}
+
+// Expire seta o TTL de `key`. Retorna erro Redis se a key não existe ou
+// a operação falha. Usado pelo DoSRateLimiterService pós-Increment quando
+// counter==1 (primeira hit no bucket) pra garantir que counters expirem
+// naturalmente.
+func (r *RedisService) Expire(ctx context.Context, key string, ttl time.Duration) error {
+	r.recordOperation()
+	if err := r.client.Expire(ctx, key, ttl).Err(); err != nil {
+		r.recordError()
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"key": key,
+			"ttl": ttl,
+		}).Error("Failed to set TTL in Redis")
+		return fmt.Errorf("redis expire error: %w", err)
+	}
+	return nil
+}
+
+// IncrementBy atomically increments `key` by `delta`. Usado pelo
+// TokenBudgetService pra acumular tokens consumidos sem race entre
+// callbacks concorrentes do mesmo E.164. Redis garante atomicidade
+// (INCRBY é single-cmd, processado serializadamente).
+func (r *RedisService) IncrementBy(ctx context.Context, key string, delta int64) (int64, error) {
+	r.recordOperation()
+	val, err := r.client.IncrBy(ctx, key, delta).Result()
+	if err != nil {
+		r.recordError()
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"key":   key,
+			"delta": delta,
+		}).Error("Failed to incrby in Redis")
+		return 0, fmt.Errorf("redis incrby error: %w", err)
+	}
+	r.recordSet()
+	return val, nil
+}
+
 // Close closes the Redis connection
 func (r *RedisService) Close() error {
 	if err := r.client.Close(); err != nil {

@@ -53,6 +53,27 @@ type OTelConfig struct {
 	OTLPEndpoint   string
 	Insecure       bool
 	Headers        map[string]string
+
+	// Sampling strategy (plano-bot-2026 Fase 0 I10).
+	// "always_on" (default backward-compat): AlwaysSample — todos os spans
+	// vão pro collector. Overhead alto: pra cada turn temos ~10-20 spans
+	// (HTTP + worker + Engine + tool calls); em produção 1k msgs/dia ≈
+	// 20k spans/dia + custo storage.
+	//
+	// "adaptive": ParentBased(TraceIDRatioBased(SamplingRatio)) wrappado
+	// num sampler custom que força 100% sampling quando:
+	//   - span.error == true (failure path sempre tracked)
+	//   - span attrs declarados latency_ms > LatencySlowThresholdMs (tail-sampling
+	//     pra outliers — devs precisam dos spans lentos)
+	//
+	// O ratio aplica APENAS pra parent-less spans (root). Filhos herdam
+	// a decisão via ParentBased. Reasoning: queremos ratio em root mas
+	// 100% nas children quando capturadas; tail sampler reverse-aplica
+	// 100% em spans flagged (set via SetAttributes a posteriori não
+	// re-amostra; precisamos da decisão upfront via attrs do start).
+	SamplingStrategy        string
+	SamplingRatio           float64
+	LatencySlowThresholdMs  int
 }
 
 // NewOTelService creates a new OpenTelemetry service
@@ -102,11 +123,14 @@ func (s *OTelService) initTracing(ctx context.Context, res *resource.Resource, c
 		return fmt.Errorf("failed to create trace exporter: %w", err)
 	}
 
+	// Sampler strategy (plano-bot-2026 Fase 0 I10).
+	sampler := buildSampler(config)
+
 	// Create trace provider
 	s.traceProvider = sdktrace.NewTracerProvider(
 		sdktrace.WithBatcher(traceExporter),
 		sdktrace.WithResource(res),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSampler(sampler),
 	)
 
 	// Set global trace provider

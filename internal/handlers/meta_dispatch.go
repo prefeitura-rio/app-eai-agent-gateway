@@ -29,6 +29,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
@@ -71,6 +72,20 @@ type SendClaimer interface {
 	Delete(ctx context.Context, key string) error
 }
 
+// AuditLogger é alias local pra services.AuditLogger pra que o handler
+// possa receber injeção sem expor a dependência direta no construtor.
+// Definido como interface local pra preservar testabilidade (mocks
+// independentes não precisam importar services).
+type AuditLogger interface {
+	Log(ctx context.Context, entry services.AuditEntry)
+}
+
+// TokenBudgetRecorder — contrato pra acumular tokens consumidos por turn
+// (plano-bot-2026 Fase 0 I8). Implementado por services.TokenBudgetService.
+type TokenBudgetRecorder interface {
+	AddTokensSpent(ctx context.Context, e164 string, tokens int)
+}
+
 // MetaDispatchHandler — recebe callbacks do worker pra outbound Meta direto.
 type MetaDispatchHandler struct {
 	sender MetaSender
@@ -82,6 +97,16 @@ type MetaDispatchHandler struct {
 	// ou placeholder = fail-closed (endpoint rejeita 401).
 	secret string
 	logger *logrus.Logger
+	// authFailureRecorder reporta tentativas de auth com secret errado pro
+	// rate limiter (brute-force defense). Pode ser nil.
+	authFailureRecorder AuthFailureRecorder
+	// auditLogger emite audit logs estruturados pra ações sensíveis
+	// (meta send text/media/etc). Pode ser nil — então sem audit log,
+	// só log normal. Espelha plano-bot-2026 Fase 0 C4.
+	auditLogger AuditLogger
+	// tokenBudget acumula tokens consumidos por turn no Redis counter
+	// daily (plano-bot-2026 Fase 0 I8). Pode ser nil (feature flag OFF).
+	tokenBudget TokenBudgetRecorder
 }
 
 const dispatchSecretHeader = "X-Meta-Dispatch-Secret"
@@ -96,6 +121,25 @@ func NewMetaDispatchHandler(sender MetaSender, redis RedisServiceInterface, secr
 	if c, ok := redis.(SendClaimer); ok {
 		h.claimer = c
 	}
+	return h
+}
+
+// WithAuthFailureRecorder wire opcional do recorder pra brute-force defense.
+// Idempotente; última chamada wins.
+func (h *MetaDispatchHandler) WithAuthFailureRecorder(r AuthFailureRecorder) *MetaDispatchHandler {
+	h.authFailureRecorder = r
+	return h
+}
+
+// WithAuditLogger wire opcional do audit logger. Idempotente.
+func (h *MetaDispatchHandler) WithAuditLogger(a AuditLogger) *MetaDispatchHandler {
+	h.auditLogger = a
+	return h
+}
+
+// WithTokenBudget wire opcional do counter de tokens. Idempotente.
+func (h *MetaDispatchHandler) WithTokenBudget(tb TokenBudgetRecorder) *MetaDispatchHandler {
+	h.tokenBudget = tb
 	return h
 }
 
@@ -128,6 +172,16 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 	provided := c.GetHeader(dispatchSecretHeader)
 	if !secureEqual(provided, h.secret) {
 		h.logger.WithField("event", "meta_dispatch_unauthorized").Warn("Meta dispatch: invalid or missing secret header")
+		// Plano-bot-2026 Fase 0 C6 — reporta auth fail pro rate limiter
+		// pra ativar bloqueio per-IP em brute-force. Apenas com `provided`
+		// não-vazio (workers legítimos com config errado não devem virar
+		// bloqueio permanente — apenas tentativas com payload). Sem
+		// propagação de erro: 401 segue o mesmo path original.
+		if h.authFailureRecorder != nil && provided != "" {
+			if ip := c.ClientIP(); ip != "" {
+				_, _, _ = h.authFailureRecorder.RecordAuthFailure(c.Request.Context(), ip)
+			}
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
@@ -408,6 +462,43 @@ func (h *MetaDispatchHandler) HandleDispatch(c *gin.Context) {
 		"wamid":      wamid,
 		"send_kind":  sendKind,
 	}).Info("Meta dispatch outbound sent")
+
+	// Plano-bot-2026 Fase 0 C4 — audit log estruturado.
+	// Emite após Send + Redis Set success (ie. send realmente foi feito
+	// e o estado terminal foi preservado pra concurrent retries verem
+	// already_sent). Se Set falhou, ainda emite audit (a ação ocorreu
+	// no destino — Meta entregou; perder o registro seria pior que
+	// duplicar). Recipient hashed pra LGPD.
+	if h.auditLogger != nil {
+		traceID := ""
+		if span := trace.SpanFromContext(c.Request.Context()); span != nil {
+			sc := span.SpanContext()
+			if sc.IsValid() {
+				traceID = sc.TraceID().String()
+			}
+		}
+		h.auditLogger.Log(c.Request.Context(), services.AuditEntry{
+			SnowflakeID:   services.NewSnowflakeID(),
+			TimestampUTC:  time.Now().UTC().Format(time.RFC3339Nano),
+			ActionType:    "meta_send_" + sendKind,
+			RecipientHash: services.HashRecipientE164(userNumber),
+			WAMID:         wamid,
+			MessageID:     payload.MessageID,
+			TraceID:       traceID,
+			Success:       true,
+		})
+	}
+
+	// Plano-bot-2026 Fase 0 I8 — token budget counter.
+	// Extrai usage_statistics do payload do worker (presente em todo turn
+	// LangGraph) e atualiza o counter daily. Non-blocking; falha de Redis
+	// não muda a resposta.
+	if h.tokenBudget != nil {
+		if tokens := services.ExtractTokenUsage(payload.Data); tokens > 0 {
+			h.tokenBudget.AddTokensSpent(c.Request.Context(), userNumber, tokens)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"status": "sent", "wamid": wamid, "kind": sendKind})
 }
 

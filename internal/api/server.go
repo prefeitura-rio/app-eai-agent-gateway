@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -34,10 +35,13 @@ type Server struct {
 	// adminBrokerModeHandler — expõe GET /admin/broker-mode pra Mule pollar
 	// e descobrir o estado do master switch SALESFORCE_BROKER_ENABLED.
 	adminBrokerModeHandler *handlers.AdminBrokerModeHandler
-	redisService        *services.RedisService
-	rabbitMQService     *services.RabbitMQService
-	postgresService     *services.PostgresService
-	otelService         *services.OTelService // Optional OTel service
+	redisService           *services.RedisService
+	rabbitMQService        *services.RabbitMQService
+	postgresService        *services.PostgresService
+	otelService            *services.OTelService            // Optional OTel service
+	dosRateLimiter         *services.DoSRateLimiterService  // Plano-bot-2026 Fase 0 C6
+	auditLogger            *services.LogrusAuditLogger      // Plano-bot-2026 Fase 0 C4
+	tokenBudget            *services.TokenBudgetService     // Plano-bot-2026 Fase 0 I8
 }
 
 // NewServer creates a new HTTP server
@@ -76,6 +80,49 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 		googleAgentService = nil
 	}
 
+	// Plano-bot-2026 Fase 0 C6 — DoS rate limiter per E.164 + per IP.
+	// Compartilhado pelo middleware /api/v1/message/webhook/user e pelos
+	// handlers /meta/webhook + /meta/dispatch + /admin/broker-mode.
+	dosLimiter := services.NewDoSRateLimiterService(services.DoSRateLimiterConfig{
+		Enabled:                cfg.Security.DoSRateLimitEnabled,
+		MsgPerUserPerWindow:    cfg.Security.DoSMsgPerUserPer15Min,
+		WindowDuration:         15 * 60 * time.Second,
+		AuthFailPerIPPerWindow: cfg.Security.DoSAuthFailPer15Min,
+		AuthFailBlockDuration:  15 * 60 * time.Second,
+	}, logger, redisService)
+	logger.WithFields(logrus.Fields{
+		"event":                       "dos_rate_limiter_initialized",
+		"enabled":                     cfg.Security.DoSRateLimitEnabled,
+		"msg_per_user_per_15min":      cfg.Security.DoSMsgPerUserPer15Min,
+		"auth_fail_per_ip_per_15min":  cfg.Security.DoSAuthFailPer15Min,
+	}).Info("DoS rate limiter initialized")
+
+	// Plano-bot-2026 Fase 0 C4 — audit logger structured.
+	// Sink default: logrus (JSON), level Info, marker `event=audit`.
+	// Operador deve preservar logs marcados pra ≥5 anos (LGPD Art.15 + CC2002).
+	auditLogger := services.NewLogrusAuditLogger(logger)
+	logger.WithFields(logrus.Fields{
+		"event":              "audit_logger_initialized",
+		"retention_years":    cfg.Observability.AuditLogRetentionYears,
+		"sink":               "logrus_json_stdout",
+		"marker":             "event=audit",
+	}).Info("Audit logger initialized (storage retention enforced downstream)")
+
+	// Plano-bot-2026 Fase 0 I8 — token budget per E.164/dia.
+	// Counter Redis daily-resetting; opcional (feature flag default OFF
+	// pra dar tempo de validar shape do usage_statistics em produção).
+	tokenBudget := services.NewTokenBudgetService(services.TokenBudgetConfig{
+		Enabled:          cfg.Security.TokenBudgetEnabled,
+		PerUserDaily:     cfg.Security.TokenBudgetPerUserDaily,
+		WarnThresholdPct: cfg.Security.TokenBudgetWarnThreshold,
+	}, logger, redisService)
+	logger.WithFields(logrus.Fields{
+		"event":               "token_budget_initialized",
+		"enabled":             cfg.Security.TokenBudgetEnabled,
+		"per_user_daily":      cfg.Security.TokenBudgetPerUserDaily,
+		"warn_threshold_pct":  cfg.Security.TokenBudgetWarnThreshold,
+	}).Info("Token budget service initialized")
+
 	server := &Server{
 		config:          cfg,
 		logger:          logger,
@@ -84,6 +131,9 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 		rabbitMQService: rabbitMQService,
 		postgresService: postgresService,
 		otelService:     otelService,
+		dosRateLimiter:  dosLimiter,
+		auditLogger:     auditLogger,
+		tokenBudget:     tokenBudget,
 		healthHandler: handlers.NewHealthHandler(
 			cfg.Observability.HealthCheckTimeout,
 			cfg.Observability.ReadinessCheckTimeout,
@@ -115,7 +165,9 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 		}
 		server.metaWebhookHandler = handlers.NewMetaWebhookHandler(
 			&cfg.Meta, server.messageHandler, dedup, logger,
-		)
+		).
+			WithRateLimiter(dosLimiter). // Plano-bot-2026 Fase 0 C6
+			WithTokenBudget(tokenBudget) // Plano-bot-2026 Fase 0 I8
 		// Outbound dispatcher: worker callback → /meta/dispatch → Meta Graph.
 		// Inicializa apenas se credenciais Meta estão setadas; senão `sender`
 		// fica nil e o endpoint retorna 503.
@@ -123,7 +175,10 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 		if cfg.Meta.SystemUserToken != "" && cfg.Meta.PhoneNumberID != "" {
 			sender = services.NewMetaGraphService(&cfg.Meta, logger)
 		}
-		server.metaDispatchHandler = handlers.NewMetaDispatchHandler(sender, redisService, cfg.Meta.DispatchSecret, logger)
+		server.metaDispatchHandler = handlers.NewMetaDispatchHandler(sender, redisService, cfg.Meta.DispatchSecret, logger).
+			WithAuthFailureRecorder(dosLimiter). // Plano-bot-2026 Fase 0 C6
+			WithAuditLogger(auditLogger).        // Plano-bot-2026 Fase 0 C4
+			WithTokenBudget(tokenBudget)         // Plano-bot-2026 Fase 0 I8
 		logger.WithFields(logrus.Fields{
 			"event":             "meta_direct_enabled",
 			"verify_token_set":  cfg.Meta.VerifyToken != "",
@@ -161,7 +216,9 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 	// Admin endpoint — Mule poll a cada 30s pra descobrir broker mode.
 	// Sempre instanciado (mesmo sem ADMIN_API_TOKEN configurado, handler
 	// retorna 503 explícito em vez de 404 indeciso).
-	server.adminBrokerModeHandler = handlers.NewAdminBrokerModeHandler(&cfg.Broker, logger)
+	// Plano-bot-2026 Fase 0 C6 — auth fail recorder pra brute-force defense.
+	server.adminBrokerModeHandler = handlers.NewAdminBrokerModeHandler(&cfg.Broker, logger).
+		WithAuthFailureRecorder(dosLimiter)
 	logger.WithFields(logrus.Fields{
 		"event":                     "broker_mode_initialized",
 		"salesforce_broker_enabled": cfg.Broker.SalesforceBrokerEnabled,
@@ -280,14 +337,25 @@ func (s *Server) setupRoutes() {
 		s.logger.Info("Meta webhook routes registered: GET+POST /meta/webhook")
 	}
 	if s.metaDispatchHandler != nil {
-		s.router.POST("/meta/dispatch", s.metaDispatchHandler.HandleDispatch)
-		s.logger.Info("Meta dispatch route registered: POST /meta/dispatch")
+		// Plano-bot-2026 Fase 0 C6 — auth-fail gate pre-handler:
+		// bloqueia IPs que excederam o cap de 401s. Aplicado SOMENTE
+		// nesse endpoint (não no webhook genérico Meta — esse é
+		// público/HMAC-protected, não vulnerável a brute-force secret).
+		s.router.POST("/meta/dispatch",
+			middleware.DoSAuthFailureGateMiddleware(s.dosRateLimiter, s.logger),
+			s.metaDispatchHandler.HandleDispatch,
+		)
+		s.logger.Info("Meta dispatch route registered: POST /meta/dispatch (with DoS auth-fail gate)")
 	}
 
 	// Admin — broker mode (Mule polls this every 30s pra propagar o master
 	// switch SALESFORCE_BROKER_ENABLED em <1min sem redeploy).
-	s.router.GET("/admin/broker-mode", s.adminBrokerModeHandler.HandleGet)
-	s.logger.Info("Admin route registered: GET /admin/broker-mode")
+	// Plano-bot-2026 Fase 0 C6 — auth-fail gate pre-handler.
+	s.router.GET("/admin/broker-mode",
+		middleware.DoSAuthFailureGateMiddleware(s.dosRateLimiter, s.logger),
+		s.adminBrokerModeHandler.HandleGet,
+	)
+	s.logger.Info("Admin route registered: GET /admin/broker-mode (with DoS auth-fail gate)")
 
 	// Gov.br OAuth2/PKCE callback endpoint (outside /api group)
 	// Public endpoint that receives callbacks from Identidade Carioca
@@ -315,7 +383,14 @@ func (s *Server) setupRoutes() {
 			// Message endpoints
 			message := v1.Group("/message")
 			{
-				message.POST("/webhook/user", s.messageHandler.HandleUserWebhook)
+				// Plano-bot-2026 Fase 0 C6 — per-E.164 DoS rate limit.
+				// Middleware aplica APENAS no inbound message webhook (path POST);
+				// outros endpoints (history update, response, debug) ficam fora —
+				// não há vetor DoS por número equivalente.
+				message.POST("/webhook/user",
+					middleware.DoSMessageRateLimitMiddleware(s.dosRateLimiter, s.tokenBudget, s.logger),
+					s.messageHandler.HandleUserWebhook,
+				)
 				message.POST("/webhook/update_history", s.messageHandler.HandleHistoryUpdateWebhook)
 				message.GET("/response", s.messageHandler.HandleMessageResponse)
 				message.GET("/debug/task-status", s.messageHandler.HandleDebugTaskStatus)

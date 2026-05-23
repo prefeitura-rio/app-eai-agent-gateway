@@ -72,6 +72,19 @@ type MessageEnqueuer interface {
 	) (*EnqueueResult, error)
 }
 
+// MetaInboundRateLimiter — DoS defense per-E.164 (plano-bot-2026 Fase 0 C6).
+// Subset mínimo do contrato services.DoSRateLimiterService usado pelo handler.
+// Definido aqui pra evitar import cycle (handlers ↔ services).
+type MetaInboundRateLimiter interface {
+	AllowMessage(ctx context.Context, e164 string) (allowed bool, retryAfter time.Duration, count int, err error)
+}
+
+// TokenBudgetChecker — pre-message gate pra cap diário de tokens
+// (plano-bot-2026 Fase 0 I8). Implementado por services.TokenBudgetService.
+type TokenBudgetChecker interface {
+	IsBudgetExceeded(ctx context.Context, e164 string) (exceeded bool, total int, cap int)
+}
+
 // MetaWebhookHandler — recebe inbound webhook Meta direto (substituindo Mule).
 type MetaWebhookHandler struct {
 	cfg            *config.MetaConfig
@@ -79,6 +92,12 @@ type MetaWebhookHandler struct {
 	dedup          MetaDedupChecker
 	flowRegistry   *FlowRegistry
 	logger         *logrus.Logger
+	// rateLimiter aplica cap per-E.164 nas mensagens inbound (DoS defense).
+	// Quando nil ou desabilitado, AllowMessage é skipped (backwards-compat).
+	rateLimiter MetaInboundRateLimiter
+	// tokenBudget checa budget de tokens daily (plano-bot-2026 Fase 0 I8).
+	// Quando nil, gate skipped.
+	tokenBudget TokenBudgetChecker
 }
 
 // NewMetaWebhookHandler constrói o handler injetando deps. messageHandler é
@@ -99,6 +118,19 @@ func NewMetaWebhookHandler(
 		flowRegistry:   NewFlowRegistry(cfg.FlowRegistry, cfg.FlowDefaultService),
 		logger:         logger,
 	}
+}
+
+// WithRateLimiter wire opcional do limiter DoS. Idempotente; chamada
+// múltipla substitui referência (último wins).
+func (h *MetaWebhookHandler) WithRateLimiter(rl MetaInboundRateLimiter) *MetaWebhookHandler {
+	h.rateLimiter = rl
+	return h
+}
+
+// WithTokenBudget wire opcional do gate de tokens. Idempotente.
+func (h *MetaWebhookHandler) WithTokenBudget(tb TokenBudgetChecker) *MetaWebhookHandler {
+	h.tokenBudget = tb
+	return h
 }
 
 // HandleVerify — Meta GET handshake.
@@ -527,6 +559,58 @@ func (h *MetaWebhookHandler) handleMessage(
 	if parseOutcome != routeOK {
 		outcome = parseOutcome
 		return outcome
+	}
+
+	// Token budget gate (plano-bot-2026 Fase 0 I8) — bloqueia ANTES do
+	// rate limit per-msg pra não inflacionar o per-user cap durante hit
+	// de budget. Match comportamento do middleware /api/v1/message/webhook/user.
+	//
+	// Como o webhook Meta entrega o envelope completo (não 1-by-1), usar
+	// routeOK ack pro Meta com log Warn — escalate de handoff deve vir
+	// por canal alternativo (operador/SOC alertado pelo log structured).
+	if h.tokenBudget != nil {
+		exceeded, total, cap := h.tokenBudget.IsBudgetExceeded(ctx, req.UserNumber)
+		if exceeded {
+			h.logger.WithFields(logrus.Fields{
+				"event":        "meta_inbound_token_budget_exceeded",
+				"wamid":        msg.ID,
+				"e164_prefix":  maskPhone(req.UserNumber),
+				"total_tokens": total,
+				"cap":          cap,
+			}).Warn("Meta inbound: user hit token budget cap; dropping message (handoff route via separate channel)")
+			outcome = routeOK // ack to Meta — não retentar
+			return outcome
+		}
+	}
+
+	// DoS rate limit per E.164 (plano-bot-2026 Fase 0 C6).
+	// Aplicado APÓS parse + dedup pra que retries do Meta (mesmo wamid)
+	// não consumam slot — a primeira chamada já passou pelo limiter.
+	// Bloqueio: log Warn + drop msg (routeSkipped). Meta NÃO retentará
+	// porque returnamos 200 ao envelope completo pelo agregador
+	// (DoS é uma decisão "stop sending", não "transient failure").
+	//
+	// Trade-off: usar routeSkipped → response 503. Optamos por routeOK pra
+	// não causar Meta retry storm em flooding legítimo (atacante quer DoS
+	// e adicionar retries é counter-productive). LOG sinal pra alarmar
+	// operador, mas response = 200 (msg silenciosamente dropada). Cidadão
+	// continua mandando msgs até o window expirar; nenhuma é enqueued.
+	if h.rateLimiter != nil {
+		allowed, retryAfter, count, lerr := h.rateLimiter.AllowMessage(ctx, req.UserNumber)
+		if lerr != nil {
+			h.logger.WithError(lerr).WithField("wamid", msg.ID).
+				Warn("meta_inbound: rate limiter error; failing open (allowing)")
+		} else if !allowed {
+			h.logger.WithFields(logrus.Fields{
+				"event":            "meta_inbound_rate_limit_blocked",
+				"wamid":            msg.ID,
+				"e164_prefix":      maskPhone(req.UserNumber),
+				"count":            count,
+				"retry_after_secs": int(retryAfter.Seconds()),
+			}).Warn("Meta inbound: per-user rate limit hit; dropping message silently")
+			outcome = routeOK // ack to Meta — não retentar (DoS defense)
+			return outcome
+		}
 	}
 
 	// Wire callback apenas quando TODA a chain dispatch está pronta: URL +

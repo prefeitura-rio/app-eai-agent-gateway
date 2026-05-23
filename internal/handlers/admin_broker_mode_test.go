@@ -1,17 +1,40 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	stdio "io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 )
+
+// adminAuthFailMock — mock pra AuthFailureRecorder usado nos testes do
+// admin handler. Reuses padrão do meta_dispatch_plano_bot_2026_test.go
+// mas isolado pra evitar shared state cross-test.
+type adminAuthFailMock struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (m *adminAuthFailMock) RecordAuthFailure(_ context.Context, ip string) (bool, time.Duration, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, ip)
+	return false, 0, nil
+}
+func (m *adminAuthFailMock) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
 
 func newAdminHandler(t *testing.T, cfg config.BrokerConfig) *AdminBrokerModeHandler {
 	t.Helper()
@@ -169,5 +192,55 @@ func TestAdminBrokerMode_WrongTokenReturns401WithSpecificMessage(t *testing.T) {
 	_ = json.Unmarshal(w.Body.Bytes(), &resp)
 	if got, _ := resp["error"].(string); got != "invalid X-Admin-Token" {
 		t.Errorf("expected error=invalid X-Admin-Token, got %q", got)
+	}
+}
+
+// Plano-bot-2026 Fase 0 C6 — auth-fail recorder integration.
+// Garante que tentativas com token errado disparam o limiter.
+
+func TestAdminBrokerMode_AuthFailRecorder_TriggeredOnBadToken(t *testing.T) {
+	h := newAdminHandler(t, config.BrokerConfig{
+		SalesforceBrokerEnabled: true,
+		AdminAPIToken:           "sec",
+	})
+	rec := &adminAuthFailMock{}
+	h = h.WithAuthFailureRecorder(rec)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/admin/broker-mode", nil)
+	c.Request.RemoteAddr = "10.0.0.42:12345"
+	c.Request.Header.Set(adminTokenHeader, "wrong")
+	h.HandleGet(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	if rec.callCount() != 1 {
+		t.Errorf("expected auth-fail recorder triggered once; got %d", rec.callCount())
+	}
+}
+
+func TestAdminBrokerMode_AuthFailRecorder_NotTriggeredOnEmptyHeader(t *testing.T) {
+	// Header vazio = client desconfigurado / probe; não punir.
+	h := newAdminHandler(t, config.BrokerConfig{
+		SalesforceBrokerEnabled: true,
+		AdminAPIToken:           "sec",
+	})
+	rec := &adminAuthFailMock{}
+	h = h.WithAuthFailureRecorder(rec)
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/admin/broker-mode", nil)
+	c.Request.RemoteAddr = "10.0.0.42:12345"
+	// sem header
+	h.HandleGet(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	if rec.callCount() != 0 {
+		t.Errorf("expected NO auth-fail record on empty header; got %d", rec.callCount())
 	}
 }

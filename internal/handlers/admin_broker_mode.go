@@ -9,6 +9,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
@@ -22,6 +23,13 @@ import (
 
 const adminTokenHeader = "X-Admin-Token"
 
+// AuthFailureRecorder — contrato pra reportar falhas de autenticação ao
+// rate limiter (plano-bot-2026 Fase 0 C6). Implementado por
+// services.DoSRateLimiterService. Definido aqui pra evitar import cycle.
+type AuthFailureRecorder interface {
+	RecordAuthFailure(ctx context.Context, ip string) (blocked bool, retryAfter time.Duration, err error)
+}
+
 // AdminBrokerModeHandler — expõe GET /admin/broker-mode pra Mule pollar.
 type AdminBrokerModeHandler struct {
 	cfg    *config.BrokerConfig
@@ -30,6 +38,9 @@ type AdminBrokerModeHandler struct {
 	// é tempo de boot, pois flag é estática-por-pod (mudou no Infisical →
 	// pod restarta via Infisical agent → startedAt avança).
 	startedAt time.Time
+	// authFailureRecorder reporta tentativas de auth com token errado pro
+	// rate limiter (brute-force defense). Pode ser nil — então sem registro.
+	authFailureRecorder AuthFailureRecorder
 }
 
 // NewAdminBrokerModeHandler constrói o handler com config + logger.
@@ -39,6 +50,12 @@ func NewAdminBrokerModeHandler(cfg *config.BrokerConfig, logger *logrus.Logger) 
 		logger:    logger,
 		startedAt: time.Now().UTC(),
 	}
+}
+
+// WithAuthFailureRecorder wire opcional do recorder. Idempotente.
+func (h *AdminBrokerModeHandler) WithAuthFailureRecorder(r AuthFailureRecorder) *AdminBrokerModeHandler {
+	h.authFailureRecorder = r
+	return h
 }
 
 // HandleGet responde JSON com o estado atual da flag.
@@ -75,6 +92,17 @@ func (h *AdminBrokerModeHandler) HandleGet(c *gin.Context) {
 			reason = "invalid X-Admin-Token"
 			h.logger.WithField("event", "admin_broker_mode_unauthorized").
 				Warn("admin_broker_mode: token mismatch")
+		}
+		// Plano-bot-2026 Fase 0 C6 — reportar pro rate limiter pra
+		// trigger bloqueio de IP em brute-force. Sem propagação de erro
+		// pro caller (falha do recorder não muda resposta 401 atual).
+		// Apenas com token "preenchido" — clients sem header não devem
+		// ser punidos (saúde+/readiness probes etc.).
+		if h.authFailureRecorder != nil && provided != "" {
+			ip := c.ClientIP()
+			if ip != "" {
+				_, _, _ = h.authFailureRecorder.RecordAuthFailure(c.Request.Context(), ip)
+			}
 		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": reason})
 		return

@@ -245,6 +245,20 @@ type ObservabilityConfig struct {
 	OTelServiceVersion string `mapstructure:"OTEL_SERVICE_VERSION"`
 	OTelEnvironment    string `mapstructure:"OTEL_ENVIRONMENT"`
 
+	// Adaptive sampling (plano-bot-2026 Fase 0 I10).
+	// Hoje 100% sampling com BatchSpanProcessor — overhead alto. Mover pra
+	// parent-based ratio sampler com ratio configurável + tail-sampling rule
+	// (100% em erros e em spans com latency_ms > LatencySlowThresholdMs).
+	//
+	// Estratégia:
+	//   - "always_on" (default backward-compat): sampler = AlwaysSample, mantém
+	//     comportamento legado.
+	//   - "adaptive": parent-based(TraceIDRatio(SamplingRatio)) + wrapper que força
+	//     100% em spans com error=true ou duration > LatencySlowThresholdMs.
+	OTelSamplingStrategy      string  `mapstructure:"OTEL_SAMPLING_STRATEGY"`
+	OTelSamplingRatio         float64 `mapstructure:"OTEL_TRACES_SAMPLER_ARG"`
+	OTelLatencySlowThresholdMs int     `mapstructure:"OTEL_LATENCY_SLOW_THRESHOLD_MS"`
+
 	// Metrics
 	MetricsEnabled bool   `mapstructure:"METRICS_ENABLED"`
 	MetricsPort    int    `mapstructure:"METRICS_PORT"`
@@ -254,6 +268,13 @@ type ObservabilityConfig struct {
 	LogLevel  string `mapstructure:"LOG_LEVEL"`
 	LogFormat string `mapstructure:"LOG_FORMAT"`
 	LogOutput string `mapstructure:"LOG_OUTPUT"`
+
+	// Audit log retention hint (plano-bot-2026 Fase 0 C4).
+	// Documentação operacional: ações sensíveis (meta_dispatch sends) emitem
+	// log estruturado marcado `event=audit`. Storage deve preservar ≥5 anos
+	// (CC 2002 prescrição civil + LGPD Art.15 §1º). Esse campo é puro
+	// metadata pra operadores — não força retention no logger.
+	AuditLogRetentionYears int `mapstructure:"AUDIT_LOG_RETENTION_YEARS"`
 
 	// Health Checks
 	HealthCheckTimeout    time.Duration `mapstructure:"HEALTH_CHECK_TIMEOUT"`
@@ -275,6 +296,30 @@ type SecurityConfig struct {
 	AllowedDomains      string `mapstructure:"SECURITY_ALLOWED_DOMAINS"`
 	BlockedDomains      string `mapstructure:"SECURITY_BLOCKED_DOMAINS"`
 	StrictMode          bool   `mapstructure:"SECURITY_STRICT_MODE"`
+
+	// DoS defense per E.164 (plano-bot-2026 Fase 0 C6).
+	// Cap separado do `RateLimitRequests` (que é por-IP genérico no Gin):
+	// aqui é por número de telefone normalizado em E.164, vetor diferente.
+	// Atacante que controla 1 número não consegue brute-force; atacante
+	// que controla N números esbarra no rate limit IP do reverse proxy.
+	DoSRateLimitEnabled bool `mapstructure:"DOS_RATE_LIMIT_ENABLED"`
+	// Default: 30 msgs / 15min / E.164.
+	DoSMsgPerUserPer15Min int `mapstructure:"RATE_LIMIT_MSG_PER_USER_PER_15MIN"`
+	// Default: 5 auth fails / 15min / IP → bloqueio 15min IP origem.
+	// Aplica em endpoints sensíveis (/meta/dispatch, /admin/broker-mode).
+	DoSAuthFailPer15Min int `mapstructure:"RATE_LIMIT_AUTH_FAIL_PER_15MIN"`
+
+	// Token budget per E.164 / dia (plano-bot-2026 Fase 0 I8).
+	// Cap defensivo contra prompt-injection que faz LLM gerar respostas
+	// gigantes consumindo tokens. Counter Redis daily-resetting + threshold
+	// warning. Em hit absoluto, próxima request retorna 429 com header
+	// X-Budget-Exceeded indicando escalate route (handoff humano).
+	//
+	// Worker emite usage_statistics; middleware consulta o counter no
+	// pre-request gate. Source of truth = soma de `total_tokens` per turn.
+	TokenBudgetEnabled       bool `mapstructure:"TOKEN_BUDGET_ENABLED"`
+	TokenBudgetPerUserDaily  int  `mapstructure:"TOKEN_BUDGET_PER_USER_DAILY"`
+	TokenBudgetWarnThreshold int  `mapstructure:"TOKEN_BUDGET_WARN_THRESHOLD_PERCENT"`
 }
 
 type CallbackConfig struct {
@@ -445,6 +490,18 @@ func setDefaults() {
 	viper.SetDefault("OTEL_SERVICE_NAME", "eai-gateway")
 	viper.SetDefault("OTEL_SERVICE_VERSION", "0.1.0")
 	viper.SetDefault("OTEL_ENVIRONMENT", "development")
+	// Adaptive sampling (plano-bot-2026 Fase 0 I10).
+	// Default "always_on" preserva comportamento legado. Operador troca
+	// pra "adaptive" via env var sem rebuild quando quiser drop 100% → ratio.
+	viper.SetDefault("OTEL_SAMPLING_STRATEGY", "always_on")
+	viper.SetDefault("OTEL_TRACES_SAMPLER_ARG", 0.15)
+	// Threshold pra forçar 100% sampling em spans lentos. 5000ms = típico
+	// limite "tail-only" (latência E2E média 15-20s; capturar >5s permite
+	// debugar outliers sem flood do collector).
+	viper.SetDefault("OTEL_LATENCY_SLOW_THRESHOLD_MS", 5000)
+	// Audit log retention guidance — só metadata documental. Storage Loki/
+	// CloudWatch separado obedece esse SLO.
+	viper.SetDefault("AUDIT_LOG_RETENTION_YEARS", 5)
 	viper.SetDefault("METRICS_ENABLED", true)
 	viper.SetDefault("METRICS_PORT", 8080)
 	viper.SetDefault("METRICS_PATH", "/metrics")
@@ -460,6 +517,21 @@ func setDefaults() {
 	viper.SetDefault("MAX_REQUEST_SIZE", 10485760) // 10MB
 	viper.SetDefault("RATE_LIMIT_ENABLED", false)
 	viper.SetDefault("RATE_LIMIT_REQUESTS", 100)
+
+	// DoS rate limit per E.164 (plano-bot-2026 Fase 0 C6).
+	// Default true — segurança em primeiro lugar. Pode desabilitar setando
+	// DOS_RATE_LIMIT_ENABLED=false em testes/POC. Limiter fail-open quando
+	// Redis indisponível, então ligar não cria SPOF no path crítico.
+	viper.SetDefault("DOS_RATE_LIMIT_ENABLED", true)
+	viper.SetDefault("RATE_LIMIT_MSG_PER_USER_PER_15MIN", 30)
+	viper.SetDefault("RATE_LIMIT_AUTH_FAIL_PER_15MIN", 5)
+
+	// Token budget per E.164 / dia (plano-bot-2026 Fase 0 I8).
+	// Default OFF — feature flag dá tempo de validar shape antes de bloquear.
+	// Cap 100k tokens / dia / E.164 conforme plano (§ Fase 0 - I8).
+	viper.SetDefault("TOKEN_BUDGET_ENABLED", false)
+	viper.SetDefault("TOKEN_BUDGET_PER_USER_DAILY", 100000)
+	viper.SetDefault("TOKEN_BUDGET_WARN_THRESHOLD_PERCENT", 70)
 
 	// Input Validation
 	viper.SetDefault("MAX_CONTENT_LENGTH", 10000) // 10KB
@@ -667,6 +739,22 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("MAX_AGENT_ID_LENGTH")
 	_ = viper.BindEnv("ENABLE_CONTENT_FILTER")
 	_ = viper.BindEnv("SECURITY_STRICT_MODE")
+
+	// DoS rate limit (plano-bot-2026 Fase 0 C6)
+	_ = viper.BindEnv("DOS_RATE_LIMIT_ENABLED")
+	_ = viper.BindEnv("RATE_LIMIT_MSG_PER_USER_PER_15MIN")
+	_ = viper.BindEnv("RATE_LIMIT_AUTH_FAIL_PER_15MIN")
+
+	// Token budget (plano-bot-2026 Fase 0 I8)
+	_ = viper.BindEnv("TOKEN_BUDGET_ENABLED")
+	_ = viper.BindEnv("TOKEN_BUDGET_PER_USER_DAILY")
+	_ = viper.BindEnv("TOKEN_BUDGET_WARN_THRESHOLD_PERCENT")
+
+	// Adaptive sampling (plano-bot-2026 Fase 0 I10)
+	_ = viper.BindEnv("OTEL_SAMPLING_STRATEGY")
+	_ = viper.BindEnv("OTEL_TRACES_SAMPLER_ARG")
+	_ = viper.BindEnv("OTEL_LATENCY_SLOW_THRESHOLD_MS")
+	_ = viper.BindEnv("AUDIT_LOG_RETENTION_YEARS")
 
 	// Callback
 	_ = viper.BindEnv("CALLBACK_ENABLED")
