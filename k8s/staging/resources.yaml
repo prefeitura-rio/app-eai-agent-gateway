@@ -1,4 +1,32 @@
 ---
+# === Env vars novas (plano-bot-2026 Fase 0, commit 14571ce) ===
+# Adicionadas ao Secret eai-agent-gateway-secrets via Infisical (envFrom abaixo
+# injeta tudo no container; não usar `env:` individual aqui pra não duplicar
+# fonte de verdade). Defaults safe: features novas têm backward-compat se vars
+# não setadas (config.go::setDefaults).
+#
+# DoS rate limit per E.164 (C6):
+#   DOS_RATE_LIMIT_ENABLED=true                  (default true — ligado)
+#   RATE_LIMIT_MSG_PER_USER_PER_15MIN=30
+#   RATE_LIMIT_AUTH_FAIL_PER_15MIN=5
+#
+# OTel adaptive sampling (I10) — trocar always_on → adaptive para reduzir overhead:
+#   OTEL_SAMPLING_STRATEGY=always_on             (default; valid: always_on|adaptive|never)
+#   OTEL_TRACES_SAMPLER_ARG=0.15                 (15% baseline quando adaptive)
+#   OTEL_LATENCY_SLOW_THRESHOLD_MS=5000          (force 100% acima)
+#
+# Audit log retention guidance (C4) — metadata documental, ≥5 anos LGPD:
+#   AUDIT_LOG_RETENTION_YEARS=5
+#
+# Token budget per E.164/dia (I8) — FLAG OFF default; ligar via Infisical
+# após smoke (counter Redis daily-resetting + handoff humano em block):
+#   TOKEN_BUDGET_ENABLED=false                   (default false — desligado)
+#   TOKEN_BUDGET_PER_USER_DAILY=100000
+#   TOKEN_BUDGET_WARN_THRESHOLD_PERCENT=70
+#
+# Documentação completa: .env.example, internal/config/config.go.
+# =============================================================================
+
 # API Gateway
 apiVersion: apps/v1
 kind: Deployment
