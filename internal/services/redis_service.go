@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -209,7 +210,7 @@ func (r *RedisService) Get(ctx context.Context, key string) (string, error) {
 	if err := result.Err(); err != nil {
 		if err == redis.Nil {
 			r.recordMiss()
-			return "", fmt.Errorf("key not found: %s", key)
+			return "", fmt.Errorf("%w: %s", ErrKeyNotFound, key)
 		}
 		r.recordError()
 		r.logger.WithError(err).WithField("key", key).Error("Failed to get value from Redis")
@@ -240,6 +241,126 @@ func (r *RedisService) SetValue(ctx context.Context, key string, value interface
 // Set stores a string value with TTL (implements interface)
 func (r *RedisService) Set(ctx context.Context, key string, value string, ttl time.Duration) error {
 	return r.SetValue(ctx, key, value, ttl)
+}
+
+// ErrKeyNotFound — sentinel retornado por Get quando a chave não existe.
+// Callers usam `errors.Is(err, services.ErrKeyNotFound)` pra discriminar
+// "miss esperado" de "Redis down". Sem isso, callers acabam classificando
+// stale/evicted como erro fatal.
+var ErrKeyNotFound = errors.New("redis key not found")
+
+// ErrLockNotHeld — sentinel retornado por ReleaseLock quando o holder
+// passado não bate com o titular atual do lock. Indica perda de propriedade
+// (TTL expirou e outro adquiriu) ou bug de caller. Não-fatal — caller
+// normalmente loga e continua.
+var ErrLockNotHeld = errors.New("lock not held by caller")
+
+// AcquireLock tenta adquirir um mutex distribuído `key` válido por `ttl`.
+// Retorna true se o caller passou a ser o titular. Holder único (ex: uuid
+// gerado pelo worker) é guardado pra ReleaseLock garantir que só o titular
+// solta o lock (defesa contra release acidental por outro processo após
+// TTL).
+//
+// Uso típico (worker per-phone serialization):
+//
+//	holder := uuid.NewString()
+//	ok, err := r.AcquireLock(ctx, "phone:"+userNumber, holder, 30*time.Second)
+//	if err != nil || !ok { /* requeue */ }
+//	defer r.ReleaseLock(ctx, "phone:"+userNumber, holder)
+//	// process...
+//
+// Lock TTL deve cobrir o pior caso de processamento + retry window. Se
+// processo crashar, lock libera sozinho ao TTL expirar.
+func (r *RedisService) AcquireLock(ctx context.Context, key, holder string, ttl time.Duration) (bool, error) {
+	r.recordOperation()
+	ok, err := r.client.SetNX(ctx, key, holder, ttl).Result()
+	if err != nil {
+		r.recordError()
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"key": key,
+			"ttl": ttl,
+		}).Error("Failed to acquire lock in Redis")
+		return false, fmt.Errorf("redis acquire lock error: %w", err)
+	}
+	if ok {
+		r.recordSet()
+	}
+	return ok, nil
+}
+
+// RenewLock estende TTL apenas se o caller ainda é o titular (Compare-And-
+// Set via Lua atômico). Retorna true se renovou, false se outro processo
+// pegou o lock (TTL expirou). Use periodicamente enquanto processamento
+// estiver vivo pra evitar lock expirar mid-operation.
+func (r *RedisService) RenewLock(ctx context.Context, key, holder string, ttl time.Duration) (bool, error) {
+	r.recordOperation()
+	// CAS: só renova se holder atual bate. Lua atômico garante que
+	// renovação não roba lock após expiração + reacquire por outro.
+	const script = `
+		if redis.call("get", KEYS[1]) == ARGV[1] then
+			return redis.call("pexpire", KEYS[1], ARGV[2])
+		else
+			return 0
+		end`
+	ms := ttl.Milliseconds()
+	res, err := r.client.Eval(ctx, script, []string{key}, holder, ms).Result()
+	if err != nil {
+		r.recordError()
+		return false, fmt.Errorf("redis renew lock error: %w", err)
+	}
+	if n, ok := res.(int64); ok && n == 1 {
+		return true, nil
+	}
+	return false, nil
+}
+
+// ReleaseLock libera o mutex apenas se o caller é o titular (Compare-And-
+// Delete via Lua atômico). Retorna ErrLockNotHeld se valor atual difere
+// (outro processo tomou posse após TTL).
+func (r *RedisService) ReleaseLock(ctx context.Context, key, holder string) error {
+	r.recordOperation()
+	// CAD via Lua: garante atomicidade (Get + Del em uma operação) sem
+	// race entre check + delete.
+	const script = `
+		if redis.call("get", KEYS[1]) == ARGV[1] then
+			return redis.call("del", KEYS[1])
+		else
+			return 0
+		end`
+	res, err := r.client.Eval(ctx, script, []string{key}, holder).Result()
+	if err != nil {
+		r.recordError()
+		return fmt.Errorf("redis release lock error: %w", err)
+	}
+	if n, ok := res.(int64); ok && n == 1 {
+		return nil
+	}
+	return ErrLockNotHeld
+}
+
+// SetNX implementa SET key value NX EX ttl — claim atômico usado pra
+// idempotência (ex.: dedup wamid Meta webhook). Retorna true se claim foi
+// adquirida (chave não existia), false se já estava ocupada.
+//
+// A claim sobrevive `ttl` mesmo após processamento bem-sucedido; consumers
+// devem chamar SetNX *após* commit lógico (não antes) ou aceitar replay
+// indo até TTL expirar.
+func (r *RedisService) SetNX(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
+	r.recordOperation()
+
+	ok, err := r.client.SetNX(ctx, key, value, ttl).Result()
+	if err != nil {
+		r.recordError()
+		r.logger.WithError(err).WithFields(logrus.Fields{
+			"key": key,
+			"ttl": ttl,
+		}).Error("Failed to SETNX in Redis")
+		return false, fmt.Errorf("redis setnx error: %w", err)
+	}
+	if ok {
+		r.recordSet()
+	}
+	return ok, nil
 }
 
 // Delete removes a key

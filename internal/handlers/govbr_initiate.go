@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -15,6 +16,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 )
+
+const govBrInitiateSecretHeader = "X-Govbr-Initiate-Secret"
 
 type govBrInitiateRequest struct {
 	UserNumber     string `json:"user_number" binding:"required"`
@@ -28,6 +31,29 @@ type govBrInitiateResponse struct {
 }
 
 func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
+	// Auth FIRST: rota é trusted-internal (chamada pelo Engine/worker que conhecem
+	// qual `user_number` está sendo atendido). Fail-closed se o secret não estiver
+	// configurado — evita binding de tokens Gov.br pra `user_number` arbitrário
+	// caso o Istio AuthorizationPolicy upstream falhe ou o gateway seja exposto
+	// fora do mesh.
+	expected := h.config.GovBr.InitiateSecret
+	if expected == "" {
+		h.logger.Warn("govbr_initiate: secret not configured (fail-closed)")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "initiate secret not configured"})
+		return
+	}
+	// SHA256 ambos antes de subtle.ConstantTimeCompare: length-uniforme evita
+	// timing leak via length mismatch (ConstantTimeCompare retorna 0 imediato
+	// se lens diferem). Hashing aplaina pra 32 bytes em todos os casos.
+	provided := c.GetHeader(govBrInitiateSecretHeader)
+	providedHash := sha256.Sum256([]byte(provided))
+	expectedHash := sha256.Sum256([]byte(expected))
+	if subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) != 1 {
+		h.logger.WithField("event", "govbr_initiate_unauthorized").Warn("govbr_initiate: missing/invalid secret header")
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
 	var req govBrInitiateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
@@ -71,7 +97,14 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 		return
 	}
 
-	ttl := time.Duration(h.config.GovBr.AuthStateTTL) * time.Second
+	// Garante TTL positivo — sem default ou com valor inválido, evita
+	// Set(..., 0) que go-redis trata como "sem expiração" (state OAuth
+	// persistiria pra sempre, derrotando o expired-session path do callback).
+	ttlSeconds := h.config.GovBr.AuthStateTTL
+	if ttlSeconds <= 0 {
+		ttlSeconds = 600 // 10min default
+	}
+	ttl := time.Duration(ttlSeconds) * time.Second
 	redisKey := fmt.Sprintf("govbr_auth:%s", state)
 	if err := h.redisService.Set(ctx, redisKey, string(stateJSON), ttl); err != nil {
 		logger.WithError(err).Error("Failed to store auth state in Redis")
@@ -95,6 +128,6 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 	c.JSON(http.StatusOK, govBrInitiateResponse{
 		AuthURL:   authURL,
 		State:     state,
-		ExpiresIn: h.config.GovBr.AuthStateTTL,
+		ExpiresIn: ttlSeconds,
 	})
 }

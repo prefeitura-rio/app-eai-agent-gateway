@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
 
 // GovBrCallbackHandler handles Gov.br OAuth2/PKCE callback
@@ -103,15 +105,26 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		return
 	}
 
-	// 3. Retrieve auth state from Redis
+	// 3. Retrieve auth state from Redis. Discriminar TTL/evict (`expired`)
+	// vs Redis down (`internal_error`) — sem isso, cidadão vê "sessão
+	// expirada" mesmo quando o erro real é Redis indisponível, ofuscando
+	// a causa raiz na hora da incidência.
 	redisKey := fmt.Sprintf("govbr_auth:%s", authID)
 	authStateJSON, err := h.redisService.Get(ctx, redisKey)
 	if err != nil {
-		logger.WithError(err).Error("Auth state not found or expired in Redis")
-		c.HTML(http.StatusBadRequest, "govbr_auth_error.html", gin.H{
-			"error": "expired_request",
-			"description": "Sessão de autenticação expirada. " +
-				"Por favor, retorne ao WhatsApp e inicie o processo novamente.",
+		if errors.Is(err, services.ErrKeyNotFound) {
+			logger.Warn("govbr_callback: auth state not found (expired/invalid state)")
+			c.HTML(http.StatusBadRequest, "govbr_auth_error.html", gin.H{
+				"error": "expired_request",
+				"description": "Sessão de autenticação expirada. " +
+					"Por favor, retorne ao WhatsApp e inicie o processo novamente.",
+			})
+			return
+		}
+		logger.WithError(err).Error("govbr_callback: Redis lookup failed (transient)")
+		c.HTML(http.StatusServiceUnavailable, "govbr_auth_error.html", gin.H{
+			"error":       "internal_error",
+			"description": "Erro interno ao validar sessão. Por favor, tente novamente em instantes.",
 		})
 		return
 	}
@@ -164,9 +177,18 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 
 	// 6. Update auth state to "completed"
 	authState.State = "completed"
-	updatedStateJSON, _ := json.Marshal(authState)
-	// Keep state for a bit longer for audit/debugging
-	h.redisService.Set(ctx, redisKey, string(updatedStateJSON), 5*time.Minute)
+	updatedStateJSON, marshalErr := json.Marshal(authState)
+	if marshalErr != nil {
+		// Audit-only failure (tokens já foram persistidos no passo 5); loga
+		// Warn pra rastreabilidade mas NÃO falha a request — cidadão vê
+		// sucesso e o flow continua.
+		logger.WithError(marshalErr).Warn("govbr_callback: failed to marshal updated auth state (audit-only)")
+	} else if setErr := h.redisService.Set(ctx, redisKey, string(updatedStateJSON), 5*time.Minute); setErr != nil {
+		// Mesmo race-free: tokens já foram salvos. Sem o Warn aqui o erro
+		// ficava completamente silencioso, removendo trail de audit pra
+		// debugar uma incidência futura.
+		logger.WithError(setErr).Warn("govbr_callback: failed to update auth state to completed (audit-only)")
+	}
 
 	logger.Info("Gov.br authentication completed successfully")
 
@@ -196,6 +218,9 @@ func (h *GovBrCallbackHandler) exchangeCodeForToken(
 	codeVerifier string,
 ) (*GovBrTokenResponse, error) {
 	tokenURL := h.config.GovBr.TokenURL
+	if tokenURL == "" {
+		return nil, fmt.Errorf("GOVBR_TOKEN_URL not configured")
+	}
 
 	// Prepare form data
 	data := url.Values{}
@@ -292,9 +317,19 @@ func (h *GovBrCallbackHandler) storeTokens(
 		return fmt.Errorf("failed to marshal token data: %w", err)
 	}
 
-	// Store in Redis with TTL = access token expiry
+	// Store in Redis with TTL = max(access, refresh) expiry — apagar o registro
+	// pelo expires_in do access token destruiria também refresh_token enquanto
+	// ele ainda é válido, forçando reautenticação desnecessária. Fallback de
+	// 1h se o servidor omitir/zerar expires_in pra evitar TTL=0 (sem expiração).
 	tokenKey := fmt.Sprintf("govbr_token:%s", sanitizedPhone)
-	ttl := time.Duration(tokenResp.ExpiresIn) * time.Second
+	ttlSeconds := tokenResp.ExpiresIn
+	if tokenResp.RefreshToken != "" && tokenResp.RefreshExpiresIn > ttlSeconds {
+		ttlSeconds = tokenResp.RefreshExpiresIn
+	}
+	if ttlSeconds <= 0 {
+		ttlSeconds = 3600
+	}
+	ttl := time.Duration(ttlSeconds) * time.Second
 
 	if err := h.redisService.Set(ctx, tokenKey, string(tokenJSON), ttl); err != nil {
 		return fmt.Errorf("failed to store token in Redis: %w", err)

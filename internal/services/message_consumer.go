@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -264,31 +265,43 @@ func (c *Consumer) processMessageWithRetry(ctx context.Context, msg amqp.Deliver
 	// Process the message
 	err := c.handler(msgCtx, msg)
 	if err != nil {
+		// Transient requeue: handler sinalizou condição esperada (e.g. phone-lock
+		// contention) que NÃO é falha. Republica preservando retryCount pra não
+		// queimar retry budget — caso contrário rajadas do mesmo cidadão iriam
+		// pra DLQ na primeira tentativa quando MaxRetries=-1.
+		var tr TransientRequeueError
+		if errors.As(err, &tr) {
+			delay := tr.TransientRequeueDelay()
+			logger.WithError(err).WithFields(logrus.Fields{
+				"retry_count": retryCount,
+				"delay":       delay,
+			}).Info("Transient requeue (not a processing failure); republishing without burning retry budget")
+			c.requeueWithDelay(ctx, msg, retryCount, delay, logger, "transient-requeue")
+			return
+		}
+
 		logger.WithError(err).WithField("retry_count", retryCount).Error("Message processing failed")
 
-		if retryCount >= maxRetries {
+		// maxRetries < 0 = infinitas tentativas (default RABBITMQ_MAX_RETRIES=-1).
+		// Sem o gate negativo, `retryCount(0) >= maxRetries(-1)` viraria true e
+		// toda primeira falha iria pra DLQ — invertendo a semântica documentada.
+		if maxRetries >= 0 && retryCount >= maxRetries {
 			logger.WithField("max_retries", maxRetries).Error("Message exceeded maximum retries, sending to DLQ")
-			// Send to DLQ
 			if err := msg.Reject(false); err != nil {
 				logger.WithError(err).Error("Failed to reject message to DLQ")
 			}
 			return
 		}
 
-		// Retry the message with exponential backoff
+		// Retry with exponential backoff. Sleep ctx-aware no consumer (não no
+		// handler) pra não bloquear shutdown e pra ter delay real — exchange é
+		// `direct` plain, header `x-delay` é ignorado.
 		retryDelay := time.Duration((retryCount+1)*(retryCount+1)) * time.Second
 		logger.WithFields(logrus.Fields{
 			"retry_count": retryCount + 1,
 			"retry_delay": retryDelay,
 		}).Info("Retrying message with delay")
-
-		// Publish retry message with increased retry count
-		c.publishRetryMessage(msg, retryCount+1, retryDelay, logger)
-
-		// Acknowledge original message
-		if err := msg.Ack(false); err != nil {
-			logger.WithError(err).Error("Failed to acknowledge message for retry")
-		}
+		c.requeueWithDelay(ctx, msg, retryCount+1, retryDelay, logger, "retry")
 		return
 	}
 
@@ -300,8 +313,81 @@ func (c *Consumer) processMessageWithRetry(ctx context.Context, msg amqp.Deliver
 	}
 }
 
-// publishRetryMessage publishes a message for retry with delay
-func (c *Consumer) publishRetryMessage(originalMsg amqp.Delivery, retryCount int64, delay time.Duration, logger *logrus.Entry) {
+// handleRequeueShutdown — NACK+requeue quando o backoff é interrompido
+// por shutdown (ctx ou stopChan). Mantém a mensagem na fila pra próxima
+// volta do worker reentregar.
+func (c *Consumer) handleRequeueShutdown(msg amqp.Delivery, kind, signal string, logger *logrus.Entry) {
+	logger.WithFields(logrus.Fields{"kind": kind, "signal": signal}).
+		Info("Requeue backoff interrupted by shutdown; nack+requeue")
+	if nackErr := msg.Nack(false, true); nackErr != nil {
+		// Mesma análise do delivery_stuck no requeueWithDelay: NACK falhando
+		// durante shutdown deixa a delivery presa até reconnect. Log Error
+		// + event canônico pra alerting.
+		logger.WithError(nackErr).WithFields(logrus.Fields{
+			"event":  "delivery_stuck_pending_redelivery",
+			"kind":   kind,
+			"signal": signal,
+		}).Error("Failed to NACK during shutdown — delivery unacked")
+	}
+}
+
+// requeueWithDelay aguarda `delay` (ctx-aware) e republica `msg` com o
+// `retryCount` informado. Se o backoff é interrompido por shutdown ou se o
+// republish falha, NACK-requeue pra Rabbit manter a mensagem na fila —
+// nunca ACK sem confirmar que a cópia republicada saiu da channel. O kind
+// é apenas pra log discriminar "retry" vs "transient-requeue".
+func (c *Consumer) requeueWithDelay(
+	ctx context.Context,
+	msg amqp.Delivery,
+	retryCount int64,
+	delay time.Duration,
+	logger *logrus.Entry,
+	kind string,
+) {
+	// Ouvir ctx.Done() + stopChan: cmd/worker registra consumer com
+	// context.Background(), então shutdown via StopAll fecha apenas
+	// stopChan. Sem o segundo case, backoff longo (especialmente com
+	// MaxRetries=-1 e quadratic delay) estoura a janela de graceful
+	// shutdown de 30s e deixa a delivery unacked até o kill.
+	select {
+	case <-time.After(delay):
+	case <-ctx.Done():
+		c.handleRequeueShutdown(msg, kind, "ctx.Done", logger)
+		return
+	case <-c.stopChan:
+		c.handleRequeueShutdown(msg, kind, "stopChan", logger)
+		return
+	}
+
+	if pubErr := c.publishRetryMessage(msg, retryCount, delay, logger); pubErr != nil {
+		// Republish falhou (channel/connection blip). ACKar agora perderia
+		// a mensagem permanentemente. NACK+requeue mantém na fila pra próxima
+		// volta — quando o channel recovers, Rabbit reentrega.
+		logger.WithError(pubErr).WithField("kind", kind).
+			Error("publishRetryMessage failed; nack+requeue pra evitar loss")
+		if nackErr := msg.Nack(false, true); nackErr != nil {
+			// Pior caso: NACK também falhou (Rabbit channel já caiu). Delivery
+			// fica unacked, presa até channel reset / reconnect. Rabbit redelivers
+			// automaticamente quando o channel recovers, mas em CloudHub isso
+			// pode demorar segundos. Log Error explícito + event canônico permite
+			// alerting (e.g. CloudWatch/Splunk threshold) detectar acumulo em prod.
+			logger.WithError(nackErr).WithFields(logrus.Fields{
+				"event": "delivery_stuck_pending_redelivery",
+				"kind":  kind,
+			}).Error("Failed to NACK after publish failure — delivery unacked, awaiting Rabbit channel recovery")
+		}
+		return
+	}
+	if ackErr := msg.Ack(false); ackErr != nil {
+		logger.WithError(ackErr).WithField("kind", kind).
+			Error("Failed to acknowledge original message after successful republish")
+	}
+}
+
+// publishRetryMessage publishes a message for retry with delay.
+// Retorna erro pro caller decidir entre ACK (sucesso, original removível)
+// vs NACK-requeue (falha → manter na fila pra Rabbit retentar entrega).
+func (c *Consumer) publishRetryMessage(originalMsg amqp.Delivery, retryCount int64, delay time.Duration, logger *logrus.Entry) error {
 	// Prepare headers with retry information
 	headers := amqp.Table{
 		"x-retry-count": retryCount,
@@ -335,7 +421,9 @@ func (c *Consumer) publishRetryMessage(originalMsg amqp.Delivery, retryCount int
 
 	if err != nil {
 		logger.WithError(err).Error("Failed to publish retry message")
+		return err
 	}
+	return nil
 }
 
 // AddConsumer adds a new consumer to the manager

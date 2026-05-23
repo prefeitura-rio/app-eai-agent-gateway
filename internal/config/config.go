@@ -53,6 +53,74 @@ type Config struct {
 
 	// PostgreSQL (Agent Engine Database)
 	Postgres PostgresConfig `mapstructure:",squash"`
+
+	// Meta (WhatsApp Business Cloud API) — direct integration without Mule broker.
+	// Habilita /meta/webhook GET (verify) + POST (inbound) + outbound via Meta Graph.
+	// Feature flag ENABLED desliga tudo se não houver tokens configurados.
+	Meta MetaConfig `mapstructure:",squash"`
+
+	// Broker — master switch arquitetural pra alternar entre "Salesforce como
+	// broker" (path legacy, Apex+Mule+SCRT) e "100% Meta direto" (Gateway broker).
+	// Source of truth dessa flag é env var via Infisical; outras camadas (Mule)
+	// consultam o endpoint /admin/broker-mode pra propagação <1min sem redeploy.
+	Broker BrokerConfig `mapstructure:",squash"`
+}
+
+// MetaConfig — credenciais e flags pra Meta WhatsApp Business Cloud API direta.
+// Quando ENABLED=true e tokens válidos presentes, Gateway aceita webhook Meta
+// direto (substituindo Mule como broker do meio).
+type MetaConfig struct {
+	Enabled         bool   `mapstructure:"META_DIRECT_ENABLED"`
+	VerifyToken     string `mapstructure:"META_WEBHOOK_VERIFY_TOKEN"`
+	AppSecret       string `mapstructure:"META_WEBHOOK_APP_SECRET"`
+	SystemUserToken string `mapstructure:"META_SYSTEM_USER_TOKEN"`
+	PhoneNumberID   string `mapstructure:"META_PHONE_NUMBER_ID"`
+	GraphAPIVersion string `mapstructure:"META_GRAPH_API_VERSION"`
+	// SelfCallbackURL é a URL pública do próprio Gateway pro endpoint
+	// `/meta/dispatch`. Quando Meta-direct está ativo e o webhook enqueua,
+	// o worker call back para esse endpoint, que faz outbound via Meta Graph.
+	// Em ambientes diferentes setar via env (ex: https://gateway.staging/meta/dispatch).
+	// Vazio = path Meta-direct inbound funciona, outbound não dispara (worker
+	// loga "no callback_url" e a resposta fica órfã em Redis).
+	SelfCallbackURL string `mapstructure:"META_SELF_CALLBACK_URL"`
+	// DispatchSecret é o shared secret que `/meta/dispatch` valida via header
+	// `X-Meta-Dispatch-Secret`. Sem ele, qualquer caller com um `message_id`
+	// válido (que vem na resposta do webhook) poderia POSTar payload fake e
+	// fazer o Gateway enviar texto arbitrário ao usuário via Meta credentials.
+	// Fail-closed: vazio/placeholder → endpoint sempre rejeita 401 (sem auth =
+	// sem outbound).
+	DispatchSecret string `mapstructure:"META_DISPATCH_SECRET"`
+	// FlowRegistry mapeia flow_name → service_name pra WhatsApp Flow inbound
+	// (`nfm_reply`). Espelha Property Mule `whatsapp.flow.registry`
+	// (ADR-024). Formato: `flow_name1:service_name1;flow_name2:service_name2`.
+	// Match é case-insensitive + substring-tolerante (ex: flow "Luminária
+	// Quebrada" casa com entry "luminaria"). Vazio = pular lookup,
+	// metadata.service_name = "defaultService" config.
+	FlowRegistry string `mapstructure:"META_FLOW_REGISTRY"`
+	// FlowDefaultService é o service_name fallback quando flow_name não bate
+	// nada no FlowRegistry. Match Mule `whatsapp.flow.defaultService`.
+	FlowDefaultService string `mapstructure:"META_FLOW_DEFAULT_SERVICE"`
+}
+
+// BrokerConfig — master switch do papel arquitetural do Salesforce.
+//
+// SalesforceBrokerEnabled=true (default, staging atual):
+//   - Apex Trigger + ConversationPollSchedulable + MuleCalloutQueueable ativos
+//   - Mule /sc/inbound aceita callouts do Apex
+//   - Outbound via SCRT quando hasCorrelation=true
+//   - Case creation no handoff
+//
+// SalesforceBrokerEnabled=false:
+//   - Mule /sc/inbound rejeita 503 (Apex callout vira no-op silencioso)
+//   - Outbound sempre via Meta Graph (skip SCRT mesmo com correlation)
+//   - Handoff não cria Case
+//   - Path canônico é Meta→Mule/Gateway /meta/webhook → Engine → Meta Graph
+//
+// AdminAPIToken protege o endpoint GET /admin/broker-mode (consultado pelo
+// Mule a cada 30s). Fail-closed: vazio/placeholder = endpoint sempre 401.
+type BrokerConfig struct {
+	SalesforceBrokerEnabled bool   `mapstructure:"SALESFORCE_BROKER_ENABLED"`
+	AdminAPIToken           string `mapstructure:"ADMIN_API_TOKEN"`
 }
 
 type ServerConfig struct {
@@ -222,13 +290,14 @@ type CallbackConfig struct {
 
 // GovBrConfig holds configuration for Gov.br OAuth2/PKCE authentication
 type GovBrConfig struct {
-	ClientID      string `mapstructure:"GOVBR_CLIENT_ID"`
-	ClientSecret  string `mapstructure:"GOVBR_CLIENT_SECRET"`
-	RedirectURI   string `mapstructure:"GOVBR_REDIRECT_URI"`
-	AuthURL       string `mapstructure:"GOVBR_AUTH_URL"`
-	TokenURL      string `mapstructure:"GOVBR_TOKEN_URL"`
-	Scope         string `mapstructure:"GOVBR_SCOPE"`
-	AuthStateTTL  int    `mapstructure:"GOVBR_AUTH_STATE_TTL"` // seconds
+	ClientID       string `mapstructure:"GOVBR_CLIENT_ID"`
+	ClientSecret   string `mapstructure:"GOVBR_CLIENT_SECRET"`
+	RedirectURI    string `mapstructure:"GOVBR_REDIRECT_URI"`
+	AuthURL        string `mapstructure:"GOVBR_AUTH_URL"`
+	TokenURL       string `mapstructure:"GOVBR_TOKEN_URL"`
+	Scope          string `mapstructure:"GOVBR_SCOPE"`
+	AuthStateTTL   int    `mapstructure:"GOVBR_AUTH_STATE_TTL"` // seconds
+	InitiateSecret string `mapstructure:"GOVBR_INITIATE_SECRET"`
 }
 
 type DataRelayConfig struct {
@@ -276,6 +345,16 @@ func Load() (*Config, error) {
 }
 
 func setDefaults() {
+	// Meta direct integration — defaults off; ativa setando vars no env.
+	viper.SetDefault("META_DIRECT_ENABLED", false)
+	viper.SetDefault("META_GRAPH_API_VERSION", "v21.0")
+
+	// Broker master switch — default true preserva comportamento atual de
+	// staging (Salesforce broker ativo). Operator vira false via Infisical
+	// pra rodar 100% Meta-direto sem redeploy. Endpoint /admin/broker-mode
+	// requer ADMIN_API_TOKEN (sem default — fail-closed se não setado).
+	viper.SetDefault("SALESFORCE_BROKER_ENABLED", true)
+
 	// Core Application
 	viper.SetDefault("MAX_PARALLEL", 8)
 
@@ -442,6 +521,32 @@ func validateRequired(config *Config) error {
 // bindEnvironmentVariables explicitly binds environment variables to viper keys
 // This is needed because viper.AutomaticEnv() doesn't work well with nested structs
 func bindEnvironmentVariables() {
+	// Meta direct integration (POC feat/meta-direct-poc)
+	_ = viper.BindEnv("META_DIRECT_ENABLED")
+	_ = viper.BindEnv("META_WEBHOOK_VERIFY_TOKEN")
+	_ = viper.BindEnv("META_WEBHOOK_APP_SECRET")
+	_ = viper.BindEnv("META_SYSTEM_USER_TOKEN")
+	_ = viper.BindEnv("META_PHONE_NUMBER_ID")
+	_ = viper.BindEnv("META_GRAPH_API_VERSION")
+	_ = viper.BindEnv("META_SELF_CALLBACK_URL")
+	_ = viper.BindEnv("META_DISPATCH_SECRET")
+	_ = viper.BindEnv("META_FLOW_REGISTRY")
+	_ = viper.BindEnv("META_FLOW_DEFAULT_SERVICE")
+
+	// Broker master switch (Salesforce as broker vs 100% Meta-direct)
+	_ = viper.BindEnv("SALESFORCE_BROKER_ENABLED")
+	_ = viper.BindEnv("ADMIN_API_TOKEN")
+
+	// Gov.br OAuth2/PKCE
+	_ = viper.BindEnv("GOVBR_CLIENT_ID")
+	_ = viper.BindEnv("GOVBR_CLIENT_SECRET")
+	_ = viper.BindEnv("GOVBR_REDIRECT_URI")
+	_ = viper.BindEnv("GOVBR_AUTH_URL")
+	_ = viper.BindEnv("GOVBR_TOKEN_URL")
+	_ = viper.BindEnv("GOVBR_SCOPE")
+	_ = viper.BindEnv("GOVBR_AUTH_STATE_TTL")
+	_ = viper.BindEnv("GOVBR_INITIATE_SECRET")
+
 	// Core Application
 	_ = viper.BindEnv("APP_PREFIX")
 	_ = viper.BindEnv("MAX_PARALLEL")
@@ -573,13 +678,9 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("CALLBACK_ALLOWED_DOMAIN")
 	_ = viper.BindEnv("CALLBACK_AUTH_TOKEN")
 
-	_ = viper.BindEnv("GOVBR_CLIENT_ID")
-	_ = viper.BindEnv("GOVBR_CLIENT_SECRET")
-	_ = viper.BindEnv("GOVBR_REDIRECT_URI")
-	_ = viper.BindEnv("GOVBR_AUTH_URL")
-	_ = viper.BindEnv("GOVBR_TOKEN_URL")
-	_ = viper.BindEnv("GOVBR_SCOPE")
-	_ = viper.BindEnv("GOVBR_AUTH_STATE_TTL")
+	// Gov.br OAuth2/PKCE — canonical list lives no bloco mais acima nessa função.
+	// (mantenha lá pra evitar drift; este placeholder existe só pra clareza
+	// quando alguém adicionar Callback envs novas e procurar onde pôr GOVBR.)
 
 	// Data Relay
 	_ = viper.BindEnv("DATA_RELAY_ENABLED")

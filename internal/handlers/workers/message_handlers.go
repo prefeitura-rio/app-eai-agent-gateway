@@ -141,6 +141,145 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			logger.WithError(err).Error("Failed to update task status to processing")
 		}
 
+		// Per-phone lock pra serializar processamento por cidadão. Múltiplos
+		// workers (MAX_PARALLEL=8) consomem a mesma queue, então duas mensagens
+		// do mesmo user_number podem ser processadas concorrentes — risco de
+		// reordering visível ao cidadão.
+		//
+		// TTL alinhado com RabbitMQ.MessageTimeout (worker run máximo). Se
+		// MessageTimeout não setado, defaulta 30min. Goroutine de renewal
+		// estende o TTL a cada TTL/3 enquanto processamento estiver vivo,
+		// evitando que lock expire mid-Engine-call e outra mensagem do mesmo
+		// user_number entre concorrentemente.
+		if queueMsg.UserNumber != "" {
+			lockKey := "worker:phone-lock:" + queueMsg.UserNumber
+			lockHolder := queueMsg.ID
+			lockTTL := deps.Config.RabbitMQ.MessageTimeout
+			if lockTTL < 5*time.Minute {
+				lockTTL = 30 * time.Minute
+			}
+			const (
+				lockMaxAttempts  = 50
+				lockBackoff      = 100 * time.Millisecond
+				lockTotalTimeout = 10 * time.Second
+			)
+			lockAcquired := false
+			// lockStoreErr captura erro de infra (Redis down, ctx cancelado).
+			// Discrimina infra-failure de contention pura — só contention sem
+			// erro vira transient requeue; infra-failure proceeds degraded
+			// (sem lock) pra evitar hot-loop de requeue indefinido.
+			//
+			// INVARIANTE LOAD-BEARING: o `break` na branch lockErr != nil é
+			// crítico. lockStoreErr é setado APENAS uma vez; se removermos o
+			// break (e.g. pra "tentar de novo após erro"), um attempt posterior
+			// que sucede silenciosamente sobrescreveria a semântica — o branch
+			// `else if lockStoreErr != nil` (linha ~258) classifica erro de
+			// infra distintamente de contention. Não remover o break sem
+			// reavaliar essa lógica.
+			var lockStoreErr error
+			lockCtx, lockCancel := context.WithTimeout(ctx, lockTotalTimeout)
+			for attempt := 0; attempt < lockMaxAttempts; attempt++ {
+				ok, lockErr := deps.RedisService.AcquireLock(lockCtx, lockKey, lockHolder, lockTTL)
+				if lockErr != nil {
+					lockStoreErr = lockErr
+					logger.WithError(lockErr).Warn("phone-lock acquire error (degraded); proceeding without lock")
+					break // INVARIANTE — ver bloco acima.
+				}
+				if ok {
+					lockAcquired = true
+					break
+				}
+				select {
+				case <-lockCtx.Done():
+					attempt = lockMaxAttempts
+				case <-time.After(lockBackoff):
+				}
+			}
+			lockCancel()
+			if lockAcquired {
+				// Renewal goroutine: SETEX a cada TTL/3 enquanto processamento
+				// está vivo. Stops quando defer fecha doneCh ou ReleaseLock
+				// finaliza. Sem isso, Engine call demorada (>TTL) faz outro
+				// worker pegar lock expirado e processar concorrente — quebra
+				// a serialização que o lock prometia.
+				renewInterval := lockTTL / 3
+				if renewInterval < 30*time.Second {
+					renewInterval = 30 * time.Second
+				}
+				doneCh := make(chan struct{})
+				go func() {
+					ticker := time.NewTicker(renewInterval)
+					defer ticker.Stop()
+					const maxConsecutiveFailures = 3
+					failures := 0
+					for {
+						select {
+						case <-doneCh:
+							return
+						case <-ticker.C:
+							renewCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							// CAS Lua: só renova se ainda somos o titular.
+							// Sem isso, Set unconditional roubaria lock de
+							// outro worker se TTL expirou mid-process.
+							ok, renewErr := deps.RedisService.RenewLock(renewCtx, lockKey, lockHolder, lockTTL)
+							cancel()
+							if renewErr != nil {
+								failures++
+								// Severidade graduada: 1ª/2ª falhas são quase certo
+								// blip transitório (Redis reconnect, mTLS handshake);
+								// Debug evita spam de alerta em CloudHub. 3ª já é
+								// outage prolongada (~3× renewInterval = ~30min com
+								// lockTTL=30min) — promover pra Error + return.
+								if failures < maxConsecutiveFailures {
+									logger.WithError(renewErr).WithField("consecutive_failures", failures).
+										Debug("phone-lock renewal transient error (retrying)")
+									continue
+								}
+								logger.WithError(renewErr).WithField("consecutive_failures", failures).
+									Error("phone-lock renewal failed repeatedly — Redis outage suspected; lock effectively lost")
+								return
+							}
+							failures = 0 // reset após sucesso
+							if !ok {
+								logger.Warn("phone-lock lost during processing (TTL expired or stolen)")
+								return // parar renovação — não somos mais donos
+							}
+						}
+					}
+				}()
+				defer func() {
+					close(doneCh)
+					relCtx, relCancel := context.WithTimeout(context.Background(), 2*time.Second)
+					defer relCancel()
+					if relErr := deps.RedisService.ReleaseLock(relCtx, lockKey, lockHolder); relErr != nil {
+						logger.WithError(relErr).Debug("phone-lock release (likely TTL expired, ok)")
+					}
+				}()
+			} else if lockStoreErr != nil {
+				// Redis indisponível: o resto do pipeline (SetTaskResult,
+				// GetCallbackURL) também depende de Redis e só loga erro
+				// sem propagar. Prosseguir aqui ACKaria a mensagem com
+				// resposta perdida. Retornar erro normal pro consumer fazer
+				// retry/DLQ accounting padrão.
+				logger.WithError(lockStoreErr).WithField("message_id", queueMsg.ID).
+					Error("phone-lock acquire failed (Redis outage); returning error for normal retry/DLQ accounting")
+				return fmt.Errorf("phone-lock acquire failed: %w", lockStoreErr)
+			} else if queueMsg.UserNumber != "" {
+				logger.WithFields(logrus.Fields{
+					"user_number": queueMsg.UserNumber,
+					"message_id":  queueMsg.ID,
+				}).Info("phone-lock not acquired in time; transient requeue (lock held by sibling worker)")
+				// Contention pura (sem erro de infra) é fluxo normal — outro
+				// worker tem o lock do mesmo cidadão. Retornar erro genérico
+				// aqui faria o consumer queimar retry budget e, com
+				// RABBITMQ_MAX_RETRIES=-1 (default), mandaria rajadas do mesmo
+				// número direto pra DLQ na primeira tentativa. Sinaliza
+				// transient requeue: consumer republica preservando retryCount,
+				// com backoff explícito (não tight loop).
+				return lockContentionRequeue{userNumber: queueMsg.UserNumber}
+			}
+		}
+
 		// Process the user message with optional OTel tracing
 		var response string
 		var err error
@@ -327,8 +466,6 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		"has_previous_message": msg.PreviousMessage != nil,
 		"provider":             msg.Provider,
 	}).Info("Processing user message")
-
-	logger.Info("DEBUG: Starting processUserMessage function execution")
 
 	// Validate provider - currently only support google_agent_engine
 	if msg.Provider != "google_agent_engine" {

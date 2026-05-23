@@ -1,0 +1,977 @@
+package handlers
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	stdio "io"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
+
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
+)
+
+// ─── Mocks ───────────────────────────────────────────────────────────────
+
+type mockSenderCall struct {
+	kind      string // "text" | "media" | "location" | "template" | "interactive" | "reaction"
+	recipient string
+	body      string
+	mediaType string
+	media     services.MediaInput
+	lat, lng  float64
+	tplName   string
+	subtype   string
+	emoji     string
+	wamidPrev string
+}
+
+type mockSender struct {
+	mu      sync.Mutex
+	calls   []mockSenderCall
+	wamid   string
+	failErr error
+}
+
+func (m *mockSender) record(call mockSenderCall) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, call)
+	if m.failErr != nil {
+		return "", m.failErr
+	}
+	if m.wamid == "" {
+		return "wamid.OUT", nil
+	}
+	return m.wamid, nil
+}
+
+func (m *mockSender) SendText(_ context.Context, recipient, body string) (string, error) {
+	return m.record(mockSenderCall{kind: "text", recipient: recipient, body: body})
+}
+
+func (m *mockSender) SendMedia(_ context.Context, recipient, mediaType string, in services.MediaInput) (string, error) {
+	return m.record(mockSenderCall{kind: "media", recipient: recipient, mediaType: mediaType, media: in})
+}
+
+func (m *mockSender) SendLocation(_ context.Context, recipient string, lat, lng float64, name, address string) (string, error) {
+	return m.record(mockSenderCall{kind: "location", recipient: recipient, lat: lat, lng: lng, body: name + "|" + address})
+}
+
+func (m *mockSender) SendTemplate(_ context.Context, recipient, name, langCode string, _ []map[string]interface{}) (string, error) {
+	return m.record(mockSenderCall{kind: "template", recipient: recipient, tplName: name, body: langCode})
+}
+
+func (m *mockSender) SendInteractive(_ context.Context, recipient, subtype string, _, _, _, _ map[string]interface{}) (string, error) {
+	return m.record(mockSenderCall{kind: "interactive", recipient: recipient, subtype: subtype})
+}
+
+func (m *mockSender) SendReaction(_ context.Context, recipient, wamid, emoji string) (string, error) {
+	return m.record(mockSenderCall{kind: "reaction", recipient: recipient, wamidPrev: wamid, emoji: emoji})
+}
+
+func (m *mockSender) UploadMedia(_ context.Context, mimeType string, content []byte, _ string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.calls = append(m.calls, mockSenderCall{kind: "upload", mediaType: mimeType, body: string(content)})
+	if m.failErr != nil {
+		return "", m.failErr
+	}
+	return "uploaded-media-id-1", nil
+}
+
+func (m *mockSender) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.calls)
+}
+
+func (m *mockSender) lastCall() *mockSenderCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.calls) == 0 {
+		return nil
+	}
+	c := m.calls[len(m.calls)-1]
+	return &c
+}
+
+type mockRedisGet struct {
+	mu    sync.Mutex
+	store map[string]string
+	err   error
+}
+
+func (m *mockRedisGet) put(key, val string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.store == nil {
+		m.store = map[string]string{}
+	}
+	m.store[key] = val
+}
+
+func (m *mockRedisGet) Get(_ context.Context, key string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return "", m.err
+	}
+	if v, ok := m.store[key]; ok {
+		return v, nil
+	}
+	// Match real RedisService.Get semantics — missing key retorna sentinel
+	// ErrKeyNotFound (wrappado com %w), permitindo handler discriminar miss
+	// esperado (404) de Redis down (5xx).
+	return "", services.ErrKeyNotFound
+}
+
+// Stubs satisfying RedisServiceInterface — só Get matter pra dispatcher.
+func (m *mockRedisGet) SetTaskStatus(_ context.Context, _ string, _ string, _ time.Duration) error {
+	return nil
+}
+func (m *mockRedisGet) GetTaskStatus(_ context.Context, _ string) (string, error) { return "", nil }
+func (m *mockRedisGet) GetTaskResult(_ context.Context, _ string, _ interface{}) error {
+	return nil
+}
+func (m *mockRedisGet) Set(_ context.Context, _ string, _ string, _ time.Duration) error {
+	return nil
+}
+func (m *mockRedisGet) StoreCallbackURL(_ context.Context, _, _ string, _ time.Duration) error {
+	return nil
+}
+func (m *mockRedisGet) GetCallbackURL(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+func (m *mockRedisGet) SetUserLastActivity(_ context.Context, _ string, _ time.Time, _ time.Duration) error {
+	return nil
+}
+func (m *mockRedisGet) GetUserLastActivity(_ context.Context, _ string) (*time.Time, error) {
+	return nil, nil
+}
+func (m *mockRedisGet) GetUserLastActivityTTL(_ context.Context, _ string) (time.Duration, error) {
+	return 0, nil
+}
+func (m *mockRedisGet) Ping(_ context.Context) error { return nil }
+
+// mockSendClaimer estende mockRedisGet com SetNX + Delete atômicos pra
+// satisfazer SendClaimer e exercitar o atomic-dedup path do dispatcher
+// (mockRedisGet pelado faz type-assertion falhar → cai pro fallback non-
+// atomic, e os branches do success/no_content marker não rodam).
+type mockSendClaimer struct {
+	mockRedisGet
+	setNXErr    error
+	deleteErr   error
+	setNXCalls  int
+	deleteCalls int
+	// failKeys: lista de keys cujo Set vai falhar (uma vez por entry).
+	// Permite simular Redis blip seletivo pra testar fallback path.
+	failKeys []string
+}
+
+// SetNX só grava se a chave não existe. Retorna ok=true se gravou,
+// false se já existia. Match RedisService.SetNX semantics.
+func (m *mockSendClaimer) SetNX(_ context.Context, key, value string, _ time.Duration) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setNXCalls++
+	if m.setNXErr != nil {
+		return false, m.setNXErr
+	}
+	if m.store == nil {
+		m.store = map[string]string{}
+	}
+	if _, exists := m.store[key]; exists {
+		return false, nil
+	}
+	m.store[key] = value
+	return true, nil
+}
+
+func (m *mockSendClaimer) Delete(_ context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleteCalls++
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	delete(m.store, key)
+	return nil
+}
+
+// Override Set pra realmente persistir (mockRedisGet.Set é no-op stub).
+// Necessário pros testes do dedup path verem o marker `inflight` → `wamid`
+// ou `inflight` → `no_content` que o dispatcher escreve pós-claim.
+//
+// Se key estiver em failKeys, consome a primeira entry matching e retorna
+// erro (simula Redis blip transitório que se recupera no próximo Set).
+func (m *mockSendClaimer) Set(_ context.Context, key, value string, _ time.Duration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, fk := range m.failKeys {
+		if fk == key {
+			m.failKeys = append(m.failKeys[:i], m.failKeys[i+1:]...)
+			return errors.New("simulated redis blip")
+		}
+	}
+	if m.store == nil {
+		m.store = map[string]string{}
+	}
+	m.store[key] = value
+	return nil
+}
+
+// peek lê o valor atual do store sem passar pelo Get (que retornaria
+// ErrKeyNotFound em miss). Usado pelos testes pra inspecionar o marker.
+func (m *mockSendClaimer) peek(key string) (string, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.store[key]
+	return v, ok
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────
+
+const testDispatchSecret = "test-dispatch-secret"
+
+func newDispatchHandler(t *testing.T, sender MetaSender, redis RedisServiceInterface) *MetaDispatchHandler {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	logger := logrus.New()
+	logger.SetOutput(stdio.Discard)
+	return NewMetaDispatchHandler(sender, redis, testDispatchSecret, logger)
+}
+
+func postJSON(t *testing.T, h *MetaDispatchHandler, body interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+	payload, _ := json.Marshal(body)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/dispatch", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Meta-Dispatch-Secret", testDispatchSecret)
+	h.HandleDispatch(c)
+	return w
+}
+
+// ─── Tests ───────────────────────────────────────────────────────────────
+
+func TestDispatch_HappyPath(t *testing.T) {
+	sender := &mockSender{}
+	redis := &mockRedisGet{}
+	redis.put("task:metadata:msg-1", `{"user_number":"5521","provider":"google_agent_engine"}`)
+	h := newDispatchHandler(t, sender, redis)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-1",
+		Status:    string(models.TaskStatusCompleted),
+		Data: map[string]interface{}{
+			"messages": []interface{}{
+				map[string]interface{}{"content": "Olá cidadão!", "role": "ai"},
+			},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 1 {
+		t.Fatalf("expected 1 SendText call, got %d", sender.callCount())
+	}
+	if sender.calls[0].recipient != "5521" {
+		t.Errorf("expected recipient=5521, got %q", sender.calls[0].recipient)
+	}
+	if sender.calls[0].body != "Olá cidadão!" {
+		t.Errorf("expected body=Olá cidadão!, got %q", sender.calls[0].body)
+	}
+}
+
+func TestDispatch_NoSenderConfigured(t *testing.T) {
+	h := newDispatchHandler(t, nil, &mockRedisGet{})
+	w := postJSON(t, h, MetaDispatchPayload{MessageID: "x", Status: "completed"})
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (no sender), got %d", w.Code)
+	}
+}
+
+func TestDispatch_NonCompletedStatusSkips(t *testing.T) {
+	sender := &mockSender{}
+	h := newDispatchHandler(t, sender, &mockRedisGet{})
+	w := postJSON(t, h, MetaDispatchPayload{MessageID: "x", Status: "failed"})
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 (noop), got %d", w.Code)
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends (non-completed), got %d", sender.callCount())
+	}
+}
+
+func TestDispatch_UserNumberNotFound(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{} // sem put → retorna redis.Nil
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, MetaDispatchPayload{MessageID: "missing", Status: "completed"})
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 (key missing), got %d", w.Code)
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends, got %d", sender.callCount())
+	}
+}
+
+func TestDispatch_AlreadySentSkipsResend(t *testing.T) {
+	// Codex P2: worker retry após Meta accept devia retornar 200 sem
+	// reenviar (WhatsApp send não é idempotente).
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("meta:dispatch:sent:msg-1", "wamid.PREVIOUS")
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-1",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "x"}},
+		},
+	})
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 (already_sent), got %d", w.Code)
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero re-sends (already_sent), got %d", sender.callCount())
+	}
+}
+
+func TestDispatch_RedisDownReturns503(t *testing.T) {
+	// Codex P2: Redis transient down não deveria virar 404 (non-retriable
+	// pelo callback_service). 5xx faz worker retentar.
+	sender := &mockSender{}
+	rs := &mockRedisGet{err: errors.New("redis: connection refused")}
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, MetaDispatchPayload{MessageID: "msg-1", Status: "completed"})
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (redis down → retry), got %d", w.Code)
+	}
+}
+
+func TestDispatch_EmptyContentSkipsSend(t *testing.T) {
+	sender := &mockSender{}
+	redis := &mockRedisGet{}
+	redis.put("task:metadata:msg-empty", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, redis)
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-empty",
+		Status:    "completed",
+		Data:      map[string]interface{}{"messages": []interface{}{}},
+	})
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", w.Code)
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends (no content), got %d", sender.callCount())
+	}
+}
+
+func TestDispatch_SendFailureReturns502(t *testing.T) {
+	sender := &mockSender{failErr: errors.New("Meta 5xx")}
+	redis := &mockRedisGet{}
+	redis.put("task:metadata:msg-fail", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, redis)
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-fail",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{
+				map[string]interface{}{"content": "hi"},
+			},
+		},
+	})
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", w.Code)
+	}
+}
+
+func TestDispatch_RejectsMissingSecret(t *testing.T) {
+	// Codex P1: sem auth, qualquer caller com message_id válido podia
+	// disparar SendText arbitrário. Verify 401 sem o header.
+	sender := &mockSender{}
+	redis := &mockRedisGet{}
+	redis.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, redis)
+
+	payload, _ := json.Marshal(MetaDispatchPayload{MessageID: "msg-1", Status: "completed"})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/dispatch", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+	// SEM X-Meta-Dispatch-Secret
+	h.HandleDispatch(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 (missing secret), got %d", w.Code)
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends (rejected), got %d", sender.callCount())
+	}
+}
+
+func TestDispatch_RejectsWrongSecret(t *testing.T) {
+	sender := &mockSender{}
+	redis := &mockRedisGet{}
+	redis.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, redis)
+
+	payload, _ := json.Marshal(MetaDispatchPayload{MessageID: "msg-1", Status: "completed"})
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/dispatch", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Request.Header.Set("X-Meta-Dispatch-Secret", "wrong")
+	h.HandleDispatch(c)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 (wrong secret), got %d", w.Code)
+	}
+}
+
+func TestDispatch_RejectsWhenSecretUnset(t *testing.T) {
+	// Fail-closed: handler com secret vazio sempre rejeita 401, mesmo se
+	// caller mandar header vazio.
+	gin.SetMode(gin.TestMode)
+	logger := logrus.New()
+	logger.SetOutput(stdio.Discard)
+	h := NewMetaDispatchHandler(&mockSender{}, &mockRedisGet{}, "", logger)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/meta/dispatch", bytes.NewReader([]byte("{}")))
+	c.Request.Header.Set("X-Meta-Dispatch-Secret", "")
+	h.HandleDispatch(c)
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 (fail-closed), got %d", w.Code)
+	}
+}
+
+// ─── Dispatch routing by message_type ────────────────────────────────────
+
+func dispatchPayload(messages ...interface{}) MetaDispatchPayload {
+	return MetaDispatchPayload{
+		MessageID: "msg-1",
+		Status:    "completed",
+		Data:      map[string]interface{}{"messages": messages},
+	}
+}
+
+func TestDispatch_RoutesImageEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_media",
+			"content":      `{"status":"ok","type":"image","url":"https://example.com/img.jpg","caption":"foto"}`,
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "media" || last.mediaType != "image" {
+		t.Errorf("expected media/image, got %+v", last)
+	}
+	if last.media.Link != "https://example.com/img.jpg" {
+		t.Errorf("expected link, got %q", last.media.Link)
+	}
+}
+
+func TestDispatch_RoutesAudioFromGenerateAudioResponse(t *testing.T) {
+	// audio_base64 → UploadMedia → SendMedia(ID=uploaded-id). Verifica que
+	// envelope base64 não falha em "media requires either id or link".
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	// "AAAA" base64-decoded = 3 bytes nulos
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "generate_audio_response",
+			"content":      `{"status":"ok","audio_base64":"SGVsbG8=","mime_type":"audio/ogg"}`,
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	// Deve ter chamado UploadMedia + SendMedia (2 calls)
+	if sender.callCount() != 2 {
+		t.Fatalf("expected 2 calls (upload+send), got %d", sender.callCount())
+	}
+	if sender.calls[0].kind != "upload" {
+		t.Errorf("expected first call upload, got %+v", sender.calls[0])
+	}
+	if sender.calls[1].kind != "media" || sender.calls[1].mediaType != "audio" {
+		t.Errorf("expected second call media/audio, got %+v", sender.calls[1])
+	}
+	if sender.calls[1].media.ID != "uploaded-media-id-1" {
+		t.Errorf("expected media.ID=uploaded-media-id-1, got %q", sender.calls[1].media.ID)
+	}
+}
+
+func TestDispatch_RoutesLocationEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_media",
+			"content":      `{"status":"ok","type":"location","latitude":-22.9,"longitude":-43.2,"name":"Praça"}`,
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "location" {
+		t.Fatalf("expected location, got %+v", last)
+	}
+	if last.lat != -22.9 || last.lng != -43.2 {
+		t.Errorf("expected coords, got lat=%v lng=%v", last.lat, last.lng)
+	}
+}
+
+func TestDispatch_RoutesInteractiveEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_buttons",
+			"content": map[string]interface{}{
+				"status": "ok",
+				"type":   "interactive",
+				"interactive": map[string]interface{}{
+					"subtype": "button",
+					"body":    map[string]interface{}{"text": "Confirma?"},
+					"action": map[string]interface{}{
+						"buttons": []map[string]interface{}{
+							{"type": "reply", "reply": map[string]string{"id": "yes", "title": "Sim"}},
+						},
+					},
+				},
+			},
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "interactive" || last.subtype != "button" {
+		t.Errorf("expected interactive/button, got %+v", last)
+	}
+}
+
+func TestDispatch_RoutesReactionEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_media",
+			"content":      `{"status":"ok","type":"reaction","reaction_to_message_id":"wamid.PREV","emoji":"❤️"}`,
+		},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "reaction" || last.emoji != "❤️" || last.wamidPrev != "wamid.PREV" {
+		t.Errorf("expected reaction, got %+v", last)
+	}
+}
+
+func TestDispatch_FallsBackToTextWhenNoEnvelope(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{"content": "Olá!", "role": "ai"},
+	))
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	last := sender.lastCall()
+	if last == nil || last.kind != "text" || last.body != "Olá!" {
+		t.Errorf("expected text Olá!, got %+v", last)
+	}
+}
+
+func TestDispatch_LocationEnvelopeMissingCoordsReturns502(t *testing.T) {
+	sender := &mockSender{}
+	rs := &mockRedisGet{}
+	rs.put("task:metadata:msg-1", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, rs)
+	w := postJSON(t, h, dispatchPayload(
+		map[string]interface{}{
+			"message_type": "tool_return_message",
+			"name":         "send_whatsapp_media",
+			"content":      `{"status":"ok","type":"location","name":"Sem coords"}`,
+		},
+	))
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("expected 502, got %d", w.Code)
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends, got %d", sender.callCount())
+	}
+}
+
+func TestExtractMessageText(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]interface{}
+		want string
+	}{
+		{"nil", nil, ""},
+		{"empty", map[string]interface{}{}, ""},
+		{"messages last", map[string]interface{}{
+			"messages": []interface{}{
+				map[string]interface{}{"content": "a"},
+				map[string]interface{}{"content": "b"},
+			},
+		}, "b"},
+		{"skip trailing usage_statistics by type", map[string]interface{}{
+			"messages": []interface{}{
+				map[string]interface{}{"content": "real reply", "role": "ai"},
+				map[string]interface{}{"type": "usage_statistics", "input_tokens": 10},
+			},
+		}, "real reply"},
+		{"skip trailing usage_statistics by key presence", map[string]interface{}{
+			"messages": []interface{}{
+				map[string]interface{}{"content": "another reply"},
+				map[string]interface{}{"usage_statistics": map[string]interface{}{"x": 1}},
+			},
+		}, "another reply"},
+		{"data.content fallback", map[string]interface{}{
+			"content": "direct",
+		}, "direct"},
+		{"messages with non-string", map[string]interface{}{
+			"messages": []interface{}{
+				map[string]interface{}{"content": 123},
+			},
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractMessageText(tc.in); got != tc.want {
+				t.Errorf("got %q want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// ─── SendClaimer path tests ─────────────────────────────────────────────
+//
+// Cobrem o atomic-dedup branch que mockRedisGet pelado nunca exercita
+// (type assertion falha → fallback non-atomic). Validam:
+//   - SETNX OK + SendText OK   → marker = wamid, claim preservada (não Delete)
+//   - SETNX OK + SendText fail → defer release Delete (sem marker)
+//   - SETNX OK + no_content    → marker = "no_content" (sentinela terminal)
+//   - SETNX false / pré-marker → 503 (inflight) | 200 already_sent (terminal)
+
+func TestDispatch_AtomicDedup_SuccessSetsMarkerToWamid(t *testing.T) {
+	sender := &mockSender{wamid: "wamid.OUT.123"}
+	claimer := &mockSendClaimer{}
+	claimer.put("task:metadata:msg-A", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-A",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá", "role": "ai"}},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 1 {
+		t.Fatalf("expected 1 send, got %d", sender.callCount())
+	}
+	if claimer.setNXCalls != 1 {
+		t.Errorf("expected 1 SETNX, got %d", claimer.setNXCalls)
+	}
+	if claimer.deleteCalls != 0 {
+		t.Errorf("expected zero Delete (claim preserved on success), got %d", claimer.deleteCalls)
+	}
+	if v, _ := claimer.peek("meta:dispatch:sent:msg-A"); v != "wamid.OUT.123" {
+		t.Errorf("expected marker=wamid.OUT.123, got %q", v)
+	}
+}
+
+func TestDispatch_AtomicDedup_SendFailureReleasesClaim(t *testing.T) {
+	sender := &mockSender{failErr: errors.New("Meta 5xx")}
+	claimer := &mockSendClaimer{}
+	claimer.put("task:metadata:msg-B", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-B",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá"}},
+		},
+	})
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", w.Code)
+	}
+	if claimer.deleteCalls != 1 {
+		t.Errorf("expected 1 Delete (claim released for retry), got %d", claimer.deleteCalls)
+	}
+	if _, ok := claimer.peek("meta:dispatch:sent:msg-B"); ok {
+		t.Errorf("expected marker cleared after defer release, but still present")
+	}
+}
+
+func TestDispatch_AtomicDedup_NoContentSetsTerminalMarker(t *testing.T) {
+	// Payload sem text e sem media envelope → no_content path. Marker
+	// deve virar "no_content" (sentinela terminal) pra concurrent retries
+	// caírem em already_sent, não inflight=503.
+	sender := &mockSender{}
+	claimer := &mockSendClaimer{}
+	claimer.put("task:metadata:msg-C", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-C",
+		Status:    "completed",
+		Data:      map[string]interface{}{"messages": []interface{}{}},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (no_content), got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends (no content), got %d", sender.callCount())
+	}
+	if claimer.deleteCalls != 0 {
+		t.Errorf("expected zero Delete (marker preserved on no_content), got %d", claimer.deleteCalls)
+	}
+	v, ok := claimer.peek("meta:dispatch:sent:msg-C")
+	if !ok {
+		t.Fatal("expected no_content marker present, got missing")
+	}
+	if v != dedupValueNoContent {
+		t.Errorf("expected marker=%q, got %q", dedupValueNoContent, v)
+	}
+}
+
+func TestDispatch_AtomicDedup_ConcurrentRetrySeesNoContentAndAcks(t *testing.T) {
+	// 1ª chamada: no_content → marker grava "no_content".
+	// 2ª chamada (concurrent retry do mesmo message_id): SETNX false →
+	// Get vê "no_content" (≠ inflight) → cai no path already_sent 200,
+	// não 503. Sem essa garantia, retries ficariam presos em 503 por 24h.
+	sender := &mockSender{}
+	claimer := &mockSendClaimer{}
+	claimer.put("task:metadata:msg-D", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w1 := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-D",
+		Status:    "completed",
+		Data:      map[string]interface{}{"messages": []interface{}{}},
+	})
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first call: expected 200, got %d", w1.Code)
+	}
+
+	w2 := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-D",
+		Status:    "completed",
+		Data:      map[string]interface{}{"messages": []interface{}{}},
+	})
+	if w2.Code != http.StatusOK {
+		t.Fatalf("retry call: expected 200 (already_sent), got %d body=%s", w2.Code, w2.Body.String())
+	}
+	if !bytes.Contains(w2.Body.Bytes(), []byte(`"already_sent"`)) {
+		t.Errorf("retry should report already_sent, got body=%s", w2.Body.String())
+	}
+	if claimer.setNXCalls != 2 {
+		t.Errorf("expected 2 SETNX attempts, got %d", claimer.setNXCalls)
+	}
+}
+
+func TestDispatch_AtomicDedup_WamidSetFailFallbackToDone(t *testing.T) {
+	// Codex round 2 P2: quando o Set(sentKey, wamid) falha pós-send OK,
+	// tentar fallback Set(sentKey, dedupValueDone) antes de deletar a claim.
+	// Concurrent retries veem "done" → 200 already_sent (não 503 forever).
+	sender := &mockSender{wamid: "wamid.RECOVER"}
+	claimer := &mockSendClaimer{
+		// 1º Set falha (com wamid), 2º Set succeed (fallback "done").
+		failKeys: []string{"meta:dispatch:sent:msg-E"},
+	}
+	claimer.put("task:metadata:msg-E", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-E",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá", "role": "ai"}},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (send OK, marker fallback OK), got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 1 {
+		t.Errorf("expected 1 send (mensagem foi entregue), got %d", sender.callCount())
+	}
+	if claimer.deleteCalls != 0 {
+		t.Errorf("expected zero Delete (claim preserved via fallback), got %d", claimer.deleteCalls)
+	}
+	v, ok := claimer.peek("meta:dispatch:sent:msg-E")
+	if !ok {
+		t.Fatal("expected fallback marker present, got missing")
+	}
+	if v != dedupValueDone {
+		t.Errorf("expected fallback marker=%q (sentinel terminal), got %q", dedupValueDone, v)
+	}
+}
+
+func TestDispatch_AtomicDedup_WamidAndFallbackBothFailReleasesClaim(t *testing.T) {
+	// Cenário extremo (Redis fora prolongado): BOTH wamid Set AND fallback
+	// done Set falham. Claim é deletada pelo defer — aceita risco de duplicate
+	// send em concurrent retry, mas evita inflight stuck 24h. Log Error explícito.
+	sender := &mockSender{wamid: "wamid.LOST"}
+	claimer := &mockSendClaimer{
+		// Ambos Sets do sentKey falham (1º = wamid, 2º = fallback done).
+		failKeys: []string{
+			"meta:dispatch:sent:msg-F",
+			"meta:dispatch:sent:msg-F",
+		},
+	}
+	claimer.put("task:metadata:msg-F", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-F",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá"}},
+		},
+	})
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 (send OK), got %d body=%s", w.Code, w.Body.String())
+	}
+	if claimer.deleteCalls != 1 {
+		t.Errorf("expected 1 Delete (claim released after both Sets failed), got %d", claimer.deleteCalls)
+	}
+	if _, ok := claimer.peek("meta:dispatch:sent:msg-F"); ok {
+		t.Errorf("expected marker cleared after fallback fail + defer release")
+	}
+}
+
+// raceClaimer simula o caso onde SETNX retorna false (chave existe no
+// momento) mas o Get subsequente vê a chave evicted (Redis LRU pressure /
+// TTL expiry no microsegundo entre as 2 chamadas). RedisService real
+// retorna `ErrKeyNotFound` nesse caso — mockSendClaimer vanilla retornaria
+// `("", nil)` que falsamente cairia no path "already sent" com wamid vazio.
+type raceClaimer struct{ mockSendClaimer }
+
+func (r *raceClaimer) SetNX(_ context.Context, _ string, _ string, _ time.Duration) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setNXCalls++
+	return false, nil
+}
+
+func (r *raceClaimer) Get(_ context.Context, _ string) (string, error) {
+	return "", services.ErrKeyNotFound
+}
+
+func TestDispatch_AtomicDedup_SetNXFalseGetNotFoundReturns503(t *testing.T) {
+	// Race: SETNX false (sinaliza "chave existia") + Get retorna ErrKeyNotFound
+	// (chave evicted entre as 2 chamadas). SEM o fix, handler caía no path
+	// "already_sent" com wamid vazio e 200 — mascarava o caso e o cidadão
+	// não recebia resposta. COM fix: retorna 503 pra worker retentar com
+	// SETNX limpo no próximo round.
+	sender := &mockSender{}
+	claimer := &raceClaimer{}
+	claimer.put("task:metadata:msg-RACE", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-RACE",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá"}},
+		},
+	})
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (SETNX false + Get not-found → retry), got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends (claim state lost), got %d", sender.callCount())
+	}
+}
+
+// transientGetClaimer simula Redis blip onde SETNX false + Get retorna erro
+// não-sentinela (e.g. connection timeout). RedisService real propagaria o erro.
+// Handler deve cair em 503 (vs 200 silencioso).
+type transientGetClaimer struct{ mockSendClaimer }
+
+func (r *transientGetClaimer) SetNX(_ context.Context, _ string, _ string, _ time.Duration) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.setNXCalls++
+	return false, nil
+}
+
+func (r *transientGetClaimer) Get(_ context.Context, _ string) (string, error) {
+	return "", errors.New("redis: connection refused")
+}
+
+func TestDispatch_AtomicDedup_SetNXFalseGetErrorReturns503(t *testing.T) {
+	// SETNX false + Get com erro transient (Redis blip): handler deve
+	// retornar 503 pra worker retentar. Sem isso, erro era engolido pelo `_`
+	// e o caller tinha 200 silencioso.
+	sender := &mockSender{}
+	claimer := &transientGetClaimer{}
+	claimer.put("task:metadata:msg-TRGET", `{"user_number":"5521"}`)
+	h := newDispatchHandler(t, sender, claimer)
+
+	w := postJSON(t, h, MetaDispatchPayload{
+		MessageID: "msg-TRGET",
+		Status:    "completed",
+		Data: map[string]interface{}{
+			"messages": []interface{}{map[string]interface{}{"content": "olá"}},
+		},
+	})
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 (Get error → retry), got %d body=%s", w.Code, w.Body.String())
+	}
+	if sender.callCount() != 0 {
+		t.Errorf("expected zero sends (lookup failed), got %d", sender.callCount())
+	}
+}

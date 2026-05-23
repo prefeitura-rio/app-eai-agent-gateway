@@ -26,7 +26,14 @@ type Server struct {
 	healthHandler       *handlers.HealthHandler
 	messageHandler      *handlers.MessageHandler
 	userActivityHandler *handlers.UserActivityHandler
+	// metaWebhookHandler é nil quando META_DIRECT_ENABLED=false (default).
+	// POC `feat/meta-direct-poc`: substitui Mule como broker entre Meta e Engine.
+	metaWebhookHandler   *handlers.MetaWebhookHandler
+	metaDispatchHandler  *handlers.MetaDispatchHandler
 	govBrCallbackHandler *handlers.GovBrCallbackHandler
+	// adminBrokerModeHandler — expõe GET /admin/broker-mode pra Mule pollar
+	// e descobrir o estado do master switch SALESFORCE_BROKER_ENABLED.
+	adminBrokerModeHandler *handlers.AdminBrokerModeHandler
 	redisService        *services.RedisService
 	rabbitMQService     *services.RabbitMQService
 	postgresService     *services.PostgresService
@@ -94,6 +101,75 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 
 	// Load HTML templates for Gov.br auth callbacks
 	server.router.LoadHTMLGlob("templates/*.html")
+
+	// Meta direct integration (POC) — só instancia se feature flag ativa.
+	// Tokens validados de forma laxa aqui; handler faz fail-closed em runtime
+	// se AppSecret ausente.
+	if cfg.Meta.Enabled {
+		// Redis cumpre o papel de dedup ledger (SETNX wamid). Em testes/POC
+		// sem Redis, passar nil desativa idempotência — Meta retries podem
+		// duplicar processamento, mas o webhook continua funcionando.
+		var dedup handlers.MetaDedupChecker
+		if redisService != nil {
+			dedup = redisService
+		}
+		server.metaWebhookHandler = handlers.NewMetaWebhookHandler(
+			&cfg.Meta, server.messageHandler, dedup, logger,
+		)
+		// Outbound dispatcher: worker callback → /meta/dispatch → Meta Graph.
+		// Inicializa apenas se credenciais Meta estão setadas; senão `sender`
+		// fica nil e o endpoint retorna 503.
+		var sender handlers.MetaSender
+		if cfg.Meta.SystemUserToken != "" && cfg.Meta.PhoneNumberID != "" {
+			sender = services.NewMetaGraphService(&cfg.Meta, logger)
+		}
+		server.metaDispatchHandler = handlers.NewMetaDispatchHandler(sender, redisService, cfg.Meta.DispatchSecret, logger)
+		logger.WithFields(logrus.Fields{
+			"event":             "meta_direct_enabled",
+			"verify_token_set":  cfg.Meta.VerifyToken != "",
+			"app_secret_set":    cfg.Meta.AppSecret != "",
+			"phone_id_set":      cfg.Meta.PhoneNumberID != "",
+			"graph_api_version": cfg.Meta.GraphAPIVersion,
+		}).Info("Meta direct integration enabled")
+		// Fail-loud no startup quando flag liga mas chain outbound está
+		// incompleta. Sem esse warn, descobre-se só em produção: ou via
+		// /meta/webhook devolvendo erro (chain parcial), ou via mensagens
+		// silenciosamente órfãs no Redis (SelfCallbackURL ausente).
+		// Espelha dispatchReady() em meta_webhook.go — manter sincronizado.
+		// Placeholder `REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES` é tratado como
+		// vazio em TODOS os campos sensíveis (não só DispatchSecret), senão o
+		// warn fica suprimido enquanto o webhook silencia inbound em produção
+		// com tokens literais "REPLACE_..." que Meta Graph rejeita.
+		const placeholder = "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES"
+		notSet := func(v string) bool { return v == "" || v == placeholder }
+		urlIncomplete := notSet(cfg.Meta.SelfCallbackURL)
+		dispatchSecretIncomplete := notSet(cfg.Meta.DispatchSecret)
+		systemUserTokenIncomplete := notSet(cfg.Meta.SystemUserToken)
+		phoneIDIncomplete := notSet(cfg.Meta.PhoneNumberID)
+		if urlIncomplete || dispatchSecretIncomplete ||
+			systemUserTokenIncomplete || phoneIDIncomplete {
+			logger.WithFields(logrus.Fields{
+				"event":                 "meta_direct_chain_incomplete",
+				"self_callback_url_set": !urlIncomplete,
+				"dispatch_secret_set":   !dispatchSecretIncomplete,
+				"system_user_token_set": !systemUserTokenIncomplete,
+				"phone_id_set":          !phoneIDIncomplete,
+			}).Warn("META_DIRECT_ENABLED=true but outbound chain is incomplete; /meta/webhook will reject inbound until all 4 vars are set")
+		}
+	}
+
+	// Admin endpoint — Mule poll a cada 30s pra descobrir broker mode.
+	// Sempre instanciado (mesmo sem ADMIN_API_TOKEN configurado, handler
+	// retorna 503 explícito em vez de 404 indeciso).
+	server.adminBrokerModeHandler = handlers.NewAdminBrokerModeHandler(&cfg.Broker, logger)
+	logger.WithFields(logrus.Fields{
+		"event":                     "broker_mode_initialized",
+		"salesforce_broker_enabled": cfg.Broker.SalesforceBrokerEnabled,
+		"admin_token_configured":    cfg.Broker.AdminAPIToken != "" && cfg.Broker.AdminAPIToken != "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES",
+	}).Info("Broker master switch loaded")
+	if cfg.Broker.AdminAPIToken == "" || cfg.Broker.AdminAPIToken == "REPLACE_VIA_RUNTIME_MANAGER_PROPERTIES" {
+		logger.Warn("ADMIN_API_TOKEN not configured; GET /admin/broker-mode will return 503 (Mule cannot poll broker state)")
+	}
 
 	// Add Google Agent Engine to health checks if available
 	if googleAgentService != nil {
@@ -194,6 +270,24 @@ func (s *Server) setupRoutes() {
 		c.Header("Content-Type", "text/html")
 		c.String(200, html)
 	})
+
+	// Meta WhatsApp Business Cloud direct webhook (POC).
+	// Só registra rotas se META_DIRECT_ENABLED=true E handler instanciado.
+	// Substitui Mule como broker quando Callback URL Meta apontar pro Gateway.
+	if s.metaWebhookHandler != nil {
+		s.router.GET("/meta/webhook", s.metaWebhookHandler.HandleVerify)
+		s.router.POST("/meta/webhook", s.metaWebhookHandler.HandleInbound)
+		s.logger.Info("Meta webhook routes registered: GET+POST /meta/webhook")
+	}
+	if s.metaDispatchHandler != nil {
+		s.router.POST("/meta/dispatch", s.metaDispatchHandler.HandleDispatch)
+		s.logger.Info("Meta dispatch route registered: POST /meta/dispatch")
+	}
+
+	// Admin — broker mode (Mule polls this every 30s pra propagar o master
+	// switch SALESFORCE_BROKER_ENABLED em <1min sem redeploy).
+	s.router.GET("/admin/broker-mode", s.adminBrokerModeHandler.HandleGet)
+	s.logger.Info("Admin route registered: GET /admin/broker-mode")
 
 	// Gov.br OAuth2/PKCE callback endpoint (outside /api group)
 	// Public endpoint that receives callbacks from Identidade Carioca

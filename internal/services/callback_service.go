@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -72,14 +73,28 @@ func (s *CallbackService) ValidateCallbackURL(callbackURL string) error {
 		return fmt.Errorf("callback URL must use HTTP or HTTPS protocol")
 	}
 
-	// Check for localhost and private IP addresses
+	// Check for localhost (string-form). IP-form loopback ("127.0.0.1", "::1",
+	// "::ffff:127.0.0.1", "::ffff:7f00:1") é coberto pelo `IsLoopback()` no
+	// bloco abaixo — string-equality cobre só o caso "localhost" (DNS).
 	host := parsedURL.Hostname()
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+	if strings.EqualFold(host, "localhost") {
 		return fmt.Errorf("callback URL cannot use localhost")
 	}
 
-	// Check if host is an IP address and if it's private
-	if ip := net.ParseIP(host); ip != nil {
+	// Strip IPv6 zone index ("fe80::1%eth0" → "fe80::1") antes do parse.
+	// net.ParseIP retorna nil em string com zone; bypass via
+	// `http://[::1%25lo0]/` (Go resolve pra ::1 via zone) sem o strip.
+	ipStr := host
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		ipStr = host[:i]
+	}
+	// Check if host is an IP address. Tratamento robusto a IPv4-mapped IPv6
+	// (`::ffff:127.0.0.1`, `::ffff:10.0.0.1`) — sem isso, atacante poderia
+	// bypass via IPv4-mapped IPv6. IsLoopback/IsUnspecified normalizam.
+	if ip := net.ParseIP(ipStr); ip != nil {
+		if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() {
+			return fmt.Errorf("callback URL cannot use loopback, unspecified, or link-local IP")
+		}
 		if isPrivateIP(ip) {
 			return fmt.Errorf("callback URL cannot use private IP addresses")
 		}
@@ -196,6 +211,17 @@ func (s *CallbackService) sendCallbackRequest(ctx context.Context, callbackURL s
 		req.Header.Set("X-Signature-SHA256", signature)
 	}
 
+	// Meta-direct dispatch secret: o callback do worker pra /meta/dispatch
+	// requer este header. Restrito ao SelfCallbackURL configurado — enviar
+	// o secret pra callbacks user-provided permitiria o receiver logar e
+	// reutilizar pra dispararem outbound Meta arbitrário. Match exato pra
+	// evitar prefix-collision em URLs com path adicional.
+	if s.config.Meta.DispatchSecret != "" &&
+		s.config.Meta.SelfCallbackURL != "" &&
+		callbackURL == s.config.Meta.SelfCallbackURL {
+		req.Header.Set("X-Meta-Dispatch-Secret", s.config.Meta.DispatchSecret)
+	}
+
 	// Send request
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -257,8 +283,17 @@ func isRetriableError(err error) bool {
 	return true
 }
 
-// isPrivateIP checks if an IP address is in a private range
+// isPrivateIP checks if an IP address is in a private range.
+//
+// Normaliza IPv4-mapped IPv6 (`::ffff:a.b.c.d`) antes do match — sem isso,
+// atacante poderia bypass via `http://[::ffff:10.0.0.1]/...` (Go transport
+// resolve pro IPv4 atrás, mas o CIDR match em `10.0.0.0/8` falha porque
+// `network.Contains(::ffff:10.0.0.1)` retorna false). Stdlib `net.IP.To4()`
+// devolve o IPv4 puro se disponível; caso contrário mantém o IPv6 original.
 func isPrivateIP(ip net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
 	privateRanges := []string{
 		"10.0.0.0/8",
 		"172.16.0.0/12",
