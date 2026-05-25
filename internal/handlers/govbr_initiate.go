@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -39,6 +40,46 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 		"service_context": req.ServiceContext,
 		"handler":         "govbr_initiate",
 	})
+
+	cleaned := strings.TrimPrefix(req.UserNumber, "+")
+	isValid := len(cleaned) >= 10 && len(cleaned) <= 15
+	for _, r := range cleaned {
+		if r < '0' || r > '9' {
+			isValid = false
+			break
+		}
+	}
+	if !isValid {
+		logger.Error("Invalid phone number format")
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_phone_number",
+			"message": "Phone number must be in E.164 format (10-15 digits)",
+		})
+		return
+	}
+
+	// Check rate limit (5 attempts per hour per user)
+	ctx := c.Request.Context()
+	rateKey := fmt.Sprintf("govbr_auth_rate:%s", req.UserNumber)
+	countStr, err := h.redisService.Get(ctx, rateKey)
+	if err != nil {
+		logger.WithError(err).Warn("Failed to check rate limit, allowing request")
+	}
+	var count int
+	fmt.Sscanf(countStr, "%d", &count)
+
+	const maxAttempts = 5
+	if count >= maxAttempts {
+		logger.WithField("attempts", count).Warn("Rate limit exceeded")
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error":   "rate_limit_exceeded",
+			"message": "Too many authentication attempts. Please wait 1 hour.",
+		})
+		return
+	}
+
+	newCount := count + 1
+	h.redisService.Set(ctx, rateKey, fmt.Sprintf("%d", newCount), 3600*time.Second)
 
 	verifierBytes := make([]byte, 32)
 	if _, err := rand.Read(verifierBytes); err != nil {
@@ -87,6 +128,7 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 	params.Set("state", state)
 	params.Set("code_challenge", codeChallenge)
 	params.Set("code_challenge_method", "S256")
+	params.Set("kc_idp_hint", "govbr") // Force use of Gov.br identity provider
 
 	authURL := h.config.GovBr.AuthURL + "?" + params.Encode()
 

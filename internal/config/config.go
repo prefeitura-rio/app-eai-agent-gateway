@@ -229,6 +229,7 @@ type GovBrConfig struct {
 	TokenURL      string `mapstructure:"GOVBR_TOKEN_URL"`
 	Scope         string `mapstructure:"GOVBR_SCOPE"`
 	AuthStateTTL  int    `mapstructure:"GOVBR_AUTH_STATE_TTL"` // seconds
+	RedisURL      string `mapstructure:"GOVBR_REDIS_URL"`      // Redis URL for Gov.br tokens (shared with MCP)
 }
 
 type DataRelayConfig struct {
@@ -580,6 +581,7 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("GOVBR_TOKEN_URL")
 	_ = viper.BindEnv("GOVBR_SCOPE")
 	_ = viper.BindEnv("GOVBR_AUTH_STATE_TTL")
+	_ = viper.BindEnv("GOVBR_REDIS_URL")
 
 	// Data Relay
 	_ = viper.BindEnv("DATA_RELAY_ENABLED")
