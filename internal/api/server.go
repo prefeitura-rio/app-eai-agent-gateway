@@ -49,9 +49,13 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 	}
 
 	// Initialize Gov.br Redis service (shared with MCP)
-	govbrRedisService, err := services.NewRedisServiceWithURL(cfg.GovBr.RedisURL, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize Gov.br Redis service: %w", err)
+	// Falls back to main Redis if GOVBR_REDIS_URL is not configured
+	govbrRedisService := redisService
+	if cfg.GovBr.RedisURL != "" {
+		govbrRedisService, err = services.NewRedisServiceWithURL(cfg.GovBr.RedisURL, logger)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize Gov.br Redis service: %w", err)
+		}
 	}
 
 	// Initialize RabbitMQ service

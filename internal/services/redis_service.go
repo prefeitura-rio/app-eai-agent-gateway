@@ -232,10 +232,16 @@ func NewRedisServiceWithURL(redisURL string, logger *logrus.Logger) (*RedisServi
 
 	logger.WithField("url", redisURL).Info("Gov.br Redis service initialized successfully")
 
+	govbrRedisConfig := &config.Config{
+		Redis: config.RedisConfig{
+			DSN: redisURL,
+		},
+	}
+
 	return &RedisService{
-		client: client,
-		logger: logger,
-		config: nil, // No full config needed for custom URL
+		client:  client,
+		logger:  logger,
+		config:  govbrRedisConfig,
 		metrics: &CacheMetrics{
 			LastResetTime: time.Now(),
 		},

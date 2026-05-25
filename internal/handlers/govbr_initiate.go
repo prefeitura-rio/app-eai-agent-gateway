@@ -29,7 +29,6 @@ type govBrInitiateResponse struct {
 }
 
 func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
-	// 1. Parse request body
 	var req govBrInitiateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
@@ -42,7 +41,6 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 		"handler":         "govbr_initiate",
 	})
 
-	// 2. Validate phone number format (E.164: 10-15 digits)
 	cleaned := strings.TrimPrefix(req.UserNumber, "+")
 	isValid := len(cleaned) >= 10 && len(cleaned) <= 15
 	for _, r := range cleaned {
@@ -60,10 +58,13 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 		return
 	}
 
-	// 3. Check rate limit (5 attempts per hour per user)
+	// Check rate limit (5 attempts per hour per user)
 	ctx := c.Request.Context()
 	rateKey := fmt.Sprintf("govbr_auth_rate:%s", req.UserNumber)
-	countStr, _ := h.redisService.Get(ctx, rateKey)
+	countStr, err := h.redisService.Get(ctx, rateKey)
+	if err != nil {
+		logger.WithError(err).Warn("Failed to check rate limit, allowing request")
+	}
 	var count int
 	fmt.Sscanf(countStr, "%d", &count)
 
@@ -77,7 +78,6 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 		return
 	}
 
-	// Increment rate limit counter
 	newCount := count + 1
 	h.redisService.Set(ctx, rateKey, fmt.Sprintf("%d", newCount), 3600*time.Second)
 
