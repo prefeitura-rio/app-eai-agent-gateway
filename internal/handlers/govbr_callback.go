@@ -89,9 +89,15 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 			"error_description": errorDescription,
 		}).Warn("Error returned by OAuth provider")
 
+		// Fallback for empty error description
+		if errorDescription == "" {
+			errorDescription = "Erro durante o processo de autenticação"
+		}
+
 		c.HTML(http.StatusOK, "govbr_auth_error.html", gin.H{
 			"error":       errorParam,
 			"description": errorDescription,
+			"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
 		})
 		return
 	}
@@ -102,6 +108,7 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		c.HTML(http.StatusBadRequest, "govbr_auth_error.html", gin.H{
 			"error":       "invalid_request",
 			"description": "Parâmetros de callback inválidos",
+			"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
 		})
 		return
 	}
@@ -115,6 +122,7 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 			"error": "expired_request",
 			"description": "Sessão de autenticação expirada. " +
 				"Por favor, retorne ao WhatsApp e inicie o processo novamente.",
+			"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
 		})
 		return
 	}
@@ -125,6 +133,7 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		c.HTML(http.StatusInternalServerError, "govbr_auth_error.html", gin.H{
 			"error":       "internal_error",
 			"description": "Erro ao processar estado de autenticação",
+			"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
 		})
 		return
 	}
@@ -135,6 +144,7 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		c.HTML(http.StatusBadRequest, "govbr_auth_error.html", gin.H{
 			"error":       "invalid_state",
 			"description": "Estado de autenticação inválido",
+			"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
 		})
 		return
 	}
@@ -151,6 +161,7 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		c.HTML(http.StatusInternalServerError, "govbr_auth_error.html", gin.H{
 			"error":       "token_exchange_failed",
 			"description": "Erro ao obter token de acesso. Tente novamente.",
+			"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
 		})
 		return
 	}
@@ -161,6 +172,7 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		c.HTML(http.StatusInternalServerError, "govbr_auth_error.html", gin.H{
 			"error":       "storage_error",
 			"description": "Erro ao armazenar credenciais",
+			"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
 		})
 		return
 	}
@@ -178,9 +190,14 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 	// Implementation depends on WhatsApp messaging service integration
 
 	// 8. Render success page
+	serviceContext := authState.ServiceContext
+	if serviceContext == "" {
+		serviceContext = "Serviço da Prefeitura"
+	}
+
 	c.HTML(http.StatusOK, "govbr_auth_success.html", gin.H{
 		"user_number": maskPhoneNumber(authState.UserNumber),
-		"service":     authState.ServiceContext,
+		"service":     serviceContext,
 	})
 }
 
