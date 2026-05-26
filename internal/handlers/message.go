@@ -246,7 +246,7 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 		if err := h.redisService.StoreCallbackURL(ctxTimeout, messageID, *req.CallbackURL, h.config.Redis.TaskStatusTTL); err != nil {
 			logger.WithError(err).Warn("Failed to store callback URL, continuing with processing")
 		} else {
-			logger.WithField("callback_url", *req.CallbackURL).Debug("Callback URL stored for message")
+			logger.WithField("message_id", messageID).Debug("Callback URL stored for message")
 		}
 	}
 
