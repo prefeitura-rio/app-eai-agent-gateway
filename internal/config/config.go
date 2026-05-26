@@ -227,6 +227,7 @@ type GovBrConfig struct {
 	RedirectURI   string `mapstructure:"GOVBR_REDIRECT_URI"`
 	AuthURL       string `mapstructure:"GOVBR_AUTH_URL"`
 	TokenURL      string `mapstructure:"GOVBR_TOKEN_URL"`
+	UserInfoURL   string `mapstructure:"GOVBR_USERINFO_URL"`   // UserInfo endpoint for fetching user data
 	Scope         string `mapstructure:"GOVBR_SCOPE"`
 	AuthStateTTL  int    `mapstructure:"GOVBR_AUTH_STATE_TTL"` // seconds
 	RedisURL      string `mapstructure:"GOVBR_REDIS_URL"`      // Redis URL for Gov.br tokens (shared with MCP)

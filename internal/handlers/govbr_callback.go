@@ -43,6 +43,14 @@ type GovBrAuthState struct {
 	State          string `json:"state"`
 }
 
+// GovBrUserInfo represents user data from /userinfo endpoint
+type GovBrUserInfo struct {
+	Sub   string `json:"sub"`   // Subject identifier (usually CPF)
+	Name  string `json:"name"`  // Full name
+	Email string `json:"email"` // Email (optional)
+	CPF   string `json:"cpf"`   // CPF (may be in sub or separate field)
+}
+
 // NewGovBrCallbackHandler creates a new Gov.br callback handler
 func NewGovBrCallbackHandler(
 	logger *logrus.Logger,
@@ -166,8 +174,16 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		return
 	}
 
-	// 5. Store tokens in Redis with appropriate TTL
-	if err := h.storeTokens(ctx, authState.UserNumber, tokenResp, authState.ServiceContext); err != nil {
+	// 5. Fetch user info from /userinfo endpoint (optional)
+	userInfo, err := h.fetchUserInfo(ctx, tokenResp.AccessToken)
+	if err != nil {
+		// Log warning but don't fail - user info is optional
+		logger.WithError(err).Warn("Failed to fetch user info (non-critical)")
+		userInfo = nil
+	}
+
+	// 6. Store tokens and user info in Redis with appropriate TTL
+	if err := h.storeTokens(ctx, authState.UserNumber, tokenResp, authState.ServiceContext, userInfo); err != nil {
 		logger.WithError(err).Error("Failed to store tokens in Redis")
 		c.HTML(http.StatusInternalServerError, "govbr_auth_error.html", gin.H{
 			"error":       "storage_error",
@@ -177,7 +193,7 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		return
 	}
 
-	// 6. Update auth state to "completed"
+	// 7. Update auth state to "completed"
 	authState.State = "completed"
 	updatedStateJSON, _ := json.Marshal(authState)
 	// Keep state for a bit longer for audit/debugging
@@ -185,19 +201,17 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 
 	logger.Info("Gov.br authentication completed successfully")
 
-	// 7. TODO: Optionally notify user via WhatsApp
+	// 8. TODO: Optionally notify user via WhatsApp
 	// This could trigger a message like "✓ Autenticação confirmada!"
 	// Implementation depends on WhatsApp messaging service integration
 
-	// 8. Render success page
+	// 9. Render success page
 	serviceContext := authState.ServiceContext
-	if serviceContext == "" {
-		serviceContext = "Serviço da Prefeitura"
-	}
+	serviceName := formatServiceName(serviceContext)
 
 	c.HTML(http.StatusOK, "govbr_auth_success.html", gin.H{
 		"user_number": maskPhoneNumber(authState.UserNumber),
-		"service":     serviceContext,
+		"service":     serviceName,
 	})
 }
 
@@ -276,6 +290,83 @@ func (h *GovBrCallbackHandler) exchangeCodeForToken(
 	return &tokenResp, nil
 }
 
+// fetchUserInfo fetches user data from Gov.br /userinfo endpoint
+//
+// Uses the access_token to retrieve authenticated user information
+// such as name, CPF, and email.
+//
+// Security:
+//   - Access token sent as Bearer token in Authorization header
+//   - Timeout to prevent hanging requests
+//   - Validates response structure
+func (h *GovBrCallbackHandler) fetchUserInfo(
+	ctx context.Context,
+	accessToken string,
+) (*GovBrUserInfo, error) {
+	if h.config.GovBr.UserInfoURL == "" {
+		h.logger.Debug("UserInfo URL not configured, skipping user data fetch")
+		return nil, nil
+	}
+
+	userInfoURL := h.config.GovBr.UserInfoURL
+
+	// Create request with Bearer token
+	req, err := http.NewRequestWithContext(
+		ctx,
+		"GET",
+		userInfoURL,
+		nil,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create userinfo request: %w", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
+	req.Header.Set("Accept", "application/json")
+
+	// Execute request with timeout
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("userinfo request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read userinfo response: %w", err)
+	}
+
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		h.logger.WithFields(logrus.Fields{
+			"status_code": resp.StatusCode,
+			"response":    string(body),
+		}).Warn("UserInfo request returned non-200 status")
+		return nil, fmt.Errorf("userinfo request failed: %d - %s", resp.StatusCode, string(body))
+	}
+
+	// Parse response
+	var userInfo GovBrUserInfo
+	if err := json.Unmarshal(body, &userInfo); err != nil {
+		return nil, fmt.Errorf("failed to parse userinfo response: %w", err)
+	}
+
+	// Normalize CPF (may be in sub or cpf field)
+	if userInfo.CPF == "" && userInfo.Sub != "" {
+		userInfo.CPF = userInfo.Sub
+	}
+
+	h.logger.WithFields(logrus.Fields{
+		"has_name":  userInfo.Name != "",
+		"has_cpf":   userInfo.CPF != "",
+		"has_email": userInfo.Email != "",
+	}).Debug("User info fetched successfully")
+
+	return &userInfo, nil
+}
+
 // storeTokens stores OAuth tokens in Redis with appropriate TTL
 //
 // Security:
@@ -287,6 +378,7 @@ func (h *GovBrCallbackHandler) storeTokens(
 	userNumber string,
 	tokenResp *GovBrTokenResponse,
 	serviceContext string,
+	userInfo *GovBrUserInfo,
 ) error {
 	// Sanitize phone number for Redis key
 	sanitizedPhone := sanitizePhoneNumber(userNumber)
@@ -305,6 +397,23 @@ func (h *GovBrCallbackHandler) storeTokens(
 		"token_type":          tokenResp.TokenType,
 		"service_context":     serviceContext,
 		"created_at":          now.UTC().Format(time.RFC3339),
+	}
+
+	// Add user info if available (sanitized)
+	if userInfo != nil {
+		safeUserInfo := map[string]interface{}{}
+		if userInfo.Name != "" {
+			safeUserInfo["nome"] = userInfo.Name
+		}
+		if userInfo.CPF != "" {
+			safeUserInfo["cpf"] = userInfo.CPF
+		}
+		if userInfo.Email != "" {
+			safeUserInfo["email"] = userInfo.Email
+		}
+		if len(safeUserInfo) > 0 {
+			tokenData["user_info"] = safeUserInfo
+		}
 	}
 
 	tokenJSON, err := json.Marshal(tokenData)
@@ -350,4 +459,29 @@ func maskPhoneNumber(phone string) string {
 		return "****"
 	}
 	return phone[:len(phone)-6] + "***"
+}
+
+// formatServiceName converts technical service_context to user-friendly name
+func formatServiceName(serviceContext string) string {
+	serviceNames := map[string]string{
+		"consulta_dados":    "Consulta de Dados",
+		"iptu":              "IPTU",
+		"multas":            "Consulta de Multas",
+		"processos":         "Processos",
+		"consultas_gerais":  "Consultas Gerais",
+		"chatbot-whatsapp":  "Chatbot WhatsApp",
+		"chatbot-whatsapp-staging": "Chatbot WhatsApp (Staging)",
+	}
+
+	if name, ok := serviceNames[serviceContext]; ok {
+		return name
+	}
+
+	// Fallback: se não encontrou, retorna nome genérico
+	if serviceContext == "" {
+		return "Serviço da Prefeitura"
+	}
+
+	// Se tem underscore, converte para espaço e Title Case
+	return serviceContext
 }
