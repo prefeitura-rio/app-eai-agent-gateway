@@ -1098,6 +1098,11 @@ curl http://localhost:8000/health | jq '.services'
 
 ## 🚀 Deployment
 
+For the staging Kubernetes workflow, see
+[`docs/staging-deploy.md`](docs/staging-deploy.md). A push to `staging` builds
+and pushes the image, but Kubernetes still needs an explicit rollout or image
+update before pods run the new artifact.
+
 ### Docker Deployment
 
 #### Building Images
@@ -1466,6 +1471,11 @@ spec:
 
 #### Deployment Commands
 
+The commands below apply Kubernetes manifests. For routine staging code
+deployments, prefer the runbook in
+[`docs/staging-deploy.md`](docs/staging-deploy.md), which pins the Deployment to
+the exact GitHub Actions commit image and includes post-rollout checks.
+
 ```bash
 # Deploy to staging
 kubectl apply -k k8s/staging/
@@ -1481,7 +1491,13 @@ kubectl logs -f deployment/eai-agent-gateway -n eai-agent-gateway
 kubectl scale deployment eai-agent-gateway --replicas=10 -n eai-agent-gateway
 
 # Rolling update
-kubectl set image deployment/eai-agent-gateway gateway=eai-agent-gateway:v2.1.1 -n eai-agent-gateway
+kubectl set image deployment/eai-agent-gateway \
+  eai-agent-gateway=ghcr.io/prefeitura-rio/app-eai-agent-gateway:<commit_sha> \
+  -n eai-agent-gateway
+
+kubectl set image deployment/eai-agent-gateway-worker \
+  eai-agent-gateway-worker=ghcr.io/prefeitura-rio/app-eai-agent-gateway:<commit_sha> \
+  -n eai-agent-gateway
 
 # Check HPA status
 kubectl get hpa -n eai-agent-gateway
@@ -3214,7 +3230,7 @@ We welcome contributions! Please see our [Contributing Guidelines](#contributing
 
 **EAI Agent Gateway** - Built with ❤️ by the Rio de Janeiro City Hall
 
-[🏠 Home](https://github.com/prefeitura-rio/app-eai-agent-gateway) • [📖 Documentation](docs/) • [🚀 API Reference](docs/API.md) • [🛠️ Deployment Guide](docs/DEPLOYMENT.md)
+[🏠 Home](https://github.com/prefeitura-rio/app-eai-agent-gateway) • [📖 Documentation](docs/) • [🚀 API Reference](docs/API.md) • [🛠️ Staging Deploy](docs/staging-deploy.md)
 
 ---
 
