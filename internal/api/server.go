@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -19,18 +21,18 @@ import (
 
 // Server represents the HTTP server
 type Server struct {
-	config              *config.Config
-	logger              *logrus.Logger
-	router              *gin.Engine
-	httpServer          *http.Server
-	healthHandler       *handlers.HealthHandler
-	messageHandler      *handlers.MessageHandler
-	userActivityHandler *handlers.UserActivityHandler
+	config               *config.Config
+	logger               *logrus.Logger
+	router               *gin.Engine
+	httpServer           *http.Server
+	healthHandler        *handlers.HealthHandler
+	messageHandler       *handlers.MessageHandler
+	userActivityHandler  *handlers.UserActivityHandler
 	govBrCallbackHandler *handlers.GovBrCallbackHandler
-	redisService        *services.RedisService
-	rabbitMQService     *services.RabbitMQService
-	postgresService     *services.PostgresService
-	otelService         *services.OTelService // Optional OTel service
+	redisService         *services.RedisService
+	rabbitMQService      *services.RabbitMQService
+	postgresService      *services.PostgresService
+	otelService          *services.OTelService // Optional OTel service
 }
 
 // NewServer creates a new HTTP server
@@ -98,7 +100,7 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 			}
 			return nil
 		}()),
-		userActivityHandler: handlers.NewUserActivityHandler(logger, cfg, redisService, postgresService),
+		userActivityHandler:  handlers.NewUserActivityHandler(logger, cfg, redisService, postgresService),
 		govBrCallbackHandler: handlers.NewGovBrCallbackHandler(logger, cfg, redisService, govbrRedisService),
 	}
 
@@ -214,6 +216,7 @@ func (s *Server) setupRoutes() {
 			govbr.GET("/callback", s.govBrCallbackHandler.HandleCallback)
 		}
 	}
+	s.registerGovBrRedirectCallbackAlias()
 
 	authInternal := s.router.Group("/api/v1/auth")
 	{
@@ -251,6 +254,29 @@ func (s *Server) setupRoutes() {
 			"path":    c.Request.URL.Path,
 		})
 	})
+}
+
+func (s *Server) registerGovBrRedirectCallbackAlias() {
+	redirectURI := strings.TrimSpace(s.config.GovBr.RedirectURI)
+	if redirectURI == "" {
+		return
+	}
+
+	parsedURL, err := url.Parse(redirectURI)
+	if err != nil {
+		s.logger.WithError(err).Warn("Invalid Gov.br redirect URI; skipping callback alias route")
+		return
+	}
+
+	callbackPath := parsedURL.EscapedPath()
+	if callbackPath == "" || callbackPath == "/auth/govbr/callback" {
+		return
+	}
+
+	if strings.HasSuffix(callbackPath, "/auth/govbr/callback") {
+		s.router.GET(callbackPath, s.govBrCallbackHandler.HandleCallback)
+		s.logger.WithField("path", callbackPath).Info("Registered Gov.br callback alias from redirect URI")
+	}
 }
 
 // setupHTTPServer configures the HTTP server

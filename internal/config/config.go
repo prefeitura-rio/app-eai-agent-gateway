@@ -222,15 +222,33 @@ type CallbackConfig struct {
 
 // GovBrConfig holds configuration for Gov.br OAuth2/PKCE authentication
 type GovBrConfig struct {
-	ClientID      string `mapstructure:"GOVBR_CLIENT_ID"`
-	ClientSecret  string `mapstructure:"GOVBR_CLIENT_SECRET"`
-	RedirectURI   string `mapstructure:"GOVBR_REDIRECT_URI"`
-	AuthURL       string `mapstructure:"GOVBR_AUTH_URL"`
-	TokenURL      string `mapstructure:"GOVBR_TOKEN_URL"`
-	UserInfoURL   string `mapstructure:"GOVBR_USERINFO_URL"`   // UserInfo endpoint for fetching user data
-	Scope         string `mapstructure:"GOVBR_SCOPE"`
-	AuthStateTTL  int    `mapstructure:"GOVBR_AUTH_STATE_TTL"` // seconds
-	RedisURL      string `mapstructure:"GOVBR_REDIS_URL"`      // Redis URL for Gov.br tokens (shared with MCP)
+	ClientID     string `mapstructure:"GOVBR_CLIENT_ID"`
+	ClientSecret string `mapstructure:"GOVBR_CLIENT_SECRET"`
+	RedirectURI  string `mapstructure:"GOVBR_REDIRECT_URI"`
+	OIDCBaseURL  string `mapstructure:"GOVBR_OIDC_BASE_URL"`
+	Scope        string `mapstructure:"GOVBR_SCOPE"`
+	AuthStateTTL int    `mapstructure:"GOVBR_AUTH_STATE_TTL"` // seconds
+	RedisURL     string `mapstructure:"GOVBR_REDIS_URL"`      // Redis URL for Gov.br tokens (shared with MCP)
+}
+
+func (g GovBrConfig) AuthEndpoint() string {
+	return g.endpoint("auth")
+}
+
+func (g GovBrConfig) TokenEndpoint() string {
+	return g.endpoint("token")
+}
+
+func (g GovBrConfig) UserInfoEndpoint() string {
+	return g.endpoint("userinfo")
+}
+
+func (g GovBrConfig) endpoint(suffix string) string {
+	if g.OIDCBaseURL == "" {
+		return ""
+	}
+
+	return strings.TrimRight(g.OIDCBaseURL, "/") + "/" + suffix
 }
 
 type DataRelayConfig struct {
@@ -578,8 +596,7 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("GOVBR_CLIENT_ID")
 	_ = viper.BindEnv("GOVBR_CLIENT_SECRET")
 	_ = viper.BindEnv("GOVBR_REDIRECT_URI")
-	_ = viper.BindEnv("GOVBR_AUTH_URL")
-	_ = viper.BindEnv("GOVBR_TOKEN_URL")
+	_ = viper.BindEnv("GOVBR_OIDC_BASE_URL")
 	_ = viper.BindEnv("GOVBR_SCOPE")
 	_ = viper.BindEnv("GOVBR_AUTH_STATE_TTL")
 	_ = viper.BindEnv("GOVBR_REDIS_URL")

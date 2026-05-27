@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -20,14 +21,15 @@ import (
 type GovBrCallbackHandler struct {
 	logger            *logrus.Logger
 	config            *config.Config
-	redisService      RedisServiceInterface      // Main Redis (for auth state)
-	govbrRedisService RedisServiceInterface      // Gov.br specific Redis (for tokens, shared with MCP)
+	redisService      RedisServiceInterface // Main Redis (for auth state)
+	govbrRedisService RedisServiceInterface // Gov.br specific Redis (for tokens, shared with MCP)
 }
 
 // GovBrTokenResponse represents the token response from Identidade Carioca
 type GovBrTokenResponse struct {
 	AccessToken      string `json:"access_token"`
 	RefreshToken     string `json:"refresh_token"`
+	IDToken          string `json:"id_token"`
 	ExpiresIn        int    `json:"expires_in"`
 	RefreshExpiresIn int    `json:"refresh_expires_in"`
 	TokenType        string `json:"token_type"`
@@ -45,10 +47,11 @@ type GovBrAuthState struct {
 
 // GovBrUserInfo represents user data from /userinfo endpoint
 type GovBrUserInfo struct {
-	Sub   string `json:"sub"`   // Subject identifier (usually CPF)
-	Name  string `json:"name"`  // Full name
-	Email string `json:"email"` // Email (optional)
-	CPF   string `json:"cpf"`   // CPF (may be in sub or separate field)
+	Sub               string `json:"sub"`                // Subject identifier (usually CPF)
+	Name              string `json:"name"`               // Full name
+	Email             string `json:"email"`              // Email (optional)
+	CPF               string `json:"cpf"`                // CPF (may be in sub or separate field)
+	PreferredUsername string `json:"preferred_username"` // Common OIDC username claim
 }
 
 // NewGovBrCallbackHandler creates a new Gov.br callback handler
@@ -96,7 +99,6 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 			"error":             errorParam,
 			"error_description": errorDescription,
 		}).Warn("Error returned by OAuth provider")
-
 
 		if errorDescription == "" {
 			errorDescription = "Erro durante o processo de autenticação"
@@ -146,8 +148,31 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		return
 	}
 
-	// Security: Validate state hasn't been tampered
 	if authState.State != "pending" {
+		if authState.State == "completed" {
+			logger.Debug("User clicked auth link again - checking if token still valid")
+
+			tokenStillValid := h.isTokenValid(ctx, authState.UserNumber)
+
+			if tokenStillValid {
+				logger.Info("Token still valid - showing success page for repeated click")
+				serviceName := formatServiceName(authState.ServiceContext)
+				c.HTML(http.StatusOK, "govbr_auth_success.html", gin.H{
+					"user_number": maskPhoneNumber(authState.UserNumber),
+					"service":     serviceName,
+				})
+				return
+			}
+
+			logger.Info("Token expired - showing error page")
+			c.HTML(http.StatusBadRequest, "govbr_auth_error.html", gin.H{
+				"error":       "token_expired",
+				"description": "Sua sessão expirou. Por favor, solicite um novo link de autenticação no WhatsApp.",
+				"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
+			})
+			return
+		}
+
 		logger.WithField("state", authState.State).Warn("Auth state is not pending")
 		c.HTML(http.StatusBadRequest, "govbr_auth_error.html", gin.H{
 			"error":       "invalid_state",
@@ -179,6 +204,11 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 	if err != nil {
 		logger.WithError(err).Warn("Failed to fetch user info (non-critical)")
 		userInfo = nil
+	}
+	if idTokenUserInfo, err := parseUserInfoFromIDToken(tokenResp.IDToken); err == nil {
+		userInfo = mergeUserInfo(userInfo, idTokenUserInfo)
+	} else if tokenResp.IDToken != "" {
+		logger.WithError(err).Warn("Failed to parse user info from id_token")
 	}
 
 	// 6. Store tokens and user info in Redis with appropriate TTL
@@ -224,7 +254,7 @@ func (h *GovBrCallbackHandler) exchangeCodeForToken(
 	code string,
 	codeVerifier string,
 ) (*GovBrTokenResponse, error) {
-	tokenURL := h.config.GovBr.TokenURL
+	tokenURL := h.config.GovBr.TokenEndpoint()
 
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
@@ -291,12 +321,11 @@ func (h *GovBrCallbackHandler) fetchUserInfo(
 	ctx context.Context,
 	accessToken string,
 ) (*GovBrUserInfo, error) {
-	if h.config.GovBr.UserInfoURL == "" {
+	userInfoURL := h.config.GovBr.UserInfoEndpoint()
+	if userInfoURL == "" {
 		h.logger.Debug("UserInfo URL not configured, skipping user data fetch")
 		return nil, nil
 	}
-
-	userInfoURL := h.config.GovBr.UserInfoURL
 
 	// Create request with Bearer token
 	req, err := http.NewRequestWithContext(
@@ -340,6 +369,9 @@ func (h *GovBrCallbackHandler) fetchUserInfo(
 	if userInfo.CPF == "" && userInfo.Sub != "" {
 		userInfo.CPF = userInfo.Sub
 	}
+	if userInfo.CPF == "" && userInfo.PreferredUsername != "" {
+		userInfo.CPF = userInfo.PreferredUsername
+	}
 
 	h.logger.WithFields(logrus.Fields{
 		"has_name":  userInfo.Name != "",
@@ -348,6 +380,80 @@ func (h *GovBrCallbackHandler) fetchUserInfo(
 	}).Debug("User info fetched successfully")
 
 	return &userInfo, nil
+}
+
+func parseUserInfoFromIDToken(idToken string) (*GovBrUserInfo, error) {
+	if idToken == "" {
+		return nil, nil
+	}
+
+	// The id_token has already been obtained through a successful token exchange.
+	// We only use its claims as profile enrichment, not as an authorization proof.
+	parts := strings.Split(idToken, ".")
+	if len(parts) < 2 {
+		return nil, fmt.Errorf("invalid id_token format")
+	}
+
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode id_token payload: %w", err)
+	}
+
+	var claims map[string]interface{}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil, fmt.Errorf("failed to parse id_token claims: %w", err)
+	}
+
+	userInfo := &GovBrUserInfo{
+		Sub:               firstStringClaim(claims, "sub"),
+		Name:              firstStringClaim(claims, "name", "nome"),
+		Email:             firstStringClaim(claims, "email"),
+		CPF:               firstStringClaim(claims, "cpf", "govbr_cpf", "preferred_username"),
+		PreferredUsername: firstStringClaim(claims, "preferred_username"),
+	}
+	if userInfo.CPF == "" && userInfo.Sub != "" {
+		userInfo.CPF = userInfo.Sub
+	}
+
+	return userInfo, nil
+}
+
+func mergeUserInfo(primary *GovBrUserInfo, fallback *GovBrUserInfo) *GovBrUserInfo {
+	if primary == nil {
+		return fallback
+	}
+	if fallback == nil {
+		return primary
+	}
+
+	if primary.Sub == "" {
+		primary.Sub = fallback.Sub
+	}
+	if primary.Name == "" {
+		primary.Name = fallback.Name
+	}
+	if primary.Email == "" {
+		primary.Email = fallback.Email
+	}
+	if primary.CPF == "" {
+		primary.CPF = fallback.CPF
+	}
+	if primary.PreferredUsername == "" {
+		primary.PreferredUsername = fallback.PreferredUsername
+	}
+
+	return primary
+}
+
+func firstStringClaim(claims map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		value, ok := claims[key].(string)
+		if ok && value != "" {
+			return value
+		}
+	}
+
+	return ""
 }
 
 // storeTokens stores OAuth tokens in Redis with appropriate TTL
@@ -373,13 +479,13 @@ func (h *GovBrCallbackHandler) storeTokens(
 
 	// Prepare token data
 	tokenData := map[string]interface{}{
-		"access_token":        tokenResp.AccessToken,
-		"refresh_token":       tokenResp.RefreshToken,
-		"expires_at":          expiresAt,
-		"refresh_expires_at":  refreshExpiresAt,
-		"token_type":          tokenResp.TokenType,
-		"service_context":     serviceContext,
-		"created_at":          now.UTC().Format(time.RFC3339),
+		"access_token":       tokenResp.AccessToken,
+		"refresh_token":      tokenResp.RefreshToken,
+		"expires_at":         expiresAt,
+		"refresh_expires_at": refreshExpiresAt,
+		"token_type":         tokenResp.TokenType,
+		"service_context":    serviceContext,
+		"created_at":         now.UTC().Format(time.RFC3339),
 	}
 
 	// Add user info if available
@@ -404,9 +510,13 @@ func (h *GovBrCallbackHandler) storeTokens(
 		return fmt.Errorf("failed to marshal token data: %w", err)
 	}
 
-	// Store in Gov.br Redis (shared with MCP) with TTL = access token expiry
+	// Store in Gov.br Redis (shared with MCP). Keep the token record while the
+	// refresh token can still recover the session.
 	tokenKey := fmt.Sprintf("govbr_token:%s", sanitizedPhone)
 	ttl := time.Duration(tokenResp.ExpiresIn) * time.Second
+	if tokenResp.RefreshExpiresIn > tokenResp.ExpiresIn {
+		ttl = time.Duration(tokenResp.RefreshExpiresIn) * time.Second
+	}
 
 	if err := h.govbrRedisService.Set(ctx, tokenKey, string(tokenJSON), ttl); err != nil {
 		return fmt.Errorf("failed to store token in Gov.br Redis: %w", err)
@@ -444,15 +554,49 @@ func maskPhoneNumber(phone string) string {
 	return phone[:len(phone)-6] + "***"
 }
 
+func (h *GovBrCallbackHandler) isTokenValid(ctx context.Context, userNumber string) bool {
+	sanitizedPhone := sanitizePhoneNumber(userNumber)
+	tokenKey := fmt.Sprintf("govbr_token:%s", sanitizedPhone)
+
+	tokenJSON, err := h.govbrRedisService.Get(ctx, tokenKey)
+	if err != nil {
+		h.logger.WithError(err).Debug("Token not found in Redis")
+		return false
+	}
+
+	var tokenData map[string]interface{}
+	if err := json.Unmarshal([]byte(tokenJSON), &tokenData); err != nil {
+		h.logger.WithError(err).Warn("Failed to parse token data")
+		return false
+	}
+
+	expiresAt, ok := tokenData["expires_at"].(float64)
+	if !ok {
+		h.logger.Warn("Token missing expires_at field")
+		return false
+	}
+
+	now := time.Now().Unix()
+	isValid := now < int64(expiresAt)
+
+	h.logger.WithFields(logrus.Fields{
+		"expires_at": int64(expiresAt),
+		"now":        now,
+		"is_valid":   isValid,
+	}).Debug("Token validation result")
+
+	return isValid
+}
+
 // formatServiceName converts technical service_context to user-friendly name
 func formatServiceName(serviceContext string) string {
 	serviceNames := map[string]string{
-		"consulta_dados":    "Consulta de Dados",
-		"iptu":              "IPTU",
-		"multas":            "Consulta de Multas",
-		"processos":         "Processos",
-		"consultas_gerais":  "Consultas Gerais",
-		"chatbot-whatsapp":  "Chatbot WhatsApp",
+		"consulta_dados":           "Consulta de Dados",
+		"iptu":                     "IPTU",
+		"multas":                   "Consulta de Multas",
+		"processos":                "Processos",
+		"consultas_gerais":         "Consultas Gerais",
+		"chatbot-whatsapp":         "Chatbot WhatsApp",
 		"chatbot-whatsapp-staging": "Chatbot WhatsApp (Staging)",
 	}
 
