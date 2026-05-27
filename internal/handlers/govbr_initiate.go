@@ -130,7 +130,7 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 	params.Set("code_challenge_method", "S256")
 	params.Set("kc_idp_hint", "govbr") // Force use of Gov.br identity provider
 
-	authURL := h.config.GovBr.AuthURL + "?" + params.Encode()
+	authURL := h.config.GovBr.AuthEndpoint() + "?" + params.Encode()
 
 	logger.WithField("state", state).Info("Gov.br auth session initiated")
 
