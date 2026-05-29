@@ -239,9 +239,9 @@ func NewRedisServiceWithURL(redisURL string, logger *logrus.Logger) (*RedisServi
 	}
 
 	return &RedisService{
-		client:  client,
-		logger:  logger,
-		config:  govbrRedisConfig,
+		client: client,
+		logger: logger,
+		config: govbrRedisConfig,
 		metrics: &CacheMetrics{
 			LastResetTime: time.Now(),
 		},
@@ -287,6 +287,23 @@ func (r *RedisService) SetValue(ctx context.Context, key string, value interface
 // Set stores a string value with TTL (implements interface)
 func (r *RedisService) Set(ctx context.Context, key string, value string, ttl time.Duration) error {
 	return r.SetValue(ctx, key, value, ttl)
+}
+
+// SetNX sets key=value with TTL only if the key does not already exist (atomic).
+// Returns true when the key was set (lock acquired), false when it already existed.
+// Used for one-shot dedup (e.g. fire the gov.br auto-resume only once per phone).
+func (r *RedisService) SetNX(ctx context.Context, key string, value string, ttl time.Duration) (bool, error) {
+	r.recordOperation()
+
+	ok, err := r.client.SetNX(ctx, key, value, ttl).Result()
+	if err != nil {
+		r.recordError()
+		r.logger.WithError(err).WithField("key", key).Error("Failed SETNX in Redis")
+		return false, fmt.Errorf("redis setnx error: %w", err)
+	}
+
+	r.recordSet()
+	return ok, nil
 }
 
 // Delete removes a key

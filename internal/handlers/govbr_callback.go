@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -230,6 +231,12 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 
 	logger.Info("Gov.br authentication completed successfully")
 
+	// 7b. Auto-resume: re-injeta a solicitação original no pipeline inbound para
+	// o cidadão NÃO precisar mandar "ok". Best-effort — nunca falha o callback;
+	// se falhar, o cidadão ainda pode mandar uma mensagem (fallback manual).
+	// O POST inbound só enfileira e retorna rápido, então é seguro ser síncrono.
+	h.triggerAutoResume(authState.UserNumber, authState.ServiceContext)
+
 	// 8. Render success page
 	serviceContext := authState.ServiceContext
 	serviceName := formatServiceName(serviceContext)
@@ -238,6 +245,92 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		"user_number": maskPhoneNumber(authState.UserNumber),
 		"service":     serviceName,
 	})
+}
+
+// triggerAutoResume re-injeta a solicitação original do cidadão no pipeline
+// inbound (RabbitMQ → Engine → outbound) logo após a autenticação concluir,
+// para ele não precisar mandar "ok" no WhatsApp.
+//
+// Design (ver docs/propostas/plano-govbr-auto-resume.md no repo study-sf):
+//   - Faz um POST loopback para /api/v1/message/webhook/user (reusa toda a
+//     lógica de enqueue/task-tracking do HandleUserWebhook; não duplica nada).
+//   - Best-effort: qualquer falha só loga; o callback segue e renderiza o HTML
+//     de sucesso. O cidadão sempre pode mandar uma mensagem como fallback.
+//   - Idempotência: SETNX govbr_resumed:<phone> garante disparo único por
+//     telefone numa janela curta. A guarda primária contra double-callback
+//     concorrente já é o código OAuth single-use (trocado antes deste ponto);
+//     este SETNX cobre re-tentativas/cliques repetidos.
+//   - Kill-switch: GOVBR_AUTO_RESUME_ENABLED=false desliga sem redeploy.
+func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext string) {
+	if !h.config.GovBr.AutoResumeEnabled {
+		return
+	}
+
+	// Contexto próprio (NÃO o request ctx): o auto-resume é desacoplado da
+	// resposta HTTP. Se o cidadão fechar a aba ao concluir, o request ctx seria
+	// cancelado e abortaria justo o enqueue que importa. Bounded em 10s.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	logger := h.logger.WithFields(logrus.Fields{
+		"user_number": maskPhoneNumber(userNumber),
+		"handler":     "govbr_auto_resume",
+	})
+
+	// Dedup atômico: dispara uma vez por telefone numa janela de 5min — curta de
+	// propósito (menor que o TTL do token), pra um re-clique tardio renderizar a
+	// página de sucesso sem re-disparar o resume.
+	sanitized := sanitizePhoneNumber(userNumber)
+	lockKey := fmt.Sprintf("govbr_resumed:%s", sanitized)
+	acquired, err := h.redisService.SetNX(ctx, lockKey, "1", 5*time.Minute)
+	if err != nil {
+		logger.WithError(err).Warn("Auto-resume dedup SETNX falhou; prosseguindo best-effort")
+	} else if !acquired {
+		logger.Info("Auto-resume já disparado para este telefone; pulando")
+		return
+	}
+
+	// Destino: loopback in-pod por padrão.
+	resumeURL := h.config.GovBr.ResumeWebhookURL
+	if resumeURL == "" {
+		resumeURL = fmt.Sprintf("http://localhost:%d/api/v1/message/webhook/user", h.config.Server.Port)
+	}
+
+	payload := map[string]string{
+		"user_number": userNumber,
+		"message": fmt.Sprintf(
+			"[SISTEMA] Autenticação gov.br concluída com sucesso (%s). "+
+				"Retome a solicitação anterior do cidadão de onde paramos, sem pedir tudo de novo.",
+			serviceContext,
+		),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		logger.WithError(err).Warn("Auto-resume: falha ao serializar payload")
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, resumeURL, bytes.NewReader(body))
+	if err != nil {
+		logger.WithError(err).Warn("Auto-resume: falha ao montar request")
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		logger.WithError(err).Warn("Auto-resume: POST inbound falhou (cidadão pode mandar mensagem como fallback)")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= http.StatusMultipleChoices {
+		logger.WithField("status_code", resp.StatusCode).Warn("Auto-resume: inbound retornou não-2xx")
+		return
+	}
+
+	logger.Info("Auto-resume disparado: solicitação re-injetada no pipeline inbound")
 }
 
 // exchangeCodeForToken exchanges authorization code for access/refresh tokens

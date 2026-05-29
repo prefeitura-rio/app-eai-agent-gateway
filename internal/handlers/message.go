@@ -26,6 +26,7 @@ type RedisServiceInterface interface {
 	GetTaskResult(ctx context.Context, taskID string, dest interface{}) error
 	Get(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key string, value string, ttl time.Duration) error
+	SetNX(ctx context.Context, key string, value string, ttl time.Duration) (bool, error)
 	StoreCallbackURL(ctx context.Context, messageID string, callbackURL string, ttl time.Duration) error
 	GetCallbackURL(ctx context.Context, messageID string) (string, error)
 	SetUserLastActivity(ctx context.Context, userNumber string, timestamp time.Time, ttl time.Duration) error
