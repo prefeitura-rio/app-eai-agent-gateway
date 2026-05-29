@@ -13,9 +13,25 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+)
+
+// govbrAutoResumeTotal conta os desfechos do auto-resume do gov.br, por `outcome`.
+// Sem isto, uma falha sistêmica (loopback quebrado, RabbitMQ fora) seria invisível
+// — o callback ainda retorna 200, então não há sinal de erro em lugar nenhum.
+// Outcomes terminais: fired | skipped_dedup | marshal_err | request_err | post_err
+// | non_2xx. `setnx_err` é ortogonal (incrementado quando o dedup SETNX falha e o
+// fluxo prossegue best-effort — sinaliza janela de possível disparo duplicado).
+var govbrAutoResumeTotal = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "govbr_auto_resume_total",
+		Help: "Outcomes do auto-resume do gov.br após o callback de autenticação.",
+	},
+	[]string{"outcome"},
 )
 
 // GovBrCallbackHandler handles Gov.br OAuth2/PKCE callback
@@ -256,10 +272,12 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 //     lógica de enqueue/task-tracking do HandleUserWebhook; não duplica nada).
 //   - Best-effort: qualquer falha só loga; o callback segue e renderiza o HTML
 //     de sucesso. O cidadão sempre pode mandar uma mensagem como fallback.
-//   - Idempotência: SETNX govbr_resumed:<phone> garante disparo único por
-//     telefone numa janela curta. A guarda primária contra double-callback
-//     concorrente já é o código OAuth single-use (trocado antes deste ponto);
-//     este SETNX cobre re-tentativas/cliques repetidos.
+//   - Idempotência: a guarda primária contra double-callback concorrente é o
+//     código OAuth single-use (trocado antes deste ponto). O SETNX
+//     govbr_resumed:<phone> cobre re-tentativas/cliques repetidos — mas é
+//     best-effort: se o próprio SETNX falhar (Redis instável), o fluxo degrada
+//     pra AT-LEAST-ONCE (pode disparar 2x). Esse caso é contado em
+//     outcome="setnx_err" pra ser observável.
 //   - Kill-switch: GOVBR_AUTO_RESUME_ENABLED=false desliga sem redeploy.
 func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext string) {
 	if !h.config.GovBr.AutoResumeEnabled {
@@ -284,8 +302,10 @@ func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext stri
 	lockKey := fmt.Sprintf("govbr_resumed:%s", sanitized)
 	acquired, err := h.redisService.SetNX(ctx, lockKey, "1", 5*time.Minute)
 	if err != nil {
-		logger.WithError(err).Warn("Auto-resume dedup SETNX falhou; prosseguindo best-effort")
+		govbrAutoResumeTotal.WithLabelValues("setnx_err").Inc()
+		logger.WithError(err).Warn("Auto-resume dedup SETNX falhou; prosseguindo best-effort (at-least-once)")
 	} else if !acquired {
+		govbrAutoResumeTotal.WithLabelValues("skipped_dedup").Inc()
 		logger.Info("Auto-resume já disparado para este telefone; pulando")
 		return
 	}
@@ -306,12 +326,14 @@ func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext stri
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
+		govbrAutoResumeTotal.WithLabelValues("marshal_err").Inc()
 		logger.WithError(err).Warn("Auto-resume: falha ao serializar payload")
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, resumeURL, bytes.NewReader(body))
 	if err != nil {
+		govbrAutoResumeTotal.WithLabelValues("request_err").Inc()
 		logger.WithError(err).Warn("Auto-resume: falha ao montar request")
 		return
 	}
@@ -320,16 +342,20 @@ func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext stri
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
+		govbrAutoResumeTotal.WithLabelValues("post_err").Inc()
 		logger.WithError(err).Warn("Auto-resume: POST inbound falhou (cidadão pode mandar mensagem como fallback)")
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= http.StatusMultipleChoices {
+		govbrAutoResumeTotal.WithLabelValues("non_2xx").Inc()
 		logger.WithField("status_code", resp.StatusCode).Warn("Auto-resume: inbound retornou não-2xx")
 		return
 	}
+	_, _ = io.Copy(io.Discard, resp.Body) // drena o corpo pra permitir reuso de conexão
 
+	govbrAutoResumeTotal.WithLabelValues("fired").Inc()
 	logger.Info("Auto-resume disparado: solicitação re-injetada no pipeline inbound")
 }
 

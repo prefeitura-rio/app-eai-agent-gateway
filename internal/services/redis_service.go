@@ -302,7 +302,11 @@ func (r *RedisService) SetNX(ctx context.Context, key string, value string, ttl 
 		return false, fmt.Errorf("redis setnx error: %w", err)
 	}
 
-	r.recordSet()
+	// Conta como Set só quando a chave foi de fato escrita (lock adquirido);
+	// um SETNX que não adquire não escreveu nada.
+	if ok {
+		r.recordSet()
+	}
 	return ok, nil
 }
 
