@@ -599,6 +599,7 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("GOVBR_OIDC_BASE_URL")
 	_ = viper.BindEnv("GOVBR_SCOPE")
 	_ = viper.BindEnv("GOVBR_AUTH_STATE_TTL")
+	_ = viper.BindEnv("GOVBR_USERINFO_URL")
 	_ = viper.BindEnv("GOVBR_REDIS_URL")
 
 	// Data Relay
