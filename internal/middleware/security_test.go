@@ -32,6 +32,9 @@ func TestSecurityHeadersAllowsGovBrCallbackInlineStyles(t *testing.T) {
 	if got := rec.Header().Get("X-Frame-Options"); got != "DENY" {
 		t.Fatalf("expected X-Frame-Options DENY, got %q", got)
 	}
+	if got := rec.Header().Get("X-XSS-Protection"); got != "0" {
+		t.Fatalf("expected X-XSS-Protection 0 (legacy auditor disabled), got %q", got)
+	}
 }
 
 func TestSecurityHeadersKeepAPIEndpointsStrict(t *testing.T) {
@@ -50,5 +53,33 @@ func TestSecurityHeadersKeepAPIEndpointsStrict(t *testing.T) {
 
 	if got := rec.Header().Get("Content-Security-Policy"); got != "default-src 'none'; frame-ancestors 'none'" {
 		t.Fatalf("expected strict API CSP, got %q", got)
+	}
+	if got := rec.Header().Get("X-XSS-Protection"); got != "0" {
+		t.Fatalf("expected X-XSS-Protection 0 (legacy auditor disabled), got %q", got)
+	}
+}
+
+// TestSecurityHeadersDisableLegacyXSSAuditorOnAllRoutes pins issue #45: the
+// legacy X-XSS-Protection header must be a consistent "0" across every route
+// branch — Swagger UI (which previously omitted it entirely), the gov.br
+// callback, and the strict API default.
+func TestSecurityHeadersDisableLegacyXSSAuditorOnAllRoutes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, path := range []string{"/docs/index.html", "/swagger-ui", "/auth/govbr/callback", "/api/v1/health"} {
+		router := gin.New()
+		router.Use(SecurityHeaders())
+		router.GET(path, func(c *gin.Context) {
+			c.String(http.StatusOK, "ok")
+		})
+
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("X-XSS-Protection"); got != "0" {
+			t.Fatalf("path %q: expected X-XSS-Protection 0, got %q", path, got)
+		}
 	}
 }

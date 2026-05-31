@@ -13,6 +13,13 @@ func SecurityHeaders() gin.HandlerFunc {
 		// Basic security headers
 		c.Header("X-Content-Type-Options", "nosniff")
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+		// X-XSS-Protection is legacy: the XSS Auditor was removed from Chrome
+		// (M78) and Edge, and Firefox never shipped it; on old browsers
+		// `1; mode=block` was itself an info-leak/side-channel vector. We set
+		// `0` per the OWASP Secure Headers Project to explicitly disable the
+		// legacy auditor on every route. Real XSS protection comes from the
+		// per-route Content-Security-Policy below (issue #45).
+		c.Header("X-XSS-Protection", "0")
 
 		path := c.Request.URL.Path
 
@@ -25,12 +32,10 @@ func SecurityHeaders() gin.HandlerFunc {
 			// Gov.br callback renders first-party HTML templates with inline CSS.
 			// Keep fetches locked down while allowing the template stylesheet.
 			c.Header("X-Frame-Options", "DENY")
-			c.Header("X-XSS-Protection", "1; mode=block")
 			c.Header("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 		} else {
 			// Strict CSP for API endpoints
 			c.Header("X-Frame-Options", "DENY")
-			c.Header("X-XSS-Protection", "1; mode=block")
 			c.Header("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 		}
 
