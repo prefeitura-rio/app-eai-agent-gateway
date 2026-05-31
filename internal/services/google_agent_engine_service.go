@@ -869,9 +869,12 @@ func classifyEngineError(errStr string) string {
 
 	// Rate limit — must come before "unavailable"/"default": a 429 is distinct
 	// from a 5xx outage and deserves "aguarde alguns segundos", not "fora do ar".
+	// `429` é casado só no formato de status (`response: 429`), não como substring
+	// solta: erros de transporte do Go embutem a URL, que contém o engine/operation
+	// ID — um ID com "429" não deve virar rate-limit.
 	if strings.Contains(errStr, "rate limit") ||
 		strings.Contains(errStr, "too many requests") ||
-		strings.Contains(errStr, "429") {
+		strings.Contains(errStr, "response: 429") {
 		return "ratelimited"
 	}
 
