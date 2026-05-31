@@ -250,8 +250,9 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 	// 7b. Auto-resume: re-injeta a solicitação original no pipeline inbound para
 	// o cidadão NÃO precisar mandar "ok". Best-effort — nunca falha o callback;
 	// se falhar, o cidadão ainda pode mandar uma mensagem (fallback manual).
-	// O POST inbound só enfileira e retorna rápido, então é seguro ser síncrono.
-	h.triggerAutoResume(authState.UserNumber, authState.ServiceContext)
+	// Em goroutine (contexto próprio dentro) pra não atrasar a página de sucesso
+	// se o inbound/RabbitMQ estiver lento.
+	go h.triggerAutoResume(authID, authState.UserNumber, authState.ServiceContext)
 
 	// 8. Render success page
 	serviceContext := authState.ServiceContext
@@ -272,14 +273,18 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 //     lógica de enqueue/task-tracking do HandleUserWebhook; não duplica nada).
 //   - Best-effort: qualquer falha só loga; o callback segue e renderiza o HTML
 //     de sucesso. O cidadão sempre pode mandar uma mensagem como fallback.
+//   - Entrega: o worker só entrega a resposta se houver callback_url. Reusamos o
+//     `govbr_resume_callback:<phone>` capturado no inbound original do cidadão
+//     (HandleUserWebhook). Sem ele, conta outcome="fired_no_callback" — enfileira
+//     mas a resposta não chega ao WhatsApp.
 //   - Idempotência: a guarda primária contra double-callback concorrente é o
 //     código OAuth single-use (trocado antes deste ponto). O SETNX
-//     govbr_resumed:<phone> cobre re-tentativas/cliques repetidos — mas é
-//     best-effort: se o próprio SETNX falhar (Redis instável), o fluxo degrada
-//     pra AT-LEAST-ONCE (pode disparar 2x). Esse caso é contado em
-//     outcome="setnx_err" pra ser observável.
+//     govbr_resumed:<authID> cobre re-tentativas/cliques repetidos — keyado por
+//     FLUXO de auth (authID), não por telefone, pra não suprimir auths distintas
+//     do mesmo telefone. Se o SETNX falhar (Redis instável), degrada pra
+//     AT-LEAST-ONCE (outcome="setnx_err", observável).
 //   - Kill-switch: GOVBR_AUTO_RESUME_ENABLED=false desliga sem redeploy.
-func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext string) {
+func (h *GovBrCallbackHandler) triggerAutoResume(authID, userNumber, serviceContext string) {
 	if !h.config.GovBr.AutoResumeEnabled {
 		return
 	}
@@ -295,18 +300,19 @@ func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext stri
 		"handler":     "govbr_auto_resume",
 	})
 
-	// Dedup atômico: dispara uma vez por telefone numa janela de 5min — curta de
-	// propósito (menor que o TTL do token), pra um re-clique tardio renderizar a
-	// página de sucesso sem re-disparar o resume.
+	// Dedup atômico por FLUXO de auth (authID), não por telefone: o mesmo telefone
+	// pode ter auths pendentes distintas (service_context diferente) na mesma janela
+	// de 5min; keyear por telefone faria a 2ª cair em skipped_dedup e nunca re-injetar.
+	// authID é único por fluxo. Janela curta (re-clique tardio só renderiza sucesso).
 	sanitized := sanitizePhoneNumber(userNumber)
-	lockKey := fmt.Sprintf("govbr_resumed:%s", sanitized)
+	lockKey := fmt.Sprintf("govbr_resumed:%s", authID)
 	acquired, err := h.redisService.SetNX(ctx, lockKey, "1", 5*time.Minute)
 	if err != nil {
 		govbrAutoResumeTotal.WithLabelValues("setnx_err").Inc()
 		logger.WithError(err).Warn("Auto-resume dedup SETNX falhou; prosseguindo best-effort (at-least-once)")
 	} else if !acquired {
 		govbrAutoResumeTotal.WithLabelValues("skipped_dedup").Inc()
-		logger.Info("Auto-resume já disparado para este telefone; pulando")
+		logger.Info("Auto-resume já disparado para este fluxo de auth; pulando")
 		return
 	}
 
@@ -316,6 +322,12 @@ func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext stri
 		resumeURL = fmt.Sprintf("http://localhost:%d/api/v1/message/webhook/user", h.config.Server.Port)
 	}
 
+	// Canal de entrega: o worker SÓ entrega a resposta se houver callback_url
+	// (message_handlers.go). Recuperamos o callback capturado no inbound original
+	// do cidadão (armazenado por telefone em HandleUserWebhook). Sem ele, o engine
+	// processa mas a resposta NÃO chega ao WhatsApp — o resume vira no-op de entrega.
+	resumeCallback, _ := h.redisService.Get(ctx, "govbr_resume_callback:"+sanitized)
+
 	payload := map[string]string{
 		"user_number": userNumber,
 		"message": fmt.Sprintf(
@@ -323,6 +335,9 @@ func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext stri
 				"Retome a solicitação anterior do cidadão de onde paramos, sem pedir tudo de novo.",
 			serviceContext,
 		),
+	}
+	if resumeCallback != "" {
+		payload["callback_url"] = resumeCallback // entrega a resposta de volta ao WhatsApp
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -354,6 +369,14 @@ func (h *GovBrCallbackHandler) triggerAutoResume(userNumber, serviceContext stri
 		return
 	}
 	_, _ = io.Copy(io.Discard, resp.Body) // drena o corpo pra permitir reuso de conexão
+
+	if resumeCallback == "" {
+		// Enfileirou (conversa avança), mas sem callback a resposta não será
+		// entregue no WhatsApp. Observável e distinto de "fired" pra ops detectar.
+		govbrAutoResumeTotal.WithLabelValues("fired_no_callback").Inc()
+		logger.Warn("Auto-resume enfileirado SEM callback de entrega: a resposta não chegará ao WhatsApp (cidadão pode mandar mensagem como fallback)")
+		return
+	}
 
 	govbrAutoResumeTotal.WithLabelValues("fired").Inc()
 	logger.Info("Auto-resume disparado: solicitação re-injetada no pipeline inbound")

@@ -249,6 +249,14 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 		} else {
 			logger.WithField("callback_url", *req.CallbackURL).Debug("Callback URL stored for message")
 		}
+
+		// Também keyado por usuário, para o auto-resume do gov.br: o callback
+		// sintetiza um inbound novo (message_id novo) após o callback de auth e
+		// precisa de um alvo de entrega — sem isto, a resposta retomada é
+		// processada mas nunca entregue ao WhatsApp. TTL = janela do auth state.
+		userCbKey := "govbr_resume_callback:" + sanitizePhoneNumber(req.UserNumber)
+		_ = h.redisService.Set(ctxTimeout, userCbKey, *req.CallbackURL,
+			time.Duration(h.config.GovBr.AuthStateTTL)*time.Second)
 	}
 
 	// Queue message for processing with trace headers
