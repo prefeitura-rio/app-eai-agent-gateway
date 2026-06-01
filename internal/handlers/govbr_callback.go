@@ -47,10 +47,10 @@ type GovBrAuthState struct {
 
 // GovBrUserInfo represents user data from /userinfo endpoint
 type GovBrUserInfo struct {
-	Sub               string `json:"sub"`                // Subject identifier (usually CPF)
+	Sub               string `json:"sub"`                // Subject identifier
 	Name              string `json:"name"`               // Full name
 	Email             string `json:"email"`              // Email (optional)
-	CPF               string `json:"cpf"`                // CPF (may be in sub or separate field)
+	CPF               string `json:"cpf"`                // Normalized CPF with digits only
 	PreferredUsername string `json:"preferred_username"` // Common OIDC username claim
 }
 
@@ -199,16 +199,19 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		return
 	}
 
-	// 5. Fetch user info from /userinfo endpoint (optional)
+	// 5. Fetch user info from /userinfo endpoint
 	userInfo, err := h.fetchUserInfo(ctx, tokenResp.AccessToken)
 	if err != nil {
-		logger.WithError(err).Warn("Failed to fetch user info (non-critical)")
+		logger.WithError(err).Warn("Failed to fetch user info")
 		userInfo = nil
 	}
 	if idTokenUserInfo, err := parseUserInfoFromIDToken(tokenResp.IDToken); err == nil {
 		userInfo = mergeUserInfo(userInfo, idTokenUserInfo)
 	} else if tokenResp.IDToken != "" {
 		logger.WithError(err).Warn("Failed to parse user info from id_token")
+	}
+	if err := validateRequiredUserInfo(userInfo); err != nil {
+		logger.WithError(err).Warn("Gov.br user info is incomplete")
 	}
 
 	// 6. Store tokens and user info in Redis with appropriate TTL
@@ -323,8 +326,7 @@ func (h *GovBrCallbackHandler) fetchUserInfo(
 ) (*GovBrUserInfo, error) {
 	userInfoURL := h.config.GovBr.UserInfoEndpoint()
 	if userInfoURL == "" {
-		h.logger.Debug("UserInfo URL not configured, skipping user data fetch")
-		return nil, nil
+		return nil, fmt.Errorf("userinfo URL not configured")
 	}
 
 	// Create request with Bearer token
@@ -360,18 +362,12 @@ func (h *GovBrCallbackHandler) fetchUserInfo(
 		return nil, fmt.Errorf("userinfo request failed: %d", resp.StatusCode)
 	}
 
-	var userInfo GovBrUserInfo
-	if err := json.Unmarshal(body, &userInfo); err != nil {
+	var claims map[string]interface{}
+	if err := json.Unmarshal(body, &claims); err != nil {
 		return nil, fmt.Errorf("failed to parse userinfo response: %w", err)
 	}
 
-	// Normalize CPF (may be in sub or cpf field)
-	if userInfo.CPF == "" && userInfo.Sub != "" {
-		userInfo.CPF = userInfo.Sub
-	}
-	if userInfo.CPF == "" && userInfo.PreferredUsername != "" {
-		userInfo.CPF = userInfo.PreferredUsername
-	}
+	userInfo := userInfoFromClaims(claims)
 
 	h.logger.WithFields(logrus.Fields{
 		"has_name":  userInfo.Name != "",
@@ -379,7 +375,7 @@ func (h *GovBrCallbackHandler) fetchUserInfo(
 		"has_email": userInfo.Email != "",
 	}).Debug("User info fetched successfully")
 
-	return &userInfo, nil
+	return userInfo, nil
 }
 
 func parseUserInfoFromIDToken(idToken string) (*GovBrUserInfo, error) {
@@ -404,18 +400,26 @@ func parseUserInfoFromIDToken(idToken string) (*GovBrUserInfo, error) {
 		return nil, fmt.Errorf("failed to parse id_token claims: %w", err)
 	}
 
+	return userInfoFromClaims(claims), nil
+}
+
+func userInfoFromClaims(claims map[string]interface{}) *GovBrUserInfo {
 	userInfo := &GovBrUserInfo{
 		Sub:               firstStringClaim(claims, "sub"),
 		Name:              firstStringClaim(claims, "name", "nome"),
 		Email:             firstStringClaim(claims, "email"),
-		CPF:               firstStringClaim(claims, "cpf", "govbr_cpf", "preferred_username"),
 		PreferredUsername: firstStringClaim(claims, "preferred_username"),
 	}
-	if userInfo.CPF == "" && userInfo.Sub != "" {
-		userInfo.CPF = userInfo.Sub
-	}
 
-	return userInfo, nil
+	userInfo.CPF = firstCPFClaim(
+		claims,
+		"cpf",
+		"govbr_cpf",
+		"preferred_username",
+		"sub",
+	)
+
+	return userInfo
 }
 
 func mergeUserInfo(primary *GovBrUserInfo, fallback *GovBrUserInfo) *GovBrUserInfo {
@@ -449,11 +453,117 @@ func firstStringClaim(claims map[string]interface{}, keys ...string) string {
 	for _, key := range keys {
 		value, ok := claims[key].(string)
 		if ok && value != "" {
-			return value
+			return strings.TrimSpace(value)
 		}
 	}
 
 	return ""
+}
+
+func firstCPFClaim(claims map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if cpf := normalizeCPF(firstStringClaim(claims, key)); cpf != "" {
+			return cpf
+		}
+	}
+
+	return ""
+}
+
+func normalizeCPF(value string) string {
+	var digits strings.Builder
+	for _, r := range value {
+		if r >= '0' && r <= '9' {
+			digits.WriteRune(r)
+		}
+	}
+
+	cpf := digits.String()
+	if !isValidCPF(cpf) {
+		return ""
+	}
+
+	return cpf
+}
+
+func isValidCPF(cpf string) bool {
+	if len(cpf) != 11 {
+		return false
+	}
+
+	allSame := true
+	for i := 1; i < len(cpf); i++ {
+		if cpf[i] != cpf[0] {
+			allSame = false
+			break
+		}
+	}
+	if allSame {
+		return false
+	}
+
+	firstDigit := cpfCheckDigit(cpf[:9], 10)
+	secondDigit := cpfCheckDigit(cpf[:9]+string(firstDigit), 11)
+
+	return cpf[9] == firstDigit && cpf[10] == secondDigit
+}
+
+func cpfCheckDigit(base string, weight int) byte {
+	sum := 0
+	for _, r := range base {
+		sum += int(r-'0') * weight
+		weight--
+	}
+
+	remainder := (sum * 10) % 11
+	if remainder == 10 {
+		remainder = 0
+	}
+
+	return byte('0' + remainder)
+}
+
+func validateRequiredUserInfo(userInfo *GovBrUserInfo) error {
+	if userInfo == nil {
+		return fmt.Errorf("missing user info")
+	}
+
+	var missing []string
+	if userInfo.Name == "" {
+		missing = append(missing, "name")
+	}
+	if userInfo.CPF == "" {
+		missing = append(missing, "cpf")
+	}
+	if userInfo.Email == "" {
+		missing = append(missing, "email")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("missing required user info fields: %s", strings.Join(missing, ", "))
+	}
+
+	return nil
+}
+
+func govBrScopeWithBasicInfo(scope string) string {
+	seen := map[string]bool{}
+	var scopes []string
+
+	for _, item := range strings.Fields(scope) {
+		if !seen[item] {
+			seen[item] = true
+			scopes = append(scopes, item)
+		}
+	}
+
+	for _, item := range []string{"openid", "profile", "email", "phone"} {
+		if !seen[item] {
+			seen[item] = true
+			scopes = append(scopes, item)
+		}
+	}
+
+	return strings.Join(scopes, " ")
 }
 
 // storeTokens stores OAuth tokens in Redis with appropriate TTL
