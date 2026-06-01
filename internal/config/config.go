@@ -319,6 +319,11 @@ func setDefaults() {
 	viper.SetDefault("RABBITMQ_AGENT_QUEUE", "agent_messages")
 	viper.SetDefault("RABBITMQ_USER_MESSAGES_QUEUE", "user_messages")
 	viper.SetDefault("GOVBR_AUTO_RESUME_ENABLED", true)
+	// Default de 5min (janela de auth gov.br). Sem ele, AuthStateTTL=0 e a key
+	// govbr_resume_callback:<phone> (escrita no inbound pelo auto-resume) iria pro
+	// Redis com Set(..., 0) = SEM expiração → leak de key permanente por cidadão
+	// em deployment sem o env setado. O env GOVBR_AUTH_STATE_TTL sobrescreve.
+	viper.SetDefault("GOVBR_AUTH_STATE_TTL", 300)
 	viper.SetDefault("RABBITMQ_AGENT_MESSAGES_QUEUE", "agent_messages")
 	viper.SetDefault("RABBITMQ_DLX_EXCHANGE", "eai_gateway_dlx")
 	viper.SetDefault("RABBITMQ_MAX_RETRIES", -1) // -1 = infinite retries with exponential backoff
