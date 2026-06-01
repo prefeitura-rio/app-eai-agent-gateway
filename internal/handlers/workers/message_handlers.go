@@ -1285,10 +1285,12 @@ func classifyTranscriptionError(err error) string {
 
 // executeCallback handles the callback execution asynchronously
 func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, messageID string, userNumber string, callbackURL string, response string, logger *logrus.Entry) {
+	// Não logar o callback_url: ele carrega o telefone do cidadão no path/query
+	// (LGPD). message_id é a chave Redis pra recuperar a URL out-of-band sem
+	// deixá-la no stream de log.
 	callbackLogger := logger.WithFields(logrus.Fields{
-		"callback_url": callbackURL,
-		"message_id":   messageID,
-		"user_number":  userNumber,
+		"message_id":  messageID,
+		"user_number": userNumber,
 	})
 
 	callbackLogger.Info("Executing callback for completed task")

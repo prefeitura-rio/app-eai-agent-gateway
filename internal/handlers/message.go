@@ -140,7 +140,10 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	// Validate callback URL if provided
 	if req.CallbackURL != nil && *req.CallbackURL != "" {
 		if err := validateCallbackURL(*req.CallbackURL); err != nil {
-			h.logger.WithError(err).WithField("callback_url", *req.CallbackURL).Error("Invalid callback URL")
+			// Não logar o callback_url cru: ele carrega o telefone do cidadão
+			// (LGPD). O erro de validação já descreve o motivo (scheme/host
+			// inválido) sem ecoar a URL.
+			h.logger.WithError(err).Error("Invalid callback URL")
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error":   "Invalid callback URL",
 				"message": err.Error(),
@@ -246,7 +249,7 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 		if err := h.redisService.StoreCallbackURL(ctxTimeout, messageID, *req.CallbackURL, h.config.Redis.TaskStatusTTL); err != nil {
 			logger.WithError(err).Warn("Failed to store callback URL, continuing with processing")
 		} else {
-			logger.WithField("callback_url", *req.CallbackURL).Debug("Callback URL stored for message")
+			logger.WithField("message_id", messageID).Debug("Callback URL stored for message")
 		}
 	}
 
@@ -629,7 +632,10 @@ func validateCallbackURL(callbackURL string) error {
 	// Parse URL
 	parsedURL, err := url.Parse(callbackURL)
 	if err != nil {
-		return fmt.Errorf("invalid callback URL format: %w", err)
+		// Não embrulhar o erro do url.Parse com %w: o .Error() dele ecoa a
+		// URL crua (que carrega o telefone do cidadão — LGPD), e esse erro
+		// vai tanto pro log quanto pro corpo da resposta. Motivo sanitizado.
+		return fmt.Errorf("invalid callback URL format")
 	}
 
 	// Validate scheme - only allow http/https
