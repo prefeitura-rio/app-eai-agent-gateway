@@ -230,6 +230,13 @@ type GovBrConfig struct {
 	Scope        string `mapstructure:"GOVBR_SCOPE"`
 	AuthStateTTL int    `mapstructure:"GOVBR_AUTH_STATE_TTL"` // seconds
 	RedisURL     string `mapstructure:"GOVBR_REDIS_URL"`      // Redis URL for Gov.br tokens (shared with MCP)
+	// AutoResumeEnabled liga o auto-resume: ao concluir o callback, o Gateway
+	// re-injeta a solicitação original no pipeline inbound (o cidadão não precisa
+	// mandar "ok"). Default true; kill-switch via GOVBR_AUTO_RESUME_ENABLED=false.
+	AutoResumeEnabled bool `mapstructure:"GOVBR_AUTO_RESUME_ENABLED"`
+	// ResumeWebhookURL é o destino do POST de auto-resume. Vazio → loopback
+	// in-pod (http://localhost:<SERVER_PORT>/api/v1/message/webhook/user).
+	ResumeWebhookURL string `mapstructure:"GOVBR_RESUME_WEBHOOK_URL"`
 }
 
 func (g GovBrConfig) AuthEndpoint() string {
@@ -312,6 +319,12 @@ func setDefaults() {
 	viper.SetDefault("RABBITMQ_USER_QUEUE", "user_messages")
 	viper.SetDefault("RABBITMQ_AGENT_QUEUE", "agent_messages")
 	viper.SetDefault("RABBITMQ_USER_MESSAGES_QUEUE", "user_messages")
+	viper.SetDefault("GOVBR_AUTO_RESUME_ENABLED", true)
+	// Default de 5min (janela de auth gov.br). Sem ele, AuthStateTTL=0 e a key
+	// govbr_resume_callback:<phone> (escrita no inbound pelo auto-resume) iria pro
+	// Redis com Set(..., 0) = SEM expiração → leak de key permanente por cidadão
+	// em deployment sem o env setado. O env GOVBR_AUTH_STATE_TTL sobrescreve.
+	viper.SetDefault("GOVBR_AUTH_STATE_TTL", 300)
 	viper.SetDefault("RABBITMQ_AGENT_MESSAGES_QUEUE", "agent_messages")
 	viper.SetDefault("RABBITMQ_DLX_EXCHANGE", "eai_gateway_dlx")
 	viper.SetDefault("RABBITMQ_MAX_RETRIES", -1) // -1 = infinite retries with exponential backoff
@@ -604,6 +617,8 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("GOVBR_AUTH_STATE_TTL")
 	_ = viper.BindEnv("GOVBR_USERINFO_URL")
 	_ = viper.BindEnv("GOVBR_REDIS_URL")
+	_ = viper.BindEnv("GOVBR_AUTO_RESUME_ENABLED")
+	_ = viper.BindEnv("GOVBR_RESUME_WEBHOOK_URL")
 
 	// Data Relay
 	_ = viper.BindEnv("DATA_RELAY_ENABLED")

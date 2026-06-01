@@ -26,6 +26,7 @@ type RedisServiceInterface interface {
 	GetTaskResult(ctx context.Context, taskID string, dest interface{}) error
 	Get(ctx context.Context, key string) (string, error)
 	Set(ctx context.Context, key string, value string, ttl time.Duration) error
+	SetNX(ctx context.Context, key string, value string, ttl time.Duration) (bool, error)
 	StoreCallbackURL(ctx context.Context, messageID string, callbackURL string, ttl time.Duration) error
 	GetCallbackURL(ctx context.Context, messageID string) (string, error)
 	SetUserLastActivity(ctx context.Context, userNumber string, timestamp time.Time, ttl time.Duration) error
@@ -251,6 +252,14 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 		} else {
 			logger.WithField("message_id", messageID).Debug("Callback URL stored for message")
 		}
+
+		// Também keyado por usuário, para o auto-resume do gov.br: o callback
+		// sintetiza um inbound novo (message_id novo) após o callback de auth e
+		// precisa de um alvo de entrega — sem isto, a resposta retomada é
+		// processada mas nunca entregue ao WhatsApp. TTL = janela do auth state.
+		userCbKey := "govbr_resume_callback:" + sanitizePhoneNumber(req.UserNumber)
+		_ = h.redisService.Set(ctxTimeout, userCbKey, *req.CallbackURL,
+			time.Duration(h.config.GovBr.AuthStateTTL)*time.Second)
 	}
 
 	// Queue message for processing with trace headers
