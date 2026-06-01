@@ -140,6 +140,10 @@ func TestClassifyEngineError(t *testing.T) {
 		{"rate limit exceeded", "rate limit exceeded: quota", "ratelimited"},
 		{"non-2xx 429", "non-2xx response: 429 - too many", "ratelimited"},
 		{"too many requests phrase", "engine returned Too Many Requests", "ratelimited"},
+		// Quota do Vertex/Google → ratelimited (gRPC RESOURCE_EXHAUSTED / "quota exceeded")
+		{"grpc resource exhausted", "rpc error: code = ResourceExhausted desc = Quota exceeded for aiplatform.googleapis.com", "ratelimited"},
+		{"resource_exhausted underscore", "RESOURCE_EXHAUSTED: quota metric limit", "ratelimited"},
+		{"quota exceeded phrase", "Quota exceeded for quota metric 'Online prediction requests'", "ratelimited"},
 		// 429 dentro de um ID/URL (não status) NÃO deve virar ratelimited
 		{"429 in engine id is not ratelimited", "Post \"https://.../reasoningEngines/429000111:query\": context deadline exceeded", "timeout"},
 		{"429 in id with no other signal is default", "failed for reasoningEngines/4290: boom", "default"},

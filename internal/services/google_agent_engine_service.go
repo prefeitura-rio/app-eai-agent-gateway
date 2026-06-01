@@ -874,7 +874,14 @@ func classifyEngineError(errStr string) string {
 	// ID — um ID com "429" não deve virar rate-limit.
 	if strings.Contains(errStr, "rate limit") ||
 		strings.Contains(errStr, "too many requests") ||
-		strings.Contains(errStr, "response: 429") {
+		strings.Contains(errStr, "response: 429") ||
+		// Quota do Vertex/Google: surge como gRPC RESOURCE_EXHAUSTED ou texto
+		// "quota exceeded" — nem sempre com um 429 no formato de status. É um
+		// limite de taxa/quota, então merece "aguarde alguns segundos", não
+		// "fora do ar" (default/unavailable). Termos específicos, sem over-match.
+		strings.Contains(errStr, "resourceexhausted") ||
+		strings.Contains(errStr, "resource_exhausted") ||
+		strings.Contains(errStr, "quota exceeded") {
 		return "ratelimited"
 	}
 
