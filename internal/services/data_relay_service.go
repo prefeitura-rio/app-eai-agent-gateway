@@ -51,9 +51,11 @@ func NewDataRelayService(logger *logrus.Logger, cfg *config.DataRelayConfig) *Da
 // SendErrorInterceptor sends callback error details to Data Relay
 // This is a fire-and-forget operation - errors are logged but not propagated
 func (s *DataRelayService) SendErrorInterceptor(ctx context.Context, payload ErrorInterceptorPayload) error {
+	// api_endpoint omitido do log: payload.APIEndpoint é o callback_url cru, que
+	// carrega o telefone do cidadão no path/query (LGPD). Ele segue no CORPO
+	// enviado ao Data Relay (o serviço precisa dele), mas não no stream de log.
 	logger := s.logger.WithFields(logrus.Fields{
 		"customer_number": payload.CustomerWhatsappNumber,
-		"api_endpoint":    payload.APIEndpoint,
 		"http_status":     payload.HTTPStatusCode,
 		"source":          payload.Source,
 		"flowname":        payload.FlowName,
