@@ -137,6 +137,7 @@ type GoogleAgentEngineConfig struct {
 	// Graceful Error Messages
 	ErrorMessageTemporarilyUnavailable string `mapstructure:"GOOGLE_AGENT_ENGINE_ERROR_MSG_UNAVAILABLE"`
 	ErrorMessageTimeout                string `mapstructure:"GOOGLE_AGENT_ENGINE_ERROR_MSG_TIMEOUT"`
+	ErrorMessageRateLimited            string `mapstructure:"GOOGLE_AGENT_ENGINE_ERROR_MSG_RATELIMITED"`
 	ErrorMessageDefault                string `mapstructure:"GOOGLE_AGENT_ENGINE_ERROR_MSG_DEFAULT"`
 }
 
@@ -355,9 +356,10 @@ func setDefaults() {
 	viper.SetDefault("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_RETRY_DELAY", "500ms")
 
 	// Google Agent Engine Graceful Error Messages
-	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_UNAVAILABLE", "🤖 Nosso serviço de IA está temporariamente indisponível. Por favor, tente novamente em alguns instantes.")
-	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_TIMEOUT", "⏱️ A resposta está demorando mais do que o esperado. Por favor, tente novamente.")
-	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_DEFAULT", "❌ Desculpe, ocorreu um erro ao processar sua mensagem. Por favor, tente novamente.")
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_UNAVAILABLE", "🤖 Nosso atendimento automático está fora do ar agora. Tente de novo em alguns minutos. Se precisar agora, fale com a Central 1746: ligue 1746 ou acesse 1746.rio.")
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_TIMEOUT", "⏳ A resposta está demorando mais que o normal. Pode enviar sua mensagem de novo?")
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_RATELIMITED", "🚦 Recebi muitas mensagens em pouco tempo. Aguarde alguns segundos e envie de novo, por favor.")
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_ERROR_MSG_DEFAULT", "Tive um problema técnico ao processar sua mensagem. Pode tentar enviar de novo? Se continuar, fale com a Central 1746 (ligue 1746 ou acesse 1746.rio).")
 
 	// Audio Transcription
 	viper.SetDefault("TRANSCRIBE_MAX_DURATION", 60)
@@ -529,6 +531,7 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_HEALTH_CHECK_RETRY_DELAY")
 	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_ERROR_MSG_UNAVAILABLE")
 	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_ERROR_MSG_TIMEOUT")
+	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_ERROR_MSG_RATELIMITED")
 	_ = viper.BindEnv("GOOGLE_AGENT_ENGINE_ERROR_MSG_DEFAULT")
 
 	// EAI Agent
