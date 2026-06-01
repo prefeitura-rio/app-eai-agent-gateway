@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -59,7 +60,9 @@ func (s *CallbackService) ValidateCallbackURL(callbackURL string) error {
 	// Parse URL
 	parsedURL, err := url.Parse(callbackURL)
 	if err != nil {
-		return fmt.Errorf("invalid callback URL format: %w", err)
+		// Não embrulhar o erro do url.Parse com %w: o .Error() dele ecoa a URL
+		// crua (que carrega o telefone do cidadão — LGPD). Motivo sanitizado.
+		return fmt.Errorf("invalid callback URL format")
 	}
 
 	// Require HTTPS if configured
@@ -90,18 +93,20 @@ func (s *CallbackService) ValidateCallbackURL(callbackURL string) error {
 
 // ExecuteCallback sends a POST request to the callback URL with retry logic
 func (s *CallbackService) ExecuteCallback(ctx context.Context, callbackURL string, payload models.CallbackPayload, userNumber string) error {
+	// Não logar o callback_url (telefone do cidadão no path/query — LGPD);
+	// message_id correlaciona out-of-band.
 	logger := s.logger.WithFields(logrus.Fields{
-		"callback_url": callbackURL,
-		"message_id":   payload.MessageID,
-		"status":       payload.Status,
+		"message_id": payload.MessageID,
+		"status":     payload.Status,
 	})
 
 	// Create span for callback execution
 	var span trace.Span
 	if s.tracer != nil {
+		// callback.url omitido do span de propósito: ele vaza o telefone do
+		// cidadão pro backend de tracing (LGPD). message.id basta pra correlação.
 		ctx, span = s.tracer.Start(ctx, "execute_callback",
 			trace.WithAttributes(
-				attribute.String("callback.url", callbackURL),
 				attribute.String("message.id", payload.MessageID),
 				attribute.String("message.status", payload.Status),
 			),
@@ -173,12 +178,25 @@ func (s *CallbackService) ExecuteCallback(ctx context.Context, callbackURL strin
 	return fmt.Errorf("callback failed after %d attempts: %w", maxRetries+1, err)
 }
 
+// sanitizeURLError remove a URL crua de um *url.Error. O .Error() de um
+// *url.Error (devolvido por http.NewRequestWithContext e httpClient.Do) ecoa a
+// URL inteira — que carrega o telefone do cidadão no path/query (LGPD) — e esse
+// erro flui pra logs, span OTel (callback.error) e corpo do Data Relay. Devolver
+// a causa interna (.Err) preserva o motivo (timeout/DNS/conn recusada) sem a URL.
+func sanitizeURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return ue.Err
+	}
+	return err
+}
+
 // sendCallbackRequest sends a single HTTP POST request to the callback URL
 func (s *CallbackService) sendCallbackRequest(ctx context.Context, callbackURL string, payloadBytes []byte, logger *logrus.Entry) error {
 	// Create request
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, callbackURL, bytes.NewReader(payloadBytes))
 	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+		return fmt.Errorf("failed to create request: %w", sanitizeURLError(err))
 	}
 
 	// Set headers
@@ -199,7 +217,7 @@ func (s *CallbackService) sendCallbackRequest(ctx context.Context, callbackURL s
 	// Send request
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("request failed: %w", err)
+		return fmt.Errorf("request failed: %w", sanitizeURLError(err))
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -287,8 +305,8 @@ func generateHMACSignature(payload []byte, secret string) string {
 // sendErrorInterceptor sends callback failure details to Data Relay
 // This runs asynchronously and doesn't block the callback flow
 func (s *CallbackService) sendErrorInterceptor(ctx context.Context, callbackURL string, payload models.CallbackPayload, userNumber string, callbackErr error) {
+	// Sem callback_url (telefone do cidadão — LGPD); message_id correlaciona.
 	logger := s.logger.WithFields(logrus.Fields{
-		"callback_url":   callbackURL,
 		"message_id":     payload.MessageID,
 		"user_number":    userNumber,
 		"callback_error": callbackErr.Error(),

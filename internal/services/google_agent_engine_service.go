@@ -101,6 +101,19 @@ var (
 		},
 		[]string{"source"}, // source: redis/memory
 	)
+
+	// Conta qual mensagem de erro graciosa foi enviada ao cidadão quando o
+	// Gateway não consegue resposta do engine. Dá visibilidade da distribuição
+	// (timeout/unavailable/ratelimited/default) sem expor conteúdo da mensagem.
+	googleAgentEngineGracefulErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "eai_gateway",
+			Subsystem: "google_agent_engine",
+			Name:      "graceful_error_messages_total",
+			Help:      "Total number of graceful error messages sent to the user, by class",
+		},
+		[]string{"error_class"}, // timeout/unavailable/ratelimited/default
+	)
 )
 
 // RedisServiceInterface is the interface for Redis operations needed by this service
@@ -301,13 +314,16 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 
 		// Return graceful error message instead of returning error
 		// This prevents raw error propagation to the user
-		errorMsg := s.getGracefulErrorMessage(err)
+		errorClass := classifyEngineError(err.Error())
+		googleAgentEngineGracefulErrors.WithLabelValues(errorClass).Inc()
+		errorMsg := s.gracefulMessageForClass(errorClass)
 		responseContent = errorMsg
 
 		// Log the actual error but don't fail the request
 		s.logger.WithFields(logrus.Fields{
 			"thread_id":        threadID,
 			"error":            err.Error(),
+			"error_class":      errorClass,
 			"graceful_message": errorMsg,
 		}).Warn("Returning graceful error message to user")
 	}
@@ -844,28 +860,64 @@ func (s *GoogleAgentEngineService) performHealthCheck(ctx context.Context) error
 	return nil
 }
 
-// getGracefulErrorMessage returns a user-friendly error message based on the error type
-func (s *GoogleAgentEngineService) getGracefulErrorMessage(err error) string {
-	errStr := err.Error()
+// classifyEngineError maps an engine error string to a coarse class used both to
+// pick the user-facing message and to label the observability metric. Pure (no
+// config/state) so it is trivially unit-testable. Order matters — most specific
+// first.
+func classifyEngineError(errStr string) string {
+	errStr = strings.ToLower(errStr)
 
-	// Check for timeout errors
-	if strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "deadline exceeded") ||
-		strings.Contains(errStr, "context canceled") {
-		return s.config.GoogleAgentEngine.ErrorMessageTimeout
+	// Rate limit — must come before "unavailable"/"default": a 429 is distinct
+	// from a 5xx outage and deserves "aguarde alguns segundos", not "fora do ar".
+	// `429` é casado só no formato de status (`response: 429`), não como substring
+	// solta: erros de transporte do Go embutem a URL, que contém o engine/operation
+	// ID — um ID com "429" não deve virar rate-limit.
+	if strings.Contains(errStr, "rate limit") ||
+		strings.Contains(errStr, "too many requests") ||
+		strings.Contains(errStr, "response: 429") ||
+		// Quota do Vertex/Google: surge como gRPC RESOURCE_EXHAUSTED ou texto
+		// "quota exceeded" — nem sempre com um 429 no formato de status. É um
+		// limite de taxa/quota, então merece "aguarde alguns segundos", não
+		// "fora do ar" (default/unavailable). Termos específicos, sem over-match.
+		strings.Contains(errStr, "resourceexhausted") ||
+		strings.Contains(errStr, "resource_exhausted") ||
+		strings.Contains(errStr, "quota exceeded") {
+		return "ratelimited"
 	}
 
-	// Check for availability errors
+	// Timeout — inclui "timed out" (com espaço), p.ex. "polling timed out after
+	// 30s", que NÃO casa com "timeout" e antes caía no default.
+	if strings.Contains(errStr, "timeout") ||
+		strings.Contains(errStr, "timed out") ||
+		strings.Contains(errStr, "deadline exceeded") ||
+		strings.Contains(errStr, "context canceled") {
+		return "timeout"
+	}
+
+	// Availability — engine fora do ar / erro de conexão / 5xx.
 	if strings.Contains(errStr, "connection refused") ||
 		strings.Contains(errStr, "unavailable") ||
 		strings.Contains(errStr, "503") ||
 		strings.Contains(errStr, "502") ||
 		strings.Contains(errStr, "504") {
-		return s.config.GoogleAgentEngine.ErrorMessageTemporarilyUnavailable
+		return "unavailable"
 	}
 
-	// Default error message for unknown errors
-	return s.config.GoogleAgentEngine.ErrorMessageDefault
+	return "default"
+}
+
+// gracefulMessageForClass maps an error class to the configured user-facing message.
+func (s *GoogleAgentEngineService) gracefulMessageForClass(class string) string {
+	switch class {
+	case "ratelimited":
+		return s.config.GoogleAgentEngine.ErrorMessageRateLimited
+	case "timeout":
+		return s.config.GoogleAgentEngine.ErrorMessageTimeout
+	case "unavailable":
+		return s.config.GoogleAgentEngine.ErrorMessageTemporarilyUnavailable
+	default:
+		return s.config.GoogleAgentEngine.ErrorMessageDefault
+	}
 }
 
 // SendHistoryUpdate sends multiple messages to update conversation history
