@@ -124,7 +124,7 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 	params.Set("client_id", h.config.GovBr.ClientID)
 	params.Set("redirect_uri", h.config.GovBr.RedirectURI)
 	params.Set("response_type", "code")
-	params.Set("scope", h.config.GovBr.Scope)
+	params.Set("scope", govBrScopeWithBasicInfo(h.config.GovBr.Scope))
 	params.Set("state", state)
 	params.Set("code_challenge", codeChallenge)
 	params.Set("code_challenge_method", "S256")
