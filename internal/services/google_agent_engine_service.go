@@ -114,6 +114,20 @@ var (
 		},
 		[]string{"error_class"}, // timeout/unavailable/ratelimited/default
 	)
+
+	// Conta os retries SEGUROS do start da operação (postQuery) em erros
+	// pré-execução, por outcome. "recovered" = um retry conseguiu iniciar a
+	// operação; "exhausted" = esgotou as tentativas e caiu no graceful message.
+	// Dá visibilidade de blips transitórios do engine sem expor conteúdo.
+	googleAgentEnginePostQueryRetries = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: "eai_gateway",
+			Subsystem: "google_agent_engine",
+			Name:      "post_query_retries_total",
+			Help:      "Retries seguros do start da operação (postQuery) em erros pré-execução, por outcome.",
+		},
+		[]string{"outcome"}, // recovered/exhausted
+	)
 )
 
 // RedisServiceInterface is the interface for Redis operations needed by this service
@@ -561,9 +575,55 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 		"reasoning_engine_id":  engineID,
 	}).Debug("Making async_query call to reasoning engine")
 
-	resp, err := s.postQuery(ctx, accessToken, payload, engineID)
-	if err != nil {
-		return "", fmt.Errorf("failed to post query: %w", err)
+	// Retry SEGURO do START da operação. Só re-tenta o postQuery (que inicia a
+	// operação async) em erros pré-execução (ver isPreExecutionRetriable): nesses
+	// a operação nunca começou no engine, então re-tentar não arrisca duplicar
+	// chamado. Timeout/502/504 NÃO entram — a operação pode ter rodado, então o
+	// erro sobe e vira graceful message (comportamento atual preservado). Reutiliza
+	// o config GOOGLE_AGENT_ENGINE_MAX_RETRIES (default 3) + RETRY_BACKOFF (1s).
+	maxAttempts := s.config.GoogleAgentEngine.MaxRetries
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	backoff := s.config.GoogleAgentEngine.RetryBackoff
+	if backoff <= 0 {
+		// Guarda contra override 0s/negativo: sem espaçamento, os retries
+		// martelariam um engine já em apuros. Cai no mesmo default do config.
+		backoff = time.Second
+	}
+
+	var resp map[string]interface{}
+	for attempt := 1; ; attempt++ {
+		resp, err = s.postQuery(ctx, accessToken, payload, engineID)
+		if err == nil {
+			if attempt > 1 {
+				googleAgentEnginePostQueryRetries.WithLabelValues("recovered").Inc()
+				s.logger.WithFields(logrus.Fields{
+					"thread_id": threadID,
+					"attempt":   attempt,
+				}).Info("postQuery recuperou após retry de erro pré-execução")
+			}
+			break
+		}
+		// Para se o erro NÃO é seguro de re-tentar OU acabaram as tentativas.
+		if !isPreExecutionRetriable(err.Error()) || attempt >= maxAttempts {
+			if attempt > 1 {
+				googleAgentEnginePostQueryRetries.WithLabelValues("exhausted").Inc()
+			}
+			return "", fmt.Errorf("failed to post query: %w", err)
+		}
+		s.logger.WithFields(logrus.Fields{
+			"thread_id": threadID,
+			"attempt":   attempt,
+			"max":       maxAttempts,
+			"error":     err.Error(),
+		}).Warn("postQuery falhou com erro pré-execução; re-tentando o start da operação")
+		// Respeita o cancelamento/deadline do contexto durante o backoff.
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("contexto encerrado durante retry do postQuery: %w", ctx.Err())
+		case <-time.After(backoff):
+		}
 	}
 
 	opName := s.extractOperationName(resp)
@@ -906,6 +966,50 @@ func classifyEngineError(errStr string) string {
 	return "default"
 }
 
+// isPreExecutionRetriable diz se um erro do START da operação (postQuery) é
+// seguro de re-tentar — i.e., a operação async PROVAVELMENTE nunca começou no
+// engine, então re-tentar NÃO arrisca duplicar efeito colateral (ex: abrir o
+// MESMO chamado SGRC duas vezes). O graph do engine é NÃO-idempotente, então a
+// regra é conservadora:
+//
+//   - SEGURO (true): conexão recusada (TCP nunca conectou) ou o servidor
+//     REJEITOU explicitamente antes de aceitar (503 / gRPC UNAVAILABLE). Nesses
+//     casos a operação não foi criada.
+//   - INSEGURO (false): timeout / deadline / context canceled / 502 / 504 — a
+//     requisição pode ter sido recebida e a operação iniciada (e ter rodado tools
+//     com efeito colateral) antes do erro. Nunca re-tentar.
+//
+// Pure (sem config/estado) — trivialmente testável. As exclusões vêm primeiro:
+// se o erro casar QUALQUER sinal inseguro, retorna false mesmo que também
+// contenha "unavailable".
+//
+// Status HTTP (502/503/504) são casados na forma canônica do postQuery
+// (`response: 50X`, ver o erro montado em postQuery), NÃO como substring solta —
+// mesmo cuidado do classifyEngineError com "429": um erro de transporte embute a
+// URL com o reasoningEngine ID, e um ID com esses dígitos não deve influenciar a
+// decisão. Os sinais semânticos (connection refused / unavailable / timeout /
+// deadline / context canceled) ficam por palavra (não aparecem em IDs numéricos).
+func isPreExecutionRetriable(errStr string) bool {
+	s := strings.ToLower(errStr)
+
+	// Inseguro: pode ter executado. Exclusão tem prioridade. 502/504 são erros de
+	// proxy onde a operação pode ter iniciado no backend antes do erro.
+	if strings.Contains(s, "timeout") ||
+		strings.Contains(s, "timed out") ||
+		strings.Contains(s, "deadline exceeded") ||
+		strings.Contains(s, "context canceled") ||
+		strings.Contains(s, "response: 502") ||
+		strings.Contains(s, "response: 504") {
+		return false
+	}
+
+	// Seguro: a operação não chegou a ser criada (TCP nunca conectou, ou o servidor
+	// rejeitou explicitamente com 503 / gRPC UNAVAILABLE antes de aceitar).
+	return strings.Contains(s, "connection refused") ||
+		strings.Contains(s, "response: 503") ||
+		strings.Contains(s, "unavailable")
+}
+
 // gracefulMessageForClass maps an error class to the configured user-facing message.
 func (s *GoogleAgentEngineService) gracefulMessageForClass(class string) string {
 	switch class {
@@ -998,6 +1102,9 @@ func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, thread
 		"reasoning_engine_id": engineID,
 	}).Debug("Making async_query call with type=history to reasoning engine")
 
+	// Caminho type=history (atualização de histórico) intencionalmente SEM o retry
+	// pré-execução do turno ao vivo: aqui não há resposta entregue ao cidadão nem
+	// abertura de chamado, então não vale a complexidade; uma falha apenas propaga.
 	resp, err := s.postQuery(ctx, accessToken, payload, engineID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to post query: %w", err)
