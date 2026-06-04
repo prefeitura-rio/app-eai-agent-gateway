@@ -992,12 +992,15 @@ func classifyEngineError(errStr string) string {
 func isPreExecutionRetriable(errStr string) bool {
 	s := strings.ToLower(errStr)
 
-	// Inseguro: pode ter executado. Exclusão tem prioridade. 502/504 são erros de
-	// proxy onde a operação pode ter iniciado no backend antes do erro.
+	// Inseguro: pode ter executado. Exclusão tem prioridade. 500/502/504 são erros
+	// onde a operação pode ter iniciado no backend antes do erro (500 é ambíguo —
+	// o servidor pode ter criado a LRO e então falhado ao responder; nunca assumir
+	// pré-execução). Só 503 / gRPC UNAVAILABLE / connection refused são limpos.
 	if strings.Contains(s, "timeout") ||
 		strings.Contains(s, "timed out") ||
 		strings.Contains(s, "deadline exceeded") ||
 		strings.Contains(s, "context canceled") ||
+		strings.Contains(s, "response: 500") ||
 		strings.Contains(s, "response: 502") ||
 		strings.Contains(s, "response: 504") {
 		return false

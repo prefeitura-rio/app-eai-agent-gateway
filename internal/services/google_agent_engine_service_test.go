@@ -192,6 +192,7 @@ func TestIsPreExecutionRetriable(t *testing.T) {
 		{"timed out", "polling timed out after 30s", false},
 		{"deadline exceeded", "context deadline exceeded", false},
 		{"context canceled", "context canceled", false},
+		{"500 whose body says unavailable is still unsafe", "non-2xx response: 500 - backend reported unavailable", false},
 		{"502 bad gateway", "non-2xx response: 502 - bad gateway", false},
 		{"504 gateway timeout", "non-2xx response: 504 - gateway timeout", false},
 
