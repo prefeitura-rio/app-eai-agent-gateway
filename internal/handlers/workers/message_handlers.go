@@ -186,6 +186,32 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			shouldRetry := isRetriableError(err)
 
 			if shouldRetry {
+				// #12: o consumer DLQa quando retryCount >= MaxRetries. Com o default
+				// MaxRetries=-1, isso já é verdade no 1º erro (0 >= -1) → erro retriável
+				// (timeout/5xx/429) vai DIRETO pro DLQ, sem retry e SEM callback → bot-mudo.
+				// Se este erro VAI pro DLQ (não retenta mais), dispara o failure callback
+				// aqui (última chance de avisar o cidadão). Se ainda vai retentar
+				// (MaxRetries finito não-exausto), não notifica — espera o retry.
+				retryCount, _ := delivery.Headers["x-retry-count"].(int64)
+				if retryCount >= int64(deps.Config.RabbitMQ.MaxRetries) {
+					// O consumer vai DLQar esta mensagem (não retenta mais). Marca FAILED
+					// (não 'processing' — senão /message/response reportaria 'processing'
+					// pra algo já DLQ'd + failed, #12 P2 codex) + notifica o cidadão +
+					// retorna err pro consumer rejeitar. Status em contexto FRESCO (o ctx
+					// do worker pode estar cancelado no caso de timeout).
+					statusCtx, statusCancel := context.WithTimeout(context.Background(), 5*time.Second)
+					if statusErr := deps.RedisService.SetTaskStatus(statusCtx, queueMsg.ID, string(models.TaskStatusFailed), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
+						logger.WithError(statusErr).Error("Failed to mark exhausted retriable message as failed")
+					}
+					statusCancel()
+					logger.WithFields(logrus.Fields{
+						"retriable":   true,
+						"error_type":  "retriable_exhausted",
+						"retry_count": retryCount,
+					}).Warn("Retriable error will be DLQ'd (retries exhausted) — notifying failure callback")
+					notifyFailureCallback(ctx, deps, queueMsg.ID, queueMsg.UserNumber, err, logger)
+					return err
+				}
 				logger.WithFields(logrus.Fields{
 					"retriable":     true,
 					"error_type":    "retriable",
@@ -227,6 +253,11 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 						)
 					}
 				}
+				// #12: callback na falha PERMANENTE — senão o Mule nunca recebe resposta
+				// (callback só no sucesso ~linha 293) e o cidadão fica SEM NADA (bot-mudo).
+				// Envia a msg de erro classificada (Central 1746) pro Mule entregar.
+				notifyFailureCallback(ctx, deps, queueMsg.ID, queueMsg.UserNumber, err, logger)
+
 				// Return nil to prevent retry for permanent failures
 				return nil
 			}
@@ -1322,6 +1353,74 @@ func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, mess
 	} else {
 		callbackLogger.Info("Callback executed successfully")
 		// Clean up callback URL from Redis
+		_ = deps.RedisService.DeleteCallbackURL(ctx, messageID)
+	}
+}
+
+// notifyFailureCallback dispara (best-effort, assíncrono) o callback de FALHA pro
+// Mule quando o engine não produz resposta (#12). Resolve o callback URL (Redis,
+// keyed por message_id), formata a mensagem de erro (FormatErrorMessage → Central
+// 1746) e delega pro executeFailureCallback. No-op se callback/formatter/URL
+// ausentes ou se a mensagem de erro vier vazia. Chamado no ramo permanente E no
+// retriável-que-vai-pro-DLQ (com MaxRetries=-1, retriável vai direto pro DLQ).
+func notifyFailureCallback(ctx context.Context, deps *MessageHandlerDependencies, messageID string, userNumber string, procErr error, logger *logrus.Entry) {
+	if deps.CallbackService == nil || deps.MessageFormatter == nil {
+		return
+	}
+	// O ctx do worker pode estar CANCELADO/expirado — justamente no caso de
+	// 'context deadline exceeded' (timeout), que é retriável e o principal cenário
+	// de bot-mudo. Reusar esse ctx faria o GetCallbackURL no Redis retornar erro de
+	// contexto e pular o callback do próprio timeout (#12 P2 codex). Usa contexto
+	// fresco bounded pro lookup + formatação; o callback em si roda em Background.
+	cbCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	callbackURL, cbErr := deps.RedisService.GetCallbackURL(cbCtx, messageID)
+	if cbErr != nil || callbackURL == "" {
+		return
+	}
+	errMsg := deps.MessageFormatter.FormatErrorMessage(cbCtx, procErr)
+	if errMsg == "" {
+		return
+	}
+	go executeFailureCallback(context.Background(), deps, messageID, userNumber, callbackURL, errMsg, logger)
+}
+
+// executeFailureCallback notifies the Mule callback on a PERMANENT engine failure
+// (#12). Diferente do executeCallback (success-only: faz json.Unmarshal de
+// ProcessedMessageData e hardcoda status "completed"), aqui montamos um payload de
+// FALHA com a mensagem de erro já classificada (Central 1746) como assistant_message,
+// pro Mule extrair via payload.data.messages[message_type=="assistant_message"].content
+// e entregar ao cidadão — em vez de silêncio (bot-mudo). status="failed" + Error preenchido.
+func executeFailureCallback(ctx context.Context, deps *MessageHandlerDependencies, messageID string, userNumber string, callbackURL string, errMsg string, logger *logrus.Entry) {
+	callbackLogger := logger.WithFields(logrus.Fields{
+		"message_id":  messageID,
+		"user_number": userNumber,
+	})
+	callbackLogger.Info("Executing failure callback (engine permanent error)")
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	processedData := models.ProcessedMessageData{
+		Messages: []map[string]interface{}{
+			{"message_type": "assistant_message", "content": errMsg},
+		},
+		ProcessedAt: now,
+		Status:      string(models.TaskStatusFailed),
+	}
+	payload := models.CallbackPayload{
+		MessageID:   messageID,
+		Status:      string(models.TaskStatusFailed),
+		Data:        processedData,
+		Error:       &errMsg,
+		Timestamp:   now,
+		ProcessedAt: now,
+	}
+
+	if err := deps.CallbackService.ExecuteCallback(ctx, callbackURL, payload, userNumber); err != nil {
+		callbackLogger.WithError(err).Error("Failed to execute failure callback after all retries")
+		errorKey := "callback:error:" + messageID
+		_ = deps.RedisService.Set(ctx, errorKey, fmt.Sprintf("Failed to execute failure callback: %v", err), deps.Config.Redis.TaskStatusTTL)
+	} else {
+		callbackLogger.Info("Failure callback executed successfully")
 		_ = deps.RedisService.DeleteCallbackURL(ctx, messageID)
 	}
 }
