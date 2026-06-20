@@ -38,26 +38,21 @@ func (r *RateLimiterService) Allow(ctx context.Context, key string) (bool, error
 		return true, nil
 	}
 
-	// Get current count
-	count, err := r.getCurrentCount(ctx, key)
+	// #13: INCR atômico em vez de get→check→set. O padrão anterior tinha TOCTOU —
+	// entre o GET e o INCR, requests concorrentes liam a MESMA contagem e passavam
+	// todas, estourando o limite. Agora a contagem é incrementada e lida numa única
+	// operação atômica; `newCount` JÁ inclui esta request.
+	newCount, err := r.incrementCount(ctx, key)
 	if err != nil {
-		r.logger.WithError(err).WithField("key", key).Error("Failed to get current rate limit count")
+		r.logger.WithError(err).WithField("key", key).Error("Failed to increment rate limit count")
 		return false, err
 	}
 
-	allowed := count < r.config.GoogleCloud.MaxRequestsPerMinute
-
-	if allowed {
-		// Increment the count
-		if err := r.incrementCount(ctx, key); err != nil {
-			r.logger.WithError(err).WithField("key", key).Error("Failed to increment rate limit count")
-			return false, err
-		}
-	}
+	allowed := newCount <= r.config.GoogleCloud.MaxRequestsPerMinute
 
 	r.logger.WithFields(logrus.Fields{
 		"key":     key,
-		"count":   count,
+		"count":   newCount,
 		"limit":   r.config.GoogleCloud.MaxRequestsPerMinute,
 		"allowed": allowed,
 	}).Debug("Rate limit check")
@@ -115,27 +110,6 @@ func (r *RateLimiterService) Wait(ctx context.Context, key string) error {
 	return fmt.Errorf("rate limit exceeded after %d attempts for key: %s", maxRetries, key)
 }
 
-// getCurrentCount gets the current request count for the key in the current minute window
-func (r *RateLimiterService) getCurrentCount(ctx context.Context, key string) (int, error) {
-	// Use current minute as the window
-	now := time.Now()
-	windowKey := fmt.Sprintf("rate_limit:%s:%d", key, now.Unix()/60)
-
-	countStr, err := r.redisService.Get(ctx, windowKey)
-	if err != nil {
-		// If key doesn't exist, count is 0
-		return 0, nil
-	}
-
-	count, err := strconv.Atoi(countStr)
-	if err != nil {
-		r.logger.WithError(err).WithField("window_key", windowKey).Warn("Invalid rate limit count in Redis, resetting to 0")
-		return 0, nil
-	}
-
-	return count, nil
-}
-
 // getCurrentCountForUsage gets the current request count and distinguishes between missing keys and Redis errors
 func (r *RateLimiterService) getCurrentCountForUsage(ctx context.Context, key string) (int, error) {
 	// Use current minute as the window
@@ -161,26 +135,27 @@ func (r *RateLimiterService) getCurrentCountForUsage(ctx context.Context, key st
 	return count, nil
 }
 
-// incrementCount increments the request count for the current minute window
-func (r *RateLimiterService) incrementCount(ctx context.Context, key string) error {
-	// Use current minute as the window
+// incrementCount atomically increments the request count for the current minute
+// window via Redis INCR (#13: substitui o get→set anterior, que não era atômico) e
+// retorna a NOVA contagem, já incluindo esta request. Seta o TTL na primeira request
+// do window (best-effort — a chave é minuto-scoped, o TTL é só cleanup).
+func (r *RateLimiterService) incrementCount(ctx context.Context, key string) (int, error) {
 	now := time.Now()
 	windowKey := fmt.Sprintf("rate_limit:%s:%d", key, now.Unix()/60)
 
-	// Get current count
-	countStr, err := r.redisService.Get(ctx, windowKey)
-	currentCount := 0
-	if err == nil {
-		if count, parseErr := strconv.Atoi(countStr); parseErr == nil {
-			currentCount = count
+	newCount, err := r.redisService.Incr(ctx, windowKey)
+	if err != nil {
+		return 0, err
+	}
+
+	if newCount == 1 {
+		// Primeira request do window → seta TTL de 2 min (cobre o minuto + a borda).
+		if expErr := r.redisService.Expire(ctx, windowKey, 2*time.Minute); expErr != nil {
+			r.logger.WithError(expErr).WithField("window_key", windowKey).Warn("Failed to set rate limit window TTL")
 		}
 	}
 
-	// Increment count
-	newCount := currentCount + 1
-
-	// Set with 2-minute TTL (to handle edge cases around minute boundaries)
-	return r.redisService.SetValue(ctx, windowKey, strconv.Itoa(newCount), 2*time.Minute)
+	return int(newCount), nil
 }
 
 // GetCurrentUsage returns the current usage for a key
