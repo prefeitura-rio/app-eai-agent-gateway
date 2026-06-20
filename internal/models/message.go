@@ -18,6 +18,7 @@ var KnownMessageTypesList = []string{
 	"video",
 	"location",
 	"interactive",
+	"reaction",
 	"unsupported",
 	"unknown",
 }
@@ -41,9 +42,13 @@ func IsKnownMessageType(messageType string) bool {
 }
 
 // AllowsEmptyMedia reports whether message_type can carry only its sentinel
-// classification without a media metadata object.
+// classification (or extra_metadata) without a media metadata object and without
+// a non-empty message. "reaction" carries the emoji in extra_metadata, not media,
+// and has no message body — so it must be allowed here, otherwise the Mule
+// meta-webhook forward (message_type="reaction", message="", media=null) is
+// rejected with 400 and the bot goes mute on emoji reactions (#10).
 func AllowsEmptyMedia(messageType string) bool {
-	return messageType == "unsupported" || messageType == "unknown"
+	return messageType == "unsupported" || messageType == "unknown" || messageType == "reaction"
 }
 
 // HistoryMessage represents a single message in the history update
