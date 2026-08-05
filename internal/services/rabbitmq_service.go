@@ -497,9 +497,17 @@ func (r *RabbitMQService) reconnect() {
 }
 
 // HealthCheck implements the HealthChecker interface
+//
+// This uses an exclusive Lock (not RLock) because it performs channel-mutating
+// operations (QueueDeclare/QueueDelete) on the same shared *amqp.Channel used
+// by PublishMessage*/ConsumeQueue. The amqp091-go client does not support
+// concurrent use of a single channel by multiple goroutines: if this ran
+// under RLock (as it did previously), a health check could interleave AMQP
+// frames with a concurrent publish and get a fast, spurious failure - this is
+// the confirmed root cause of intermittent /ready 503s (INFRAVPIA-233).
 func (r *RabbitMQService) HealthCheck(ctx context.Context) error {
-	r.mutex.RLock()
-	defer r.mutex.RUnlock()
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
 
 	if !r.isConnected || r.connection == nil || r.connection.IsClosed() {
 		return fmt.Errorf("RabbitMQ connection is not available")
