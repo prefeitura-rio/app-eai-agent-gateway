@@ -324,6 +324,36 @@ func (r *RedisService) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+// Incr atomically increments the integer value of key by 1 and returns the new
+// value (cria a chave com 1 se não existir). Operação ATÔMICA no Redis — usada
+// pelo rate limiter pra evitar o TOCTOU do get+set (#13).
+func (r *RedisService) Incr(ctx context.Context, key string) (int64, error) {
+	r.recordOperation()
+
+	n, err := r.client.Incr(ctx, key).Result()
+	if err != nil {
+		r.recordError()
+		r.logger.WithError(err).WithField("key", key).Error("Failed to INCR key in Redis")
+		return 0, fmt.Errorf("redis incr error: %w", err)
+	}
+
+	return n, nil
+}
+
+// Expire sets a TTL on key. Best-effort: o rate limiter usa chave minuto-scoped,
+// então a expiração é só cleanup — a CORREÇÃO da contagem vem do INCR atômico (#13).
+func (r *RedisService) Expire(ctx context.Context, key string, ttl time.Duration) error {
+	r.recordOperation()
+
+	if err := r.client.Expire(ctx, key, ttl).Err(); err != nil {
+		r.recordError()
+		r.logger.WithError(err).WithField("key", key).Error("Failed to set TTL on key in Redis")
+		return fmt.Errorf("redis expire error: %w", err)
+	}
+
+	return nil
+}
+
 // Exists checks if a key exists
 func (r *RedisService) Exists(ctx context.Context, key string) (bool, error) {
 	result := r.client.Exists(ctx, key)
