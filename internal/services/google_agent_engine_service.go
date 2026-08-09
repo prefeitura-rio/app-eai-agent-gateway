@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -127,6 +128,13 @@ type RedisServiceInterface interface {
 // createTokenSourceFromCredentials creates a token source directly from credentials JSON
 // This avoids writing to temp files which may fail in read-only Kubernetes environments
 func createTokenSourceFromCredentials(ctx context.Context, credentialsJSON []byte) (oauth2.TokenSource, error) {
+	// Bounda o HTTP dos refreshes de token (#R4): o oauth2.TokenSource é
+	// context-free no Token(), e sem timeout um token endpoint travado seguraria o
+	// refresh (e o worker) INDEFINIDAMENTE — além dos 120s do request. O oauth2 lê
+	// oauth2.HTTPClient do ctx pros refreshes, então injetamos um client com
+	// timeout aqui; o TokenSource resultante o reusa em toda renovação.
+	ctx = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Timeout: 30 * time.Second})
+
 	// Create credentials directly from JSON without temp files
 	creds, err := google.CredentialsFromJSON(ctx, credentialsJSON, "https://www.googleapis.com/auth/cloud-platform")
 	if err != nil {
@@ -384,6 +392,10 @@ func (s *GoogleAgentEngineService) getAccessToken(ctx context.Context) (string, 
 		}
 	}
 
+	// O refresh do token é bounded na construção do TokenSource (#R4:
+	// createTokenSourceFromCredentials injeta um http.Client com timeout via
+	// oauth2.HTTPClient), então Token() não fica preso indefinidamente e o worker
+	// não estoura o orçamento do request num token endpoint travado.
 	tok, err := ts.Token()
 	if err != nil {
 		return "", fmt.Errorf("failed to get token: %w", err)
@@ -431,7 +443,7 @@ func (s *GoogleAgentEngineService) postQuery(ctx context.Context, accessToken st
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("non-2xx response: %d - %s", resp.StatusCode, string(bodyBytes))
+		return nil, &engineHTTPError{status: resp.StatusCode, body: string(bodyBytes)}
 	}
 
 	var out map[string]interface{}
@@ -440,6 +452,94 @@ func (s *GoogleAgentEngineService) postQuery(ctx context.Context, accessToken st
 	}
 
 	return out, nil
+}
+
+// engineHTTPError carrega o STATUS HTTP real do kick-off do async_query. Necessário
+// pra o retry (#R1) decidir por status, não por texto: classifyEngineError marca
+// um 5xx com "quota"/"RESOURCE_EXHAUSTED" no body como "ratelimited", mas um 5xx é
+// AMBÍGUO (a operação pode já ter sido criada). Só um 429 GENUÍNO é pré-execução
+// seguro. O Error() mantém o mesmo formato de antes, então classifyEngineError
+// (usado pra escolher a mensagem graciosa) segue funcionando no texto.
+type engineHTTPError struct {
+	status int
+	body   string
+}
+
+func (e *engineHTTPError) Error() string {
+	return fmt.Sprintf("non-2xx response: %d - %s", e.status, e.body)
+}
+
+// postQueryWithRetry envolve postQuery com retry/backoff (#R1) no ÚNICO caso
+// seguramente PRÉ-execução do kick-off do async_query: um HTTP 429 GENUÍNO (a
+// Vertex rejeitou por quota ANTES de criar a operação). Usa MaxRetries/RetryBackoff
+// da config, que existiam porém estavam MORTOS (um único Do → um 429 virava
+// "aguarde" na hora, apesar do gateway logo re-despachar o turno inteiro).
+//
+// A decisão é pelo STATUS (engineHTTPError.status == 429), não pelo texto do erro:
+// classifyEngineError marcaria um 5xx com "quota"/"RESOURCE_EXHAUSTED" no body como
+// "ratelimited", mas um 5xx é AMBÍGUO — a requisição pode ter chegado e criado a
+// operação, que segue rodando enquanto o retry cria OUTRA. Como o async_query não
+// tem idempotency key e só a última operação é pollada, o thread + as tools
+// rodariam 2×. Então 5xx, timeout e erro de conexão NÃO são retentados (ficam pro
+// fallback gracioso / re-despacho externo). Cada retry passa pelo rate limiter.
+func (s *GoogleAgentEngineService) postQueryWithRetry(ctx context.Context, accessToken string, payload map[string]interface{}, reasoningEngineID string) (map[string]interface{}, error) {
+	maxRetries := s.config.GoogleAgentEngine.MaxRetries
+	if maxRetries < 0 {
+		maxRetries = 0
+	}
+	backoff := s.config.GoogleAgentEngine.RetryBackoff
+	if backoff <= 0 {
+		backoff = time.Second
+	}
+
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		// Cada RETRY passa pelo rate limiter da API Google (o Wait de SendMessage
+		// cobre a tentativa 0). Senão uma rajada de retries fura o pacing e agrava
+		// a própria quota que causou o 429.
+		if attempt > 0 {
+			if err := s.rateLimiter.Wait(ctx, "google_agent_engine"); err != nil {
+				return nil, fmt.Errorf("rate limit wait before retry: %w", err)
+			}
+		}
+
+		resp, err := s.postQuery(ctx, accessToken, payload, reasoningEngineID)
+		if err == nil {
+			if attempt > 0 {
+				s.logger.WithField("attempt", attempt+1).Info("async_query kick-off recuperou após retry")
+			}
+			return resp, nil
+		}
+		lastErr = err
+
+		// Retenta SÓ num 429 GENUÍNO (status HTTP, não texto): rejeição por quota
+		// PRÉ-criação da operação. 5xx (mesmo com "quota" no body), timeout e erro
+		// de conexão são ambíguos → não retenta (risco de run duplo).
+		var httpErr *engineHTTPError
+		is429 := errors.As(err, &httpErr) && httpErr.status == http.StatusTooManyRequests
+		if !is429 || attempt >= maxRetries {
+			return nil, err
+		}
+
+		// Backoff exponencial (backoff * 2^attempt), capado em 10s.
+		wait := backoff * time.Duration(1<<uint(attempt))
+		if maxWait := 10 * time.Second; wait > maxWait {
+			wait = maxWait
+		}
+		s.logger.WithFields(logrus.Fields{
+			"attempt":     attempt + 1,
+			"max_retries": maxRetries,
+			"http_status": httpErr.status,
+			"backoff":     wait.String(),
+		}).Warn("429 no kick-off do async_query — retentando")
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
+	return nil, lastErr
 }
 
 // pollOperation polls a long-running operation until completion
@@ -489,7 +589,13 @@ func (s *GoogleAgentEngineService) pollOperation(ctx context.Context, accessToke
 			return op, nil
 		}
 
-		time.Sleep(interval)
+		// Espera ciente do ctx (#R4): ao esgotar o deadline único, sai na hora em
+		// vez de dormir o intervalo inteiro antes de o próximo GET falhar.
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(interval):
+		}
 	}
 }
 
@@ -509,6 +615,18 @@ func (s *GoogleAgentEngineService) extractOperationName(resp map[string]interfac
 // queryReasoningEngine makes a request to the reasoning engine with proper async handling
 // messageType is optional - if nil, no type parameter is sent; if "history", updates history without response
 func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, threadID, message string, reasoningEngineID *string, messageType *string) (string, error) {
+	// #R4/#R1: um ÚNICO deadline end-to-end (RequestTimeout) — derivado ANTES do
+	// token pra cobrir OAuth + kick-off + seus retries + poll. Sem isso, o
+	// httpClient.Timeout (por Do) e o deadline próprio do poll eram INDEPENDENTES
+	// → 4 tentativas × 120s + 120s de poll somavam minutos apesar do "120s", e o
+	// getAccessToken ficava fora do orçamento. O poll recebe só o budget RESTANTE.
+	requestDeadline := time.Now().Add(s.config.GoogleAgentEngine.RequestTimeout)
+	if s.config.GoogleAgentEngine.RequestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithDeadline(ctx, requestDeadline)
+		defer cancel()
+	}
+
 	accessToken, err := s.getAccessToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get access token: %w", err)
@@ -561,7 +679,7 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 		"reasoning_engine_id":  engineID,
 	}).Debug("Making async_query call to reasoning engine")
 
-	resp, err := s.postQuery(ctx, accessToken, payload, engineID)
+	resp, err := s.postQueryWithRetry(ctx, accessToken, payload, engineID)
 	if err != nil {
 		return "", fmt.Errorf("failed to post query: %w", err)
 	}
@@ -580,8 +698,14 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 
 	s.logger.WithField("operation_name", opName).Debug("Polling operation until completion")
 
-	// Poll with reasonable intervals using configured timeout
-	op, err := s.pollOperation(ctx, accessToken, opName, 2*time.Second, s.config.GoogleAgentEngine.RequestTimeout)
+	// Poll com o budget RESTANTE do deadline único (#R4) — o kick-off + retros já
+	// consumiram parte dele. Sem RequestTimeout configurado (<=0), mantém o valor
+	// bruto pra não zerar o budget.
+	pollBudget := s.config.GoogleAgentEngine.RequestTimeout
+	if s.config.GoogleAgentEngine.RequestTimeout > 0 {
+		pollBudget = time.Until(requestDeadline)
+	}
+	op, err := s.pollOperation(ctx, accessToken, opName, 2*time.Second, pollBudget)
 	if err != nil {
 		return "", fmt.Errorf("failed to poll operation: %w", err)
 	}
@@ -925,6 +1049,14 @@ func (s *GoogleAgentEngineService) gracefulMessageForClass(class string) string 
 func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, threadID string, messages []models.HistoryMessage, reasoningEngineID *string) (map[string]interface{}, error) {
 	start := time.Now()
 
+	// #R4/#R1: mesmo deadline único end-to-end do fluxo de resposta — o history
+	// update também é um async_query e sem isso ficava exposto ao timeout de 30 min.
+	if s.config.GoogleAgentEngine.RequestTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.config.GoogleAgentEngine.RequestTimeout)
+		defer cancel()
+	}
+
 	s.logger.WithFields(logrus.Fields{
 		"thread_id":        threadID,
 		"messages_count":   len(messages),
@@ -998,7 +1130,7 @@ func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, thread
 		"reasoning_engine_id": engineID,
 	}).Debug("Making async_query call with type=history to reasoning engine")
 
-	resp, err := s.postQuery(ctx, accessToken, payload, engineID)
+	resp, err := s.postQueryWithRetry(ctx, accessToken, payload, engineID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to post query: %w", err)
 	}
