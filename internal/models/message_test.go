@@ -17,6 +17,7 @@ func TestIsKnownMessageType(t *testing.T) {
 		{name: "interactive", messageType: "interactive", want: true},
 		{name: "unsupported sentinel", messageType: "unsupported", want: true},
 		{name: "unknown sentinel", messageType: "unknown", want: true},
+		{name: "reaction", messageType: "reaction", want: true},
 		{name: "typo", messageType: "imgae", want: false},
 		{name: "outbound-only registry type", messageType: "document", want: false},
 	}
@@ -37,6 +38,7 @@ func TestAllowsEmptyMedia(t *testing.T) {
 	}{
 		{messageType: "unsupported", want: true},
 		{messageType: "unknown", want: true},
+		{messageType: "reaction", want: true},
 		{messageType: "interactive", want: false},
 		{messageType: "image", want: false},
 		{messageType: "", want: false},
