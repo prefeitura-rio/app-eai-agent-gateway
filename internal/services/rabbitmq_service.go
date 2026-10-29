@@ -77,7 +77,7 @@ func NewRabbitMQService(cfg *config.Config, logger *logrus.Logger) (*RabbitMQSer
 	// Setup auto-reconnection
 	go service.handleReconnect()
 
-	logger.WithField("url", cfg.RabbitMQ.URL).Info("RabbitMQ service initialized successfully")
+	logger.WithField("url", redactCredentialURL(cfg.RabbitMQ.URL)).Info("RabbitMQ service initialized successfully")
 	return service, nil
 }
 

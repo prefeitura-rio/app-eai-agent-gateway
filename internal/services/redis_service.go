@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"sync"
 	"time"
 
@@ -185,7 +186,7 @@ func NewRedisService(cfg *config.Config, logger *logrus.Logger) (*RedisService, 
 	}
 
 	logger.WithFields(logrus.Fields{
-		"dsn":       cfg.Redis.DSN,
+		"dsn":       redactCredentialURL(cfg.Redis.DSN),
 		"pool_size": cfg.Redis.PoolSize,
 		"min_idle":  cfg.Redis.MinIdleConnections,
 		"max_idle":  cfg.Redis.MaxIdleConnections,
@@ -199,6 +200,15 @@ func NewRedisService(cfg *config.Config, logger *logrus.Logger) (*RedisService, 
 			LastResetTime: time.Now(),
 		},
 	}, nil
+}
+
+// redactCredentialURL troca a senha de uma URL de conexão (Redis, RabbitMQ) por "xxxxx" antes de ela ir para o log.
+func redactCredentialURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "[url inválida]"
+	}
+	return u.Redacted()
 }
 
 // NewRedisServiceWithURL creates a Redis service with a custom URL
@@ -230,7 +240,7 @@ func NewRedisServiceWithURL(redisURL string, logger *logrus.Logger) (*RedisServi
 		return nil, fmt.Errorf("failed to connect to Gov.br Redis: %w", err)
 	}
 
-	logger.WithField("url", redisURL).Info("Gov.br Redis service initialized successfully")
+	logger.WithField("url", redactCredentialURL(redisURL)).Info("Gov.br Redis service initialized successfully")
 
 	govbrRedisConfig := &config.Config{
 		Redis: config.RedisConfig{
