@@ -17,8 +17,9 @@ func TestIsKnownMessageType(t *testing.T) {
 		{name: "interactive", messageType: "interactive", want: true},
 		{name: "unsupported sentinel", messageType: "unsupported", want: true},
 		{name: "unknown sentinel", messageType: "unknown", want: true},
+		{name: "document", messageType: "document", want: true},
 		{name: "typo", messageType: "imgae", want: false},
-		{name: "outbound-only registry type", messageType: "document", want: false},
+		{name: "outbound-only registry type", messageType: "sticker", want: false},
 	}
 
 	for _, tt := range tests {
