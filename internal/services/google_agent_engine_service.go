@@ -122,6 +122,9 @@ type RedisServiceInterface interface {
 	Set(ctx context.Context, key string, value string, ttl time.Duration) error
 	SetValue(ctx context.Context, key string, value interface{}, ttl time.Duration) error
 	Delete(ctx context.Context, key string) error
+	// Incr/Expire: INCR atômico + TTL pro rate limiter (evita TOCTOU get+set, #13).
+	Incr(ctx context.Context, key string) (int64, error)
+	Expire(ctx context.Context, key string, ttl time.Duration) error
 }
 
 // createTokenSourceFromCredentials creates a token source directly from credentials JSON

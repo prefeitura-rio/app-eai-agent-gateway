@@ -47,7 +47,7 @@ func (r *RabbitMQService) ConsumeMessages(ctx context.Context, queueName string,
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if !r.isConnected {
+	if !r.isConnected.Load() {
 		return fmt.Errorf("RabbitMQ connection is not available")
 	}
 
@@ -88,7 +88,7 @@ func (r *RabbitMQService) StartConsumer(ctx context.Context, queueName string, c
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if !r.isConnected {
+	if !r.isConnected.Load() {
 		return fmt.Errorf("RabbitMQ connection is not available")
 	}
 
@@ -315,6 +315,16 @@ func (c *Consumer) publishRetryMessage(originalMsg amqp.Delivery, retryCount int
 				headers[k] = v
 			}
 		}
+	}
+
+	// #13: publish sob RLock do RabbitMQService. Sem isso c.rabbitMQ.channel era lido
+	// SEM sincronização enquanto o reconnect o substitui sob Lock (data race, pego por
+	// `go test -race`). Mesmo padrão das PublishMessage. isConnected agora é atomic.Bool.
+	c.rabbitMQ.mutex.RLock()
+	defer c.rabbitMQ.mutex.RUnlock()
+	if !c.rabbitMQ.isConnected.Load() || c.rabbitMQ.channel == nil {
+		logger.Error("Cannot publish retry message: RabbitMQ not connected")
+		return
 	}
 
 	// Publish retry message

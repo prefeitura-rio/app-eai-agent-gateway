@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -20,13 +21,13 @@ type RabbitMQService struct {
 	connection  *amqp.Connection
 	channel     *amqp.Channel
 	mutex       sync.RWMutex
-	isConnected bool
+	isConnected atomic.Bool
 
 	// Connection monitoring
 	notifyConnClose chan *amqp.Error
 	notifyChanClose chan *amqp.Error
 	notifyReconnect chan bool
-	isShutdown      bool
+	isShutdown      atomic.Bool
 
 	// Reconnect broadcast: closed and replaced on every successful reconnect.
 	// Consumer goroutines wait on the channel returned by ReconnectedCh() to
@@ -108,7 +109,7 @@ func (r *RabbitMQService) connect() error {
 
 	r.connection = conn
 	r.channel = ch
-	r.isConnected = true
+	r.isConnected.Store(true)
 
 	// Setup connection monitoring
 	r.notifyConnClose = make(chan *amqp.Error)
@@ -238,7 +239,7 @@ func (r *RabbitMQService) PublishMessage(ctx context.Context, queueName string, 
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if !r.isConnected {
+	if !r.isConnected.Load() {
 		return fmt.Errorf("RabbitMQ connection is not available")
 	}
 
@@ -285,7 +286,7 @@ func (r *RabbitMQService) PublishMessageWithHeaders(ctx context.Context, queueNa
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if !r.isConnected {
+	if !r.isConnected.Load() {
 		return fmt.Errorf("RabbitMQ connection is not available")
 	}
 
@@ -341,7 +342,7 @@ func (r *RabbitMQService) PublishMessageWithDelay(ctx context.Context, queueName
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if !r.isConnected {
+	if !r.isConnected.Load() {
 		return fmt.Errorf("RabbitMQ connection is not available")
 	}
 
@@ -385,7 +386,7 @@ func (r *RabbitMQService) PublishPriorityMessage(ctx context.Context, queueName 
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if !r.isConnected {
+	if !r.isConnected.Load() {
 		return fmt.Errorf("RabbitMQ connection is not available")
 	}
 
@@ -424,23 +425,23 @@ func (r *RabbitMQService) handleReconnect() {
 	for {
 		select {
 		case err := <-r.notifyConnClose:
-			if r.isShutdown {
+			if r.isShutdown.Load() {
 				return
 			}
 			r.logger.WithError(err).Error("RabbitMQ connection lost, attempting to reconnect")
-			r.isConnected = false
+			r.isConnected.Store(false)
 			r.reconnect()
 
 		case err := <-r.notifyChanClose:
-			if r.isShutdown {
+			if r.isShutdown.Load() {
 				return
 			}
 			r.logger.WithError(err).Error("RabbitMQ channel lost, attempting to reconnect")
-			r.isConnected = false
+			r.isConnected.Store(false)
 			r.reconnect()
 
 		case <-r.notifyReconnect:
-			if r.isShutdown {
+			if r.isShutdown.Load() {
 				return
 			}
 			r.logger.Info("Manual reconnection requested")
@@ -459,7 +460,7 @@ func (r *RabbitMQService) reconnect() {
 	infiniteRetries := maxRetries < 0
 
 	for infiniteRetries || retryCount < maxRetries {
-		if r.isShutdown {
+		if r.isShutdown.Load() {
 			return
 		}
 
@@ -509,7 +510,7 @@ func (r *RabbitMQService) HealthCheck(ctx context.Context) error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	if !r.isConnected || r.connection == nil || r.connection.IsClosed() {
+	if !r.isConnected.Load() || r.connection == nil || r.connection.IsClosed() {
 		return fmt.Errorf("RabbitMQ connection is not available")
 	}
 
@@ -542,7 +543,7 @@ func (r *RabbitMQService) GetQueueInfo(queueName string) (amqp.Queue, error) {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if !r.isConnected {
+	if !r.isConnected.Load() {
 		return amqp.Queue{}, fmt.Errorf("RabbitMQ connection is not available")
 	}
 
@@ -554,8 +555,8 @@ func (r *RabbitMQService) Close() error {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 
-	r.isShutdown = true
-	r.isConnected = false
+	r.isShutdown.Store(true)
+	r.isConnected.Store(false)
 
 	if r.channel != nil {
 		if err := r.channel.Close(); err != nil {
@@ -578,7 +579,7 @@ func (r *RabbitMQService) Close() error {
 func (r *RabbitMQService) IsConnected() bool {
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
-	return r.isConnected
+	return r.isConnected.Load()
 }
 
 // TriggerReconnect manually triggers a reconnection attempt
@@ -616,7 +617,7 @@ func (r *RabbitMQService) ConsumeQueue(queueName, consumerTag string) (<-chan am
 	r.mutex.RLock()
 	defer r.mutex.RUnlock()
 
-	if !r.isConnected {
+	if !r.isConnected.Load() {
 		return nil, fmt.Errorf("RabbitMQ not connected")
 	}
 
