@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/callbackguard"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
 )
@@ -34,61 +35,79 @@ type CallbackService struct {
 
 // NewCallbackService creates a new callback service
 func NewCallbackService(logger *logrus.Logger, cfg *config.Config, tracer trace.Tracer, dataRelayService *DataRelayService) *CallbackService {
-	return &CallbackService{
-		logger: logger,
-		config: cfg,
-		httpClient: &http.Client{
-			Timeout: time.Duration(cfg.Callback.Timeout) * time.Second,
-			Transport: &http.Transport{
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     90 * time.Second,
-			},
-		},
+	s := &CallbackService{
+		logger:           logger,
+		config:           cfg,
 		tracer:           tracer,
 		dataRelayService: dataRelayService,
 	}
+	s.httpClient = newCallbackHTTPClient(time.Duration(cfg.Callback.Timeout)*time.Second, s.checkRedirect)
+	return s
 }
 
-// ValidateCallbackURL validates that a callback URL meets security requirements
-func (s *CallbackService) ValidateCallbackURL(callbackURL string) error {
-	// Check URL length
-	if len(callbackURL) > 2048 {
-		return fmt.Errorf("callback URL exceeds maximum length of 2048 characters")
+// newCallbackHTTPClient monta o cliente HTTP dos callbacks com a proteção
+// anti-SSRF no dial: cada conexão confere o IP já resolvido
+// (callbackguard.DialControl) e recusa loopback, redes privadas, link-local
+// (metadata server) e faixas reservadas, o que fecha o DNS rebinding.
+//
+// Transport.Proxy fica nil de propósito: com proxy, o dial iria ao proxy e o
+// guarda conferiria o IP dele, não o do destino.
+func newCallbackHTTPClient(timeout time.Duration, checkRedirect func(*http.Request, []*http.Request) error) *http.Client {
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   callbackguard.DialControl,
 	}
-
-	// Parse URL
-	parsedURL, err := url.Parse(callbackURL)
-	if err != nil {
-		// Não embrulhar o erro do url.Parse com %w: o .Error() dele ecoa a URL
-		// crua (que carrega o telefone do cidadão — LGPD). Motivo sanitizado.
-		return fmt.Errorf("invalid callback URL format")
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			DialContext:         dialer.DialContext,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 10,
+			IdleConnTimeout:     90 * time.Second,
+		},
+		CheckRedirect: checkRedirect,
 	}
+}
 
-	// Require HTTPS if configured
-	if s.config.Callback.RequireHTTPS && parsedURL.Scheme != "https" {
-		return fmt.Errorf("callback URL must use HTTPS protocol")
+// maxCallbackRedirects é o mesmo limite padrão do net/http.
+const maxCallbackRedirects = 10
+
+// errRedirectRejected marca o redirect recusado: o destino não muda entre
+// tentativas, então o envio não é retentado.
+var errRedirectRejected = errors.New("callback redirect rejected")
+
+// checkRedirect revalida o destino de cada redirect (esquema, localhost, IP
+// literal e CALLBACK_ALLOWED_DOMAIN). O IP resolvido do novo destino é
+// conferido de novo no dial.
+func (s *CallbackService) checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxCallbackRedirects {
+		return fmt.Errorf("%w: stopped after %d redirects", errRedirectRejected, maxCallbackRedirects)
 	}
-
-	// Validate scheme
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return fmt.Errorf("callback URL must use HTTP or HTTPS protocol")
+	if _, err := callbackguard.ValidateURL(req.URL.String(), s.deliveryOptions()); err != nil {
+		return fmt.Errorf("%w: %v", errRedirectRejected, err)
 	}
-
-	// Check for localhost and private IP addresses
-	host := parsedURL.Hostname()
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return fmt.Errorf("callback URL cannot use localhost")
-	}
-
-	// Check if host is an IP address and if it's private
-	if ip := net.ParseIP(host); ip != nil {
-		if isPrivateIP(ip) {
-			return fmt.Errorf("callback URL cannot use private IP addresses")
-		}
-	}
-
 	return nil
+}
+
+// deliveryOptions são as regras aplicadas no envio e nos redirects. Seguem as
+// do webhook de entrada (handlers.validateCallbackURL), que não exige HTTPS:
+// exigir aqui recusaria callbacks que o webhook já aceitou.
+func (s *CallbackService) deliveryOptions() callbackguard.Options {
+	return callbackguard.Options{
+		AllowedDomains: callbackguard.ParseAllowedDomains(s.config.Callback.AllowedDomain),
+	}
+}
+
+// ValidateCallbackURL validates that a callback URL meets security requirements:
+// format, scheme (HTTPS when CALLBACK_REQUIRE_HTTPS), no localhost or
+// non-public IP literal and CALLBACK_ALLOWED_DOMAIN. The resolved address is
+// enforced when connecting (see newCallbackHTTPClient).
+func (s *CallbackService) ValidateCallbackURL(callbackURL string) error {
+	opts := s.deliveryOptions()
+	opts.RequireHTTPS = s.config.Callback.RequireHTTPS
+	_, err := callbackguard.ValidateURL(callbackURL, opts)
+	return err
 }
 
 // ExecuteCallback sends a POST request to the callback URL with retry logic
@@ -112,6 +131,19 @@ func (s *CallbackService) ExecuteCallback(ctx context.Context, callbackURL strin
 			),
 		)
 		defer span.End()
+	}
+
+	// Revalida o destino na entrega (allow-list e IP literal): a URL pode ter
+	// vindo de uma mensagem enfileirada antes de CALLBACK_ALLOWED_DOMAIN mudar.
+	if _, err := callbackguard.ValidateURL(callbackURL, s.deliveryOptions()); err != nil {
+		logger.WithError(err).Warn("Callback URL rejected before delivery")
+		if span != nil {
+			span.SetAttributes(
+				attribute.Bool("callback.success", false),
+				attribute.String("callback.error", err.Error()),
+			)
+		}
+		return fmt.Errorf("callback URL rejected: %w", err)
 	}
 
 	// Serialize payload
@@ -262,6 +294,11 @@ func (e *HTTPError) Error() string {
 
 // isRetriableError determines if an error should trigger a retry
 func isRetriableError(err error) bool {
+	// Destino não público ou redirect recusado não mudam entre tentativas.
+	if errors.Is(err, callbackguard.ErrBlockedAddress) || errors.Is(err, errRedirectRejected) {
+		return false
+	}
+
 	if httpErr, ok := err.(*HTTPError); ok {
 		// Retry on 5xx errors and 429 (Too Many Requests)
 		if httpErr.StatusCode >= 500 || httpErr.StatusCode == 429 {
@@ -273,26 +310,6 @@ func isRetriableError(err error) bool {
 
 	// Retry on network errors, timeouts, etc.
 	return true
-}
-
-// isPrivateIP checks if an IP address is in a private range
-func isPrivateIP(ip net.IP) bool {
-	privateRanges := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"169.254.0.0/16", // Link-local
-		"fc00::/7",       // IPv6 private
-	}
-
-	for _, cidr := range privateRanges {
-		_, network, _ := net.ParseCIDR(cidr)
-		if network.Contains(ip) {
-			return true
-		}
-	}
-
-	return false
 }
 
 // generateHMACSignature generates an HMAC-SHA256 signature for the payload
