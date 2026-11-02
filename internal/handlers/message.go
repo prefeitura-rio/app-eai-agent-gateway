@@ -3,10 +3,8 @@ package handlers
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +12,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/callbackguard"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/middleware"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
@@ -140,7 +139,7 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 
 	// Validate callback URL if provided
 	if req.CallbackURL != nil && *req.CallbackURL != "" {
-		if err := validateCallbackURL(*req.CallbackURL); err != nil {
+		if err := h.checkCallbackURL(c.Request.Context(), *req.CallbackURL); err != nil {
 			// Não logar o callback_url cru: ele carrega o telefone do cidadão
 			// (LGPD). O erro de validação já descreve o motivo (scheme/host
 			// inválido) sem ecoar a URL.
@@ -631,59 +630,35 @@ func isAudioURL(url string) bool {
 	return false
 }
 
-// validateCallbackURL validates callback URL format and security requirements
-func validateCallbackURL(callbackURL string) error {
-	// Check URL length
-	if len(callbackURL) > 2048 {
-		return fmt.Errorf("callback URL exceeds maximum length of 2048 characters")
-	}
+// callbackResolveTimeout limita a resolução DNS da callback_url no webhook.
+const callbackResolveTimeout = 2 * time.Second
 
-	// Parse URL
-	parsedURL, err := url.Parse(callbackURL)
-	if err != nil {
-		// Não embrulhar o erro do url.Parse com %w: o .Error() dele ecoa a
-		// URL crua (que carrega o telefone do cidadão — LGPD), e esse erro
-		// vai tanto pro log quanto pro corpo da resposta. Motivo sanitizado.
-		return fmt.Errorf("invalid callback URL format")
-	}
+// callbackResolver resolve o host da callback_url; variável para os testes.
+var callbackResolver callbackguard.Resolver = net.DefaultResolver
 
-	// Validate scheme - only allow http/https
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return fmt.Errorf("callback URL must use HTTP or HTTPS protocol")
-	}
-
-	// Check for localhost and private IP addresses
-	host := parsedURL.Hostname()
-	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
-		return fmt.Errorf("callback URL cannot use localhost")
-	}
-
-	// Check if host is an IP address and if it's private
-	if ip := net.ParseIP(host); ip != nil {
-		if isPrivateIP(ip) {
-			return fmt.Errorf("callback URL cannot use private IP addresses")
-		}
-	}
-
-	return nil
+// validateCallbackURL validates callback URL format and security requirements:
+// scheme, no localhost or non-public IP literal and CALLBACK_ALLOWED_DOMAIN
+// (allowedDomains, already parsed). It never echoes the URL in the error.
+func validateCallbackURL(callbackURL string, allowedDomains []string) error {
+	_, err := callbackguard.ValidateURL(callbackURL, callbackguard.Options{AllowedDomains: allowedDomains})
+	return err
 }
 
-// isPrivateIP checks if an IP address is in a private range
-func isPrivateIP(ip net.IP) bool {
-	privateRanges := []string{
-		"10.0.0.0/8",
-		"172.16.0.0/12",
-		"192.168.0.0/16",
-		"169.254.0.0/16", // Link-local
-		"fc00::/7",       // IPv6 private
+// checkCallbackURL valida a callback_url recebida no webhook: as regras
+// estáticas de validateCallbackURL e, para hostnames, a resolução DNS, que
+// recusa o host que aponta para endereço não público. A resolução é de melhor
+// esforço (falha de DNS não recusa); o worker confere o IP de novo em cada
+// conexão do callback, o que fecha o DNS rebinding.
+func (h *MessageHandler) checkCallbackURL(ctx context.Context, callbackURL string) error {
+	var allowedDomains []string
+	if h.config != nil {
+		allowedDomains = callbackguard.ParseAllowedDomains(h.config.Callback.AllowedDomain)
 	}
-
-	for _, cidr := range privateRanges {
-		_, network, _ := net.ParseCIDR(cidr)
-		if network.Contains(ip) {
-			return true
-		}
+	parsedURL, err := callbackguard.ValidateURL(callbackURL, callbackguard.Options{AllowedDomains: allowedDomains})
+	if err != nil {
+		return err
 	}
-
-	return false
+	resolveCtx, cancel := context.WithTimeout(ctx, callbackResolveTimeout)
+	defer cancel()
+	return callbackguard.CheckResolvedHost(resolveCtx, callbackResolver, parsedURL.Hostname())
 }

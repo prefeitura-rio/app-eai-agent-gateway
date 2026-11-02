@@ -217,6 +217,9 @@ type CallbackConfig struct {
 	EnableHMAC    bool   `mapstructure:"CALLBACK_ENABLE_HMAC"`
 	HMACSecret    string `mapstructure:"CALLBACK_HMAC_SECRET"`
 	RequireHTTPS  bool   `mapstructure:"CALLBACK_REQUIRE_HTTPS"`
+	// AllowedDomain restringe o host da callback_url: um domínio ou lista
+	// separada por vírgulas; cada um libera o próprio domínio e subdomínios.
+	// Vazio libera qualquer domínio público (ver internal/callbackguard).
 	AllowedDomain string `mapstructure:"CALLBACK_ALLOWED_DOMAIN"`
 	AuthToken     string `mapstructure:"CALLBACK_AUTH_TOKEN"`
 }
