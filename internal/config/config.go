@@ -210,6 +210,10 @@ type SecurityConfig struct {
 	StrictMode          bool   `mapstructure:"SECURITY_STRICT_MODE"`
 }
 
+// CallbackConfig configura o envio de callbacks. CALLBACK_ALLOWED_DOMAIN
+// restringe o host da callback_url: um domínio ou lista separada por vírgulas,
+// cada um liberando o próprio domínio e os subdomínios; vazio libera qualquer
+// domínio público (ver internal/callbackguard).
 type CallbackConfig struct {
 	Enabled       bool   `mapstructure:"CALLBACK_ENABLED"`
 	Timeout       int    `mapstructure:"CALLBACK_TIMEOUT"`
@@ -217,9 +221,6 @@ type CallbackConfig struct {
 	EnableHMAC    bool   `mapstructure:"CALLBACK_ENABLE_HMAC"`
 	HMACSecret    string `mapstructure:"CALLBACK_HMAC_SECRET"`
 	RequireHTTPS  bool   `mapstructure:"CALLBACK_REQUIRE_HTTPS"`
-	// AllowedDomain restringe o host da callback_url: um domínio ou lista
-	// separada por vírgulas; cada um libera o próprio domínio e subdomínios.
-	// Vazio libera qualquer domínio público (ver internal/callbackguard).
 	AllowedDomain string `mapstructure:"CALLBACK_ALLOWED_DOMAIN"`
 	AuthToken     string `mapstructure:"CALLBACK_AUTH_TOKEN"`
 }
