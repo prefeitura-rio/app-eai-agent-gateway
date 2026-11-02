@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -117,14 +118,27 @@ func TestCheckRedirectRevalidatesTarget(t *testing.T) {
 	if err := s.checkRedirect(req("https://api.mule.example/other"), via); err != nil {
 		t.Fatalf("redirect para subdomínio liberado deveria seguir, got %v", err)
 	}
+	// O http.Client embrulha o erro do CheckRedirect num *url.Error; o envio
+	// (sendCallbackRequest) o sanitiza. Redirect recusado não é retentado.
+	asDeliveryError := func(err error) error {
+		return fmt.Errorf("request failed: %w", sanitizeURLError(&url.Error{Op: "Post", URL: "https://mule.example/deliver", Err: err}))
+	}
 	for _, target := range []string{"https://attacker.example/collect", "http://169.254.169.254/", "http://localhost/x"} {
-		if err := s.checkRedirect(req(target), via); err == nil {
+		err := s.checkRedirect(req(target), via)
+		if err == nil {
 			t.Fatalf("redirect para destino proibido deveria ser recusado")
+		}
+		if isRetriableError(asDeliveryError(err)) {
+			t.Fatalf("redirect recusado não deve ser retentado: %v", err)
 		}
 	}
 
 	many := make([]*http.Request, maxCallbackRedirects)
-	if err := s.checkRedirect(req("https://mule.example/x"), many); err == nil {
+	err := s.checkRedirect(req("https://mule.example/x"), many)
+	if err == nil {
 		t.Fatal("esperava parar depois do limite de redirects")
+	}
+	if isRetriableError(asDeliveryError(err)) {
+		t.Fatal("limite de redirects não deve ser retentado")
 	}
 }

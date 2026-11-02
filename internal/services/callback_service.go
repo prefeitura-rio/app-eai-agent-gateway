@@ -73,15 +73,19 @@ func newCallbackHTTPClient(timeout time.Duration, checkRedirect func(*http.Reque
 // maxCallbackRedirects é o mesmo limite padrão do net/http.
 const maxCallbackRedirects = 10
 
+// errRedirectRejected marca o redirect recusado: o destino não muda entre
+// tentativas, então o envio não é retentado.
+var errRedirectRejected = errors.New("callback redirect rejected")
+
 // checkRedirect revalida o destino de cada redirect (esquema, localhost, IP
 // literal e CALLBACK_ALLOWED_DOMAIN). O IP resolvido do novo destino é
 // conferido de novo no dial.
 func (s *CallbackService) checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= maxCallbackRedirects {
-		return fmt.Errorf("stopped after %d redirects", maxCallbackRedirects)
+		return fmt.Errorf("%w: stopped after %d redirects", errRedirectRejected, maxCallbackRedirects)
 	}
 	if _, err := callbackguard.ValidateURL(req.URL.String(), s.deliveryOptions()); err != nil {
-		return fmt.Errorf("callback redirect rejected: %w", err)
+		return fmt.Errorf("%w: %v", errRedirectRejected, err)
 	}
 	return nil
 }
@@ -290,8 +294,8 @@ func (e *HTTPError) Error() string {
 
 // isRetriableError determines if an error should trigger a retry
 func isRetriableError(err error) bool {
-	// Destino não público não muda entre tentativas: não insistir.
-	if errors.Is(err, callbackguard.ErrBlockedAddress) {
+	// Destino não público ou redirect recusado não mudam entre tentativas.
+	if errors.Is(err, callbackguard.ErrBlockedAddress) || errors.Is(err, errRedirectRejected) {
 		return false
 	}
 
