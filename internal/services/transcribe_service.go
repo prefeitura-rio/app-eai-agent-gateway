@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -81,6 +82,9 @@ type TranscribeService struct {
 	rateLimiter RateLimiterInterface
 	// dialControl overrides transcribeDialControl; nil uses the default guard.
 	dialControl func(network, address string, c syscall.RawConn) error
+
+	downloadClientOnce sync.Once
+	downloadClient     *http.Client
 }
 
 // NewTranscribeService creates a new transcription service
@@ -349,7 +353,7 @@ func (s *TranscribeService) downloadFile(ctx context.Context, audioURL string) (
 	}
 
 	// Perform request
-	resp, err := s.newDownloadClient().Do(req)
+	resp, err := s.sharedDownloadClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to download file: %w", err)
 	}
@@ -389,6 +393,15 @@ func (s *TranscribeService) downloadFile(ctx context.Context, audioURL string) (
 
 // maxTranscribeDownloadRedirects limits how many redirects a download follows.
 const maxTranscribeDownloadRedirects = 5
+
+// sharedDownloadClient returns the download client, built once per service so
+// connections are reused instead of leaking one idle transport per download.
+func (s *TranscribeService) sharedDownloadClient() *http.Client {
+	s.downloadClientOnce.Do(func() {
+		s.downloadClient = s.newDownloadClient()
+	})
+	return s.downloadClient
+}
 
 // newDownloadClient builds the HTTP client for audio downloads: every connection
 // is checked against non-public addresses after DNS resolution, environment

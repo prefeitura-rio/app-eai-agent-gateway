@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -87,6 +88,41 @@ func TestDownloadFileAllowedDestination(t *testing.T) {
 	}
 	if string(data) != "audio-bytes" {
 		t.Fatalf("conteúdo baixado inesperado: %q", data)
+	}
+}
+
+// TestDownloadFileReusesConnections: o cliente do download é único por
+// serviço; downloads seguidos reaproveitam a conexão em vez de deixar um
+// transporte ocioso aberto por download.
+func TestDownloadFileReusesConnections(t *testing.T) {
+	var newConns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		_, _ = w.Write([]byte("audio-bytes"))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			newConns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	s := newDownloadTestService(t, srv.URL)
+	s.dialControl = allowAllDial
+	const downloads = 5
+	for i := 0; i < downloads; i++ {
+		path, err := s.downloadFile(context.Background(), srv.URL+"/a.mp3")
+		if err != nil {
+			t.Fatalf("download %d falhou: %v", i, err)
+		}
+		_ = os.Remove(path)
+	}
+	if got := newConns.Load(); got != 1 {
+		t.Fatalf("%d downloads abriram %d conexões; esperava 1 reaproveitada", downloads, got)
+	}
+	if s.sharedDownloadClient() != s.sharedDownloadClient() {
+		t.Fatal("sharedDownloadClient deveria devolver sempre o mesmo cliente")
 	}
 }
 
