@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	speech "cloud.google.com/go/speech/apiv2"
@@ -76,6 +80,11 @@ type TranscribeService struct {
 	logger      *logrus.Logger
 	client      *speech.Client
 	rateLimiter RateLimiterInterface
+	// dialControl overrides transcribeDialControl; nil uses the default guard.
+	dialControl func(network, address string, c syscall.RawConn) error
+
+	downloadClientOnce sync.Once
+	downloadClient     *http.Client
 }
 
 // NewTranscribeService creates a new transcription service
@@ -269,13 +278,31 @@ func (s *TranscribeService) validateURL(audioURL string) error {
 		return fmt.Errorf("invalid URL format: %w", err)
 	}
 
-	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "https" && scheme != "http" {
 		return fmt.Errorf("unsupported URL scheme: %s", parsed.Scheme)
 	}
 
+	if parsed.User != nil {
+		return fmt.Errorf("URL must not contain user info")
+	}
+
+	host := normalizeTranscribeHost(parsed.Hostname())
+	if host == "" {
+		return fmt.Errorf("URL must include a host")
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return fmt.Errorf("URL cannot use localhost")
+	}
+	if addr, err := netip.ParseAddr(host); err == nil && isBlockedTranscribeAddr(addr) {
+		return fmt.Errorf("URL cannot use private or reserved IP addresses")
+	}
+
+	// O allowlist compara o host parseado (igualdade ou subdomínio), nunca
+	// uma substring da URL inteira (DEV-275).
 	allowedDomains := s.config.GetTranscribeAllowedDomains()
-	for _, domain := range allowedDomains {
-		if strings.Contains(audioURL, strings.TrimSpace(domain)) {
+	for _, origin := range parseTranscribeAllowedOrigins(allowedDomains) {
+		if origin.allows(scheme, host, parsed.Port()) {
 			return nil
 		}
 	}
@@ -326,10 +353,7 @@ func (s *TranscribeService) downloadFile(ctx context.Context, audioURL string) (
 	}
 
 	// Perform request
-	client := &http.Client{
-		Timeout: s.config.Transcribe.DownloadTimeout,
-	}
-	resp, err := client.Do(req)
+	resp, err := s.sharedDownloadClient().Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to download file: %w", err)
 	}
@@ -365,6 +389,56 @@ func (s *TranscribeService) downloadFile(ctx context.Context, audioURL string) (
 	}
 
 	return tempFile.Name(), nil
+}
+
+// maxTranscribeDownloadRedirects limits how many redirects a download follows.
+const maxTranscribeDownloadRedirects = 5
+
+// sharedDownloadClient returns the download client, built once per service so
+// connections are reused instead of leaking one idle transport per download.
+func (s *TranscribeService) sharedDownloadClient() *http.Client {
+	s.downloadClientOnce.Do(func() {
+		s.downloadClient = s.newDownloadClient()
+	})
+	return s.downloadClient
+}
+
+// newDownloadClient builds the HTTP client for audio downloads: every connection
+// is checked against non-public addresses after DNS resolution, environment
+// proxies are ignored (they would hide the real destination from the check) and
+// every redirect target must pass validateURL again.
+func (s *TranscribeService) newDownloadClient() *http.Client {
+	control := s.dialControl
+	if control == nil {
+		control = transcribeDialControl
+	}
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   control,
+	}
+	transport := &http.Transport{
+		Proxy:                 nil,
+		DialContext:           dialer.DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+	return &http.Client{
+		Timeout:   s.config.Transcribe.DownloadTimeout,
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= maxTranscribeDownloadRedirects {
+				return fmt.Errorf("stopped after %d redirects", maxTranscribeDownloadRedirects)
+			}
+			if err := s.validateURL(req.URL.String()); err != nil {
+				return fmt.Errorf("redirect target rejected: %w", err)
+			}
+			return nil
+		},
+	}
 }
 
 // getFileExtension determines the file extension from HTTP response or URL
