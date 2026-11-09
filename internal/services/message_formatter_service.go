@@ -11,6 +11,7 @@ import (
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // MessageFormatterService implements the MessageFormatterInterface for WhatsApp formatting
@@ -40,7 +41,7 @@ func (m *MessageFormatterService) FormatForWhatsApp(ctx context.Context, respons
 
 	m.logger.WithFields(logrus.Fields{
 		"message_id":     response.MessageID,
-		"thread_id":      response.ThreadID,
+		"thread_id":      pii.MaskPhone(response.ThreadID),
 		"content_length": len(response.Content),
 	}).Debug("Formatting response for WhatsApp")
 

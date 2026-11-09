@@ -7,16 +7,17 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // TestAgentEngineCallSpanAttributes_NoMessageContent garante que o span
 // google_agent_engine_call nao exporta o texto enviado ao agente (DEV-446):
 // nem a mensagem livre do cidadao nem o envelope [INBOUND_MEDIA], que carrega
-// o telefone sem mascara.
+// o telefone sem mascara. O thread ID e o proprio telefone e sai mascarado.
 func TestAgentEngineCallSpanAttributes_NoMessageContent(t *testing.T) {
 	const (
-		threadID  = "thread-sintetica-123"
 		phone     = "5521999990000"
+		threadID  = phone
 		userText  = "meu CPF e 000.000.000-00 e moro na Rua Ficticia 1"
 		mediaLink = "https://example.invalid/midia/abc.jpg"
 	)
@@ -29,7 +30,7 @@ func TestAgentEngineCallSpanAttributes_NoMessageContent(t *testing.T) {
 		{
 			name:      "texto livre",
 			message:   userText,
-			forbidden: []string{userText, "000.000.000-00", "Rua Ficticia"},
+			forbidden: []string{phone, userText, "000.000.000-00", "Rua Ficticia"},
 		},
 		{
 			name:      "envelope de midia",
@@ -61,8 +62,8 @@ func TestAgentEngineCallSpanAttributes_NoMessageContent(t *testing.T) {
 			if v, ok := got["message.length"]; !ok || v.AsInt64() != int64(len(tt.message)) {
 				t.Fatalf("message.length = %v, esperado %d", v.Emit(), len(tt.message))
 			}
-			if v, ok := got["thread.id"]; !ok || v.AsString() != threadID {
-				t.Fatalf("thread.id = %v, esperado %q", v.Emit(), threadID)
+			if v, ok := got["thread.id"]; !ok || v.AsString() != pii.MaskPhone(threadID) {
+				t.Fatalf("thread.id = %v, esperado %q", v.Emit(), pii.MaskPhone(threadID))
 			}
 		})
 	}

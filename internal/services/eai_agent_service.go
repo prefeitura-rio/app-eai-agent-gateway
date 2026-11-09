@@ -13,6 +13,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // EAIAgentService implements the EAI Agent Service client for agent configuration and lifecycle
@@ -111,7 +112,7 @@ func (e *EAIAgentService) CreateAgent(ctx context.Context, config *AgentConfigur
 	start := time.Now()
 
 	e.logger.WithFields(logrus.Fields{
-		"user_number": config.UserNumber,
+		"user_number": pii.MaskPhone(config.UserNumber),
 		"agent_type":  config.AgentType,
 		"model":       config.Model,
 	}).Debug("Creating agent")
@@ -179,7 +180,7 @@ func (e *EAIAgentService) CreateAgent(ctx context.Context, config *AgentConfigur
 	duration := time.Since(start)
 	e.logger.WithFields(logrus.Fields{
 		"agent_id":    agentResp.AgentID,
-		"user_number": config.UserNumber,
+		"user_number": pii.MaskPhone(config.UserNumber),
 		"duration_ms": duration.Milliseconds(),
 	}).Info("Agent created successfully")
 
@@ -204,7 +205,7 @@ func (e *EAIAgentService) GetAgent(ctx context.Context, agentID string) (*AgentR
 
 	e.logger.WithFields(logrus.Fields{
 		"agent_id":    agentResp.AgentID,
-		"user_number": agentResp.UserNumber,
+		"user_number": pii.MaskPhone(agentResp.UserNumber),
 		"status":      agentResp.Status,
 	}).Debug("Agent retrieved successfully")
 
@@ -215,7 +216,7 @@ func (e *EAIAgentService) GetAgent(ctx context.Context, agentID string) (*AgentR
 func (e *EAIAgentService) UpdateAgent(ctx context.Context, agentID string, config *AgentConfiguration) (*AgentResponse, error) {
 	e.logger.WithFields(logrus.Fields{
 		"agent_id":    agentID,
-		"user_number": config.UserNumber,
+		"user_number": pii.MaskPhone(config.UserNumber),
 	}).Debug("Updating agent")
 
 	reqBody, err := json.Marshal(config)

@@ -17,6 +17,7 @@ import (
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/middleware"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
 
@@ -131,7 +132,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 
 		logger = logger.WithFields(logrus.Fields{
 			"queue_message_id": queueMsg.ID,
-			"user_number":      queueMsg.UserNumber,
+			"user_number":      pii.MaskPhone(queueMsg.UserNumber),
 			"message_type":     queueMsg.Type,
 			"provider":         queueMsg.Provider,
 		})
@@ -262,7 +263,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			defer activityCancel()
 
 			logger.WithFields(logrus.Fields{
-				"user_number": queueMsg.UserNumber,
+				"user_number": pii.MaskPhone(queueMsg.UserNumber),
 				"timestamp":   timestamp,
 				"ttl":         ttl,
 			}).Debug("Attempting to cache user last activity timestamp")
@@ -271,7 +272,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				logger.WithError(err).Warn("Failed to cache user last activity timestamp")
 			} else {
 				logger.WithFields(logrus.Fields{
-					"user_number": queueMsg.UserNumber,
+					"user_number": pii.MaskPhone(queueMsg.UserNumber),
 					"timestamp":   timestamp,
 					"ttl":         ttl,
 				}).Info("Cached user last activity timestamp")
@@ -321,7 +322,7 @@ func isAudioURL(url string) bool {
 // for media, the [INBOUND_MEDIA] envelope carries the unmasked phone number.
 func agentEngineCallSpanAttributes(threadID, message string) []attribute.KeyValue {
 	return []attribute.KeyValue{
-		attribute.String("thread.id", threadID),
+		attribute.String("thread.id", pii.MaskPhone(threadID)),
 		attribute.Int("message.length", len(message)),
 	}
 }
@@ -331,7 +332,7 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	logger := deps.Logger.WithField("function", "processUserMessage")
 
 	logger.WithFields(logrus.Fields{
-		"user_number":          msg.UserNumber,
+		"user_number":          pii.MaskPhone(msg.UserNumber),
 		"message_length":       len(msg.Message),
 		"has_previous_message": msg.PreviousMessage != nil,
 		"provider":             msg.Provider,
@@ -450,7 +451,7 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	var threadSpan trace.Span
 	if deps.OTelWorkerWrapper != nil {
 		threadCtx, threadSpan = deps.OTelWorkerWrapper.StartSpan(ctx, "thread_management",
-			attribute.String("user.number", msg.UserNumber))
+			attribute.String("user.number", pii.MaskPhone(msg.UserNumber)))
 		defer threadSpan.End()
 	} else {
 		threadCtx = ctx
@@ -471,10 +472,10 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	if deps.OTelWorkerWrapper != nil && threadSpan != nil {
 		threadSpan.SetAttributes(
 			attribute.String("thread.result", "success"),
-			attribute.String("thread.id", threadID))
+			attribute.String("thread.id", pii.MaskPhone(threadID)))
 	}
 
-	logger.WithField("thread_id", threadID).Info("Using thread for conversation")
+	logger.WithField("thread_id", pii.MaskPhone(threadID)).Info("Using thread for conversation")
 
 	// If there's a previous_message, send it as history update first with role="ai"
 	if msg.PreviousMessage != nil && *msg.PreviousMessage != "" {
@@ -653,8 +654,8 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 
 	// Log successful processing (matches Python log format)
 	logger.WithFields(logrus.Fields{
-		"thread_id":           threadID,
-		"agent_id":            agentID,
+		"thread_id":           pii.MaskPhone(threadID),
+		"agent_id":            pii.MaskPhone(agentID),
 		"raw_response_length": len(agentResponse.Content),
 		"processed_length":    len(processedResponse),
 		"messages_count":      len(transformedMessages),
@@ -1297,7 +1298,7 @@ func executeCallback(ctx context.Context, deps *MessageHandlerDependencies, mess
 	// deixá-la no stream de log.
 	callbackLogger := logger.WithFields(logrus.Fields{
 		"message_id":  messageID,
-		"user_number": userNumber,
+		"user_number": pii.MaskPhone(userNumber),
 	})
 
 	callbackLogger.Info("Executing callback for completed task")
