@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // OTelService provides OpenTelemetry integration for SigNoz
@@ -394,7 +397,9 @@ func (s *OTelService) TraceWorkerTask(ctx context.Context, workerType, taskType 
 	status := "success"
 	if err != nil {
 		status = "failure"
-		span.RecordError(err)
+		// The worker error may carry the Agent Engine response body or the
+		// citizen's media URL: record only its redacted summary on the span.
+		span.RecordError(errors.New(pii.ErrorSummary(err)))
 		span.SetAttributes(attribute.String("error", "true"))
 	}
 

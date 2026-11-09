@@ -175,7 +175,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 		}
 
 		if err != nil {
-			logger.WithError(err).Error("Failed to process user message")
+			logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Failed to process user message")
 
 			// Store error in Redis
 			errorKey := "task:error:" + queueMsg.ID
@@ -190,7 +190,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				logger.WithFields(logrus.Fields{
 					"retriable":     true,
 					"error_type":    "retriable",
-					"error_message": err.Error(),
+					"error_message": pii.ErrorSummary(err),
 				}).Warn("Error is retriable, will be retried by RabbitMQ")
 				// Update task status to processing (keep it processing for retry)
 				if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusProcessing), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
@@ -202,7 +202,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 						span.SetAttributes(
 							attribute.Bool("task.will_retry", true),
 							attribute.String("task.error_type", "retriable"),
-							attribute.String("task.error", err.Error()),
+							attribute.String("task.error", pii.ErrorSummary(err)),
 						)
 					}
 				}
@@ -212,7 +212,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 				logger.WithFields(logrus.Fields{
 					"retriable":     false,
 					"error_type":    "permanent",
-					"error_message": err.Error(),
+					"error_message": pii.ErrorSummary(err),
 				}).Error("Error is permanent, marking task as failed")
 				// Update task status to failed for permanent errors
 				if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusFailed), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
@@ -224,7 +224,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 						span.SetAttributes(
 							attribute.Bool("task.will_retry", false),
 							attribute.String("task.error_type", "permanent"),
-							attribute.String("task.error", err.Error()),
+							attribute.String("task.error", pii.ErrorSummary(err)),
 						)
 					}
 				}
@@ -356,15 +356,16 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		var transcribeSpan trace.Span
 		if deps.OTelWorkerWrapper != nil {
 			transcribeCtx, transcribeSpan = deps.OTelWorkerWrapper.StartSpan(ctx, "audio_transcription",
-				attribute.String("audio.url", message),
-				attribute.Bool("audio.detected", true),
-				attribute.String("audio.format", getAudioFormatFromURL(message)))
+				audioTranscriptionSpanAttributes(message)...)
 			defer transcribeSpan.End()
 		} else {
 			transcribeCtx = ctx
 		}
 
-		logger.WithField("audio_url", message).Info("Detected audio URL, attempting transcription")
+		logger.WithFields(logrus.Fields{
+			"audio_host":   pii.URLHost(message),
+			"audio_format": getAudioFormatFromURL(message),
+		}).Info("Detected audio URL, attempting transcription")
 
 		if deps.TranscribeService == nil {
 			logger.Warn("Transcribe service not available, using fallback")
@@ -378,14 +379,14 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 		} else {
 			transcript, err := deps.TranscribeService.TranscribeAudio(transcribeCtx, message)
 			if err != nil {
-				logger.WithError(err).Warn("Failed to transcribe audio, using fallback")
+				logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Warn("Failed to transcribe audio, using fallback")
 				// Fallback to not block the flow (matches Python logic)
 				message = "Ajuda"
 				if deps.OTelWorkerWrapper != nil && transcribeSpan != nil {
 					transcribeSpan.SetAttributes(
 						attribute.Bool("transcription.success", false),
 						attribute.String("transcription.error_type", classifyTranscriptionError(err)),
-						attribute.String("transcription.error", err.Error()),
+						attribute.String("transcription.error", pii.ErrorSummary(err)),
 						attribute.Bool("transcription.fallback_used", true))
 				}
 			} else if transcript != "" && strings.TrimSpace(transcript) != "" && transcript != "Áudio sem conteúdo reconhecível" {
@@ -451,11 +452,11 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	// Get or create thread for user (thread ID corresponds to agent ID in Python logic)
 	threadID, err := deps.GoogleAgentService.GetOrCreateThread(threadCtx, msg.UserNumber)
 	if err != nil {
-		logger.WithError(err).Error("Failed to get or create thread")
+		logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Failed to get or create thread")
 		if deps.OTelWorkerWrapper != nil && threadSpan != nil {
 			threadSpan.SetAttributes(
 				attribute.String("thread.result", "error"),
-				attribute.String("thread.error", err.Error()))
+				attribute.String("thread.error", pii.ErrorSummary(err)))
 		}
 		return "", fmt.Errorf("failed to get thread: %w", err)
 	}
@@ -481,7 +482,7 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 
 		_, err := deps.GoogleAgentService.SendHistoryUpdate(ctx, threadID, historyMessages, msg.ReasoningEngineID)
 		if err != nil {
-			logger.WithError(err).Error("Failed to send previous message as history update")
+			logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Failed to send previous message as history update")
 			return "", fmt.Errorf("failed to send previous message as history: %w", err)
 		}
 
@@ -506,11 +507,11 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	// Pass nil for messageType (normal user messages don't need type parameter)
 	agentResponse, err := deps.GoogleAgentService.SendMessage(agentCtx, threadID, message, msg.ReasoningEngineID, nil)
 	if err != nil {
-		logger.WithError(err).Error("Failed to send message to Google Agent Engine")
+		logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Failed to send message to Google Agent Engine")
 		if deps.OTelWorkerWrapper != nil && agentSpan != nil {
 			agentSpan.SetAttributes(
 				attribute.String("agent.result", "error"),
-				attribute.String("agent.error", err.Error()))
+				attribute.String("agent.error", pii.ErrorSummary(err)))
 		}
 		return "", fmt.Errorf("failed to get AI response: %w", err)
 	}
@@ -1207,6 +1208,17 @@ func applyWhatsAppFormattingToMessages(logger *logrus.Logger, messageFormatter M
 		}
 	}
 	return messages
+}
+
+// audioTranscriptionSpanAttributes never exports the audio URL: it identifies the
+// citizen's media file and its query usually carries an access signature. Only the
+// host and the file format go to the span.
+func audioTranscriptionSpanAttributes(audioURL string) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("audio.host", pii.URLHost(audioURL)),
+		attribute.Bool("audio.detected", true),
+		attribute.String("audio.format", getAudioFormatFromURL(audioURL)),
+	}
 }
 
 // getAudioFormatFromURL extracts the audio format from URL extension
