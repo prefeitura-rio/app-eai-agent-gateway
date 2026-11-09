@@ -174,31 +174,6 @@ func ErrorTrackingMiddleware(structuredLogger *services.StructuredLogger) gin.Ha
 	}
 }
 
-// PanicRecoveryMiddleware provides enhanced panic recovery with structured logging
-func PanicRecoveryMiddleware(structuredLogger *services.StructuredLogger) gin.HandlerFunc {
-	return gin.CustomRecovery(func(c *gin.Context, recovered interface{}) {
-		entry := structuredLogger.WithContext(c.Request.Context()).WithFields(logrus.Fields{
-			"panic_value": recovered,
-			"method":      c.Request.Method,
-			"path":        c.Request.URL.Path,
-			"client_ip":   c.ClientIP(),
-			"user_agent":  c.Request.UserAgent(),
-		})
-
-		entry.Error("Panic recovered in HTTP request")
-
-		// Log security event for potential attacks
-		structuredLogger.LogSecurityEvent(
-			c.Request.Context(),
-			"panic_recovery",
-			"Application panic occurred during request processing",
-			"high",
-		)
-
-		c.AbortWithStatus(500)
-	})
-}
-
 // PerformanceTrackingMiddleware tracks slow requests
 func PerformanceTrackingMiddleware(structuredLogger *services.StructuredLogger, slowThreshold time.Duration) gin.HandlerFunc {
 	return func(c *gin.Context) {
