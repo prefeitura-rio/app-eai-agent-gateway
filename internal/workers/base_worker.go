@@ -11,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // BaseWorker provides common functionality for all workers
@@ -195,7 +196,7 @@ func (w *BaseWorker) handleMessage(ctx context.Context, delivery amqp.Delivery) 
 			ttl := w.deps.Config.Postgres.UserActivityTTL
 			activityCtx, activityCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			procCtx.Logger.WithFields(logrus.Fields{
-				"user_number": procCtx.UserNumber,
+				"user_number": pii.MaskPhone(procCtx.UserNumber),
 				"timestamp":   timestamp,
 				"ttl":         ttl,
 			}).Debug("Attempting to cache user last activity timestamp")
@@ -204,7 +205,7 @@ func (w *BaseWorker) handleMessage(ctx context.Context, delivery amqp.Delivery) 
 				// Don't fail the whole operation for cache errors
 			} else {
 				procCtx.Logger.WithFields(logrus.Fields{
-					"user_number": procCtx.UserNumber,
+					"user_number": pii.MaskPhone(procCtx.UserNumber),
 					"timestamp":   timestamp,
 					"ttl":         ttl,
 				}).Info("Cached user last activity timestamp")
@@ -212,8 +213,8 @@ func (w *BaseWorker) handleMessage(ctx context.Context, delivery amqp.Delivery) 
 			activityCancel()
 		} else {
 			procCtx.Logger.WithFields(logrus.Fields{
-				"user_number":  procCtx.UserNumber,
-				"worker_type":  w.workerType,
+				"user_number":   pii.MaskPhone(procCtx.UserNumber),
+				"worker_type":   w.workerType,
 				"expected_type": models.WorkerTypeUserMessage,
 			}).Debug("Skipping user last activity cache update (condition not met)")
 		}

@@ -17,6 +17,7 @@ import (
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/middleware"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // RedisServiceInterface defines Redis operations needed by MessageHandler
@@ -164,7 +165,7 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 
 	logger := h.logger.WithFields(logrus.Fields{
 		"message_id":           messageID,
-		"user_number":          req.UserNumber,
+		"user_number":          pii.MaskPhone(req.UserNumber),
 		"provider":             provider,
 		"has_previous_message": req.PreviousMessage != nil,
 		"message_length":       len(req.Message),
@@ -178,7 +179,7 @@ func (h *MessageHandler) HandleUserWebhook(c *gin.Context) {
 	if h.tracePropagator != nil {
 		ctx, span = h.tracePropagator.CreateChildSpan(ctx, "user_message_e2e",
 			attribute.String("message.id", messageID),
-			attribute.String("user.number", req.UserNumber),
+			attribute.String("user.number", pii.MaskPhone(req.UserNumber)),
 			attribute.String("provider", provider),
 			attribute.Int("message.length", len(req.Message)),
 			attribute.Bool("message.is_audio", isAudioURL(req.Message)),
@@ -325,7 +326,7 @@ func (h *MessageHandler) HandleHistoryUpdateWebhook(c *gin.Context) {
 	}
 
 	logger := h.logger.WithFields(logrus.Fields{
-		"user_number":    req.UserNumber,
+		"user_number":    pii.MaskPhone(req.UserNumber),
 		"messages_count": len(req.Messages),
 		"request_id":     c.GetString("request_id"),
 	})
@@ -338,7 +339,7 @@ func (h *MessageHandler) HandleHistoryUpdateWebhook(c *gin.Context) {
 
 	if h.tracePropagator != nil {
 		ctx, span = h.tracePropagator.CreateChildSpan(ctx, "history_update_sync",
-			attribute.String("user.number", req.UserNumber),
+			attribute.String("user.number", pii.MaskPhone(req.UserNumber)),
 			attribute.Int("messages.count", len(req.Messages)),
 		)
 		defer span.End()
@@ -368,7 +369,7 @@ func (h *MessageHandler) HandleHistoryUpdateWebhook(c *gin.Context) {
 		return
 	}
 
-	logger = logger.WithField("thread_id", threadID)
+	logger = logger.WithField("thread_id", pii.MaskPhone(threadID))
 	logger.Debug("Thread obtained for history update")
 
 	// Send history update to Google Agent Engine

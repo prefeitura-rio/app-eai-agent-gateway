@@ -12,6 +12,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // DataRelayService handles communication with the Data Relay API
@@ -55,7 +56,7 @@ func (s *DataRelayService) SendErrorInterceptor(ctx context.Context, payload Err
 	// carrega o telefone do cidadão no path/query (LGPD). Ele segue no CORPO
 	// enviado ao Data Relay (o serviço precisa dele), mas não no stream de log.
 	logger := s.logger.WithFields(logrus.Fields{
-		"customer_number": payload.CustomerWhatsappNumber,
+		"customer_number": pii.MaskPhone(payload.CustomerWhatsappNumber),
 		"http_status":     payload.HTTPStatusCode,
 		"source":          payload.Source,
 		"flowname":        payload.FlowName,

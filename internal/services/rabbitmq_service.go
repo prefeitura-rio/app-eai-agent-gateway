@@ -266,8 +266,8 @@ func (r *RabbitMQService) PublishMessage(ctx context.Context, queueName string, 
 
 	if err != nil {
 		r.logger.WithError(err).WithFields(logrus.Fields{
-			"queue":   queueName,
-			"message": string(body),
+			"queue":        queueName,
+			"message_size": len(body), // corpo omitido: carrega user_number e callback_url (LGPD)
 		}).Error("Failed to publish message")
 		return fmt.Errorf("failed to publish message: %w", err)
 	}
@@ -320,9 +320,9 @@ func (r *RabbitMQService) PublishMessageWithHeaders(ctx context.Context, queueNa
 
 	if err != nil {
 		r.logger.WithError(err).WithFields(logrus.Fields{
-			"queue":   queueName,
-			"message": string(body),
-			"headers": headers,
+			"queue":        queueName,
+			"message_size": len(body), // corpo omitido: carrega user_number e callback_url (LGPD)
+			"headers":      headers,
 		}).Error("Failed to publish message with headers")
 		return fmt.Errorf("failed to publish message with headers: %w", err)
 	}

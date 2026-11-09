@@ -18,6 +18,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // govbrAutoResumeTotal conta os desfechos do auto-resume do gov.br, por `outcome`.
@@ -796,14 +797,11 @@ func sanitizePhoneNumber(phone string) string {
 	return result.String()
 }
 
-// maskPhoneNumber masks part of phone number for logging
+// maskPhoneNumber masks part of phone number for logging (see pii.MaskPhone).
 //
 // Example: +5521999999999 -> +5521999***
 func maskPhoneNumber(phone string) string {
-	if len(phone) < 8 {
-		return "****"
-	}
-	return phone[:len(phone)-6] + "***"
+	return pii.MaskPhone(phone)
 }
 
 func (h *GovBrCallbackHandler) isTokenValid(ctx context.Context, userNumber string) bool {

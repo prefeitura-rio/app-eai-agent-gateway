@@ -21,6 +21,7 @@ import (
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // CallbackService handles callback URL execution with retry logic
@@ -308,7 +309,7 @@ func (s *CallbackService) sendErrorInterceptor(ctx context.Context, callbackURL 
 	// Sem callback_url (telefone do cidadão — LGPD); message_id correlaciona.
 	logger := s.logger.WithFields(logrus.Fields{
 		"message_id":     payload.MessageID,
-		"user_number":    userNumber,
+		"user_number":    pii.MaskPhone(userNumber),
 		"callback_error": callbackErr.Error(),
 	})
 
