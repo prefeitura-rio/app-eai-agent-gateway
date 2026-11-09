@@ -318,6 +318,15 @@ func isAudioURL(url string) bool {
 	return false
 }
 
+// agentEngineCallSpanAttributes never exports the message text: it is citizen PII and,
+// for media, the [INBOUND_MEDIA] envelope carries the unmasked phone number.
+func agentEngineCallSpanAttributes(threadID, message string) []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("thread.id", pii.MaskPhone(threadID)),
+		attribute.Int("message.length", len(message)),
+	}
+}
+
 // processUserMessage handles the actual user message processing logic (matches Python process_user_message)
 func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *MessageHandlerDependencies) (string, error) {
 	logger := deps.Logger.WithField("function", "processUserMessage")
@@ -493,9 +502,7 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	var agentSpan trace.Span
 	if deps.OTelWorkerWrapper != nil {
 		agentCtx, agentSpan = deps.OTelWorkerWrapper.StartSpan(ctx, "google_agent_engine_call",
-			attribute.String("thread.id", pii.MaskPhone(threadID)),
-			attribute.String("message.content", message),
-			attribute.Int("message.length", len(message)))
+			agentEngineCallSpanAttributes(threadID, message)...)
 		defer agentSpan.End()
 	} else {
 		agentCtx = ctx
