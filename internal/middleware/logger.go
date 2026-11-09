@@ -56,32 +56,3 @@ func RequestID() gin.HandlerFunc {
 		c.Next()
 	}
 }
-
-// Recovery returns a middleware that recovers from panics
-func Recovery(logger *logrus.Logger) gin.HandlerFunc {
-	return gin.RecoveryWithWriter(
-		&loggerWriter{logger: logger},
-		func(c *gin.Context, recovered interface{}) {
-			requestID, _ := c.Get(RequestIDKey)
-
-			logger.WithFields(logrus.Fields{
-				"request_id": requestID,
-				"panic":      recovered,
-				"method":     c.Request.Method,
-				"path":       c.Request.URL.Path,
-				"client_ip":  c.ClientIP(),
-			}).Error("Panic recovered")
-
-			c.AbortWithStatus(500)
-		},
-	)
-}
-
-type loggerWriter struct {
-	logger *logrus.Logger
-}
-
-func (lw *loggerWriter) Write(p []byte) (n int, err error) {
-	lw.logger.Error(string(p))
-	return len(p), nil
-}
