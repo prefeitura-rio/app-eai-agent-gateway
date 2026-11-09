@@ -2,16 +2,20 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"golang.org/x/oauth2"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
@@ -159,4 +163,116 @@ func TestTraceWorkerTask_RecordsRedactedError(t *testing.T) {
 			}
 		}
 	}
+}
+
+type allowRateLimiter struct{ waitErr error }
+
+func (r allowRateLimiter) Allow(context.Context, string) (bool, error) {
+	return r.waitErr == nil, r.waitErr
+}
+func (r allowRateLimiter) Wait(context.Context, string) error { return r.waitErr }
+
+type threadRedisStub struct{}
+
+func (threadRedisStub) Get(context.Context, string) (string, error)              { return "{}", nil }
+func (threadRedisStub) Set(context.Context, string, string, time.Duration) error { return nil }
+func (threadRedisStub) SetValue(context.Context, string, interface{}, time.Duration) error {
+	return nil
+}
+func (threadRedisStub) Delete(context.Context, string) error { return nil }
+
+// assertLogsOmit falha se alguma entrada de log (mensagem ou campo) contiver
+// um dos textos proibidos.
+func assertLogsOmit(t *testing.T, entries []logrus.Entry, forbidden ...string) {
+	t.Helper()
+	for _, entry := range entries {
+		texts := []string{entry.Message}
+		for key, value := range entry.Data {
+			texts = append(texts, key+"="+fmt.Sprint(value))
+		}
+		for _, text := range texts {
+			for _, f := range forbidden {
+				if strings.Contains(text, f) {
+					t.Fatalf("log %q vazou %q: %q", entry.Message, f, text)
+				}
+			}
+		}
+	}
+}
+
+// TestSendMessageLogs_OmitResponseBody prova que o SendMessage, que troca o
+// erro do Agent Engine pela mensagem amigável e não o devolve, loga só o
+// resumo do erro: status e enum do Google, sem o corpo da resposta (DEV-450).
+func TestSendMessageLogs_OmitResponseBody(t *testing.T) {
+	googleBody := fmt.Sprintf(`{"error":{"code":400,"message":"Reasoning Engine Execution failed. Contexto: %s %s","status":"FAILED_PRECONDITION"}}`, redactionCitizenText, redactionMediaURL)
+
+	logger, hook := logtest.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+
+	svc := newStubAgentEngineService(http.StatusBadRequest, googleBody)
+	svc.logger = logger
+	svc.rateLimiter = allowRateLimiter{}
+	svc.redisService = threadRedisStub{}
+	svc.tokenSource = oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token-falso"})
+	svc.config.GoogleAgentEngine.ReasoningEngineID = "123"
+	svc.config.GoogleAgentEngine.ErrorMessageDefault = "mensagem amigavel"
+
+	resp, err := svc.SendMessage(context.Background(), "5521999990000", "ola", nil, nil)
+	if err != nil {
+		t.Fatalf("SendMessage devolve a mensagem amigavel, nao erro: %v", err)
+	}
+	if resp == nil || resp.Content != "mensagem amigavel" {
+		t.Fatalf("resposta inesperada: %+v", resp)
+	}
+
+	var errorFields []string
+	for _, entry := range hook.AllEntries() {
+		if v, ok := entry.Data[logrus.ErrorKey]; ok {
+			errorFields = append(errorFields, fmt.Sprint(v))
+		}
+	}
+	if len(errorFields) != 2 {
+		t.Fatalf("esperados 2 logs com o campo error, vieram %d: %v", len(errorFields), errorFields)
+	}
+	want := "failed to post query: non-2xx response: 400 (FAILED_PRECONDITION)"
+	for _, got := range errorFields {
+		if got != want {
+			t.Fatalf("campo error = %q, want %q", got, want)
+		}
+	}
+
+	entries := make([]logrus.Entry, 0, len(hook.AllEntries()))
+	for _, e := range hook.AllEntries() {
+		entries = append(entries, *e)
+	}
+	assertLogsOmit(t, entries, redactionCitizenText, "000.000.000-00", redactionMediaURL, "SEGREDO123")
+}
+
+// TestTranscribeFromURLLogs_OmitAudioURL prova que o serviço de transcrição
+// loga só o host da URL do áudio, nunca o caminho ou a query (DEV-450).
+func TestTranscribeFromURLLogs_OmitAudioURL(t *testing.T) {
+	logger, hook := logtest.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+
+	svc := &TranscribeService{
+		config:      &config.Config{},
+		logger:      logger,
+		rateLimiter: allowRateLimiter{waitErr: errors.New("limite")},
+	}
+
+	if _, err := svc.TranscribeFromURL(context.Background(), redactionMediaURL); err == nil {
+		t.Fatalf("TranscribeFromURL deveria falhar no rate limit")
+	}
+
+	entries := make([]logrus.Entry, 0, len(hook.AllEntries()))
+	for _, e := range hook.AllEntries() {
+		entries = append(entries, *e)
+	}
+	if len(entries) == 0 {
+		t.Fatalf("esperado ao menos o log de inicio da transcricao")
+	}
+	if got := entries[0].Data["audio_host"]; got != "cdn.example.invalid" {
+		t.Fatalf("audio_host = %v, esperado cdn.example.invalid", got)
+	}
+	assertLogsOmit(t, entries, redactionMediaURL, "5521999990000", "audio-abc", "SEGREDO123")
 }

@@ -72,11 +72,11 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 	// compatibilidade (se MessageType=audio + Message=URL HTTP, transcribe usa
 	// a URL; depois disso o enrich abaixo embrulha o texto transcrito).
 	if w.deps.TranscribeService != nil && w.deps.TranscribeService.IsAudioURL(content) {
-		procCtx.Logger.WithField("audio_url", content).Debug("Detected audio message, transcribing")
+		procCtx.Logger.WithField("audio_host", pii.URLHost(content)).Debug("Detected audio message, transcribing")
 
 		transcribedText, err := w.deps.TranscribeService.TranscribeAudio(ctx, content)
 		if err != nil {
-			procCtx.Logger.WithError(err).Error("Failed to transcribe audio")
+			procCtx.Logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Failed to transcribe audio")
 			return MessageProcessingResult{
 				Success:  false,
 				Error:    fmt.Errorf("failed to transcribe audio: %w", err),
@@ -85,9 +85,8 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 		}
 
 		procCtx.Logger.WithFields(logrus.Fields{
-			"original_url":     content,
-			"transcribed_text": transcribedText,
-			"text_length":      len(transcribedText),
+			"audio_host":  pii.URLHost(content),
+			"text_length": len(transcribedText),
 		}).Info("Audio transcribed successfully")
 
 		content = transcribedText
@@ -263,12 +262,15 @@ func (w *UserMessageWorker) processHistoryUpdate(ctx context.Context, queueMessa
 		if w.deps.TranscribeService != nil && w.deps.TranscribeService.IsAudioURL(content) {
 			procCtx.Logger.WithFields(logrus.Fields{
 				"message_index": i,
-				"audio_url":     content,
+				"audio_host":    pii.URLHost(content),
 			}).Debug("Detected audio URL in history message, transcribing")
 
 			transcribedText, err := w.deps.TranscribeService.TranscribeAudio(ctx, content)
 			if err != nil {
-				procCtx.Logger.WithError(err).WithField("message_index", i).Error("Failed to transcribe audio in history message")
+				procCtx.Logger.WithFields(logrus.Fields{
+					logrus.ErrorKey: pii.ErrorSummary(err),
+					"message_index": i,
+				}).Error("Failed to transcribe audio in history message")
 				return MessageProcessingResult{
 					Success:  false,
 					Error:    fmt.Errorf("failed to transcribe audio in message %d: %w", i, err),
@@ -277,10 +279,9 @@ func (w *UserMessageWorker) processHistoryUpdate(ctx context.Context, queueMessa
 			}
 
 			procCtx.Logger.WithFields(logrus.Fields{
-				"message_index":    i,
-				"original_url":     content,
-				"transcribed_text": transcribedText,
-				"text_length":      len(transcribedText),
+				"message_index": i,
+				"audio_host":    pii.URLHost(content),
+				"text_length":   len(transcribedText),
 			}).Info("Audio in history message transcribed successfully")
 
 			content = transcribedText

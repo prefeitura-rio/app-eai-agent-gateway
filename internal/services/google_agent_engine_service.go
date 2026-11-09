@@ -311,7 +311,10 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	// Call the reasoning engine via HTTP REST API
 	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, reasoningEngineID, messageType)
 	if err != nil {
-		s.logger.WithError(err).WithField("thread_id", pii.MaskPhone(threadID)).Error("Failed to query reasoning engine")
+		s.logger.WithFields(logrus.Fields{
+			logrus.ErrorKey: pii.ErrorSummary(err),
+			"thread_id":     pii.MaskPhone(threadID),
+		}).Error("Failed to query reasoning engine")
 
 		// Return graceful error message instead of returning error
 		// This prevents raw error propagation to the user
@@ -323,7 +326,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 		// Log the actual error but don't fail the request
 		s.logger.WithFields(logrus.Fields{
 			"thread_id":        pii.MaskPhone(threadID),
-			"error":            err.Error(),
+			"error":            pii.ErrorSummary(err),
 			"error_class":      errorClass,
 			"graceful_message": errorMsg,
 		}).Warn("Returning graceful error message to user")
