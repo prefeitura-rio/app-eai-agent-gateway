@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
 	logtest "github.com/sirupsen/logrus/hooks/test"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
@@ -275,4 +276,63 @@ func TestTranscribeFromURLLogs_OmitAudioURL(t *testing.T) {
 		t.Fatalf("audio_host = %v, esperado cdn.example.invalid", got)
 	}
 	assertLogsOmit(t, entries, redactionMediaURL, "5521999990000", "audio-abc", "SEGREDO123")
+}
+
+// TestConsumerLogs_OmitResponseBody prova que os dois consumidores do RabbitMQ
+// logam só o resumo do erro que o handler devolve (o erro retriable do worker
+// carrega o corpo do Agent Engine), sem o corpo (DEV-450).
+func TestConsumerLogs_OmitResponseBody(t *testing.T) {
+	handlerErr := fmt.Errorf("failed to send previous message as history: %w",
+		fmt.Errorf("failed to post query: %w",
+			fmt.Errorf("non-2xx response: %d - %s %s", 503, redactionCitizenText, redactionMediaURL)))
+	handler := func(context.Context, amqp.Delivery) error { return handlerErr }
+	want := "failed to send previous message as history: failed to post query: non-2xx response: 503"
+
+	cfg := &config.Config{}
+	cfg.RabbitMQ.MessageTimeout = time.Second
+	cfg.RabbitMQ.MaxRetries = 0
+
+	tests := []struct {
+		name string
+		run  func(svc *RabbitMQService, logger *logrus.Logger)
+	}{
+		{
+			name: "RabbitMQService.processMessage",
+			run: func(svc *RabbitMQService, _ *logrus.Logger) {
+				svc.processMessage(context.Background(), amqp.Delivery{Redelivered: true}, handler)
+			},
+		},
+		{
+			name: "Consumer.processMessageWithRetry",
+			run: func(svc *RabbitMQService, logger *logrus.Logger) {
+				c := &Consumer{rabbitMQ: svc, logger: logger, handler: handler}
+				c.processMessageWithRetry(context.Background(), amqp.Delivery{}, logrus.NewEntry(logger))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logger, hook := logtest.NewNullLogger()
+			svc := &RabbitMQService{config: cfg, logger: logger}
+
+			tt.run(svc, logger)
+
+			found := false
+			entries := make([]logrus.Entry, 0, len(hook.AllEntries()))
+			for _, e := range hook.AllEntries() {
+				entries = append(entries, *e)
+				if e.Message == "Message processing failed" {
+					found = true
+					if got := fmt.Sprint(e.Data[logrus.ErrorKey]); got != want {
+						t.Fatalf("campo error = %q, want %q", got, want)
+					}
+				}
+			}
+			if !found {
+				t.Fatalf("log Message processing failed ausente")
+			}
+			assertLogsOmit(t, entries, redactionCitizenText, "000.000.000-00", redactionMediaURL, "SEGREDO123")
+		})
+	}
 }
