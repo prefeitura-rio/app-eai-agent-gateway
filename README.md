@@ -336,8 +336,7 @@ app-eai-agent-gateway/
 │   │   ├── logger.go                # Request logging
 │   │   ├── metrics.go               # Prometheus metrics
 │   │   ├── otel.go                  # OpenTelemetry tracing
-│   │   ├── security.go              # Security headers
-│   │   └── structured_logging.go    # Structured log formatting
+│   │   └── security.go              # Security headers
 │   ├── 📁 models/                   # Data models
 │   │   └── message.go               # Message data structures
 │   ├── 📁 services/                 # Business logic services
