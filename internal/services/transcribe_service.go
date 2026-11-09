@@ -19,6 +19,7 @@ import (
 	speechpb "google.golang.org/genproto/googleapis/cloud/speech/v2" //nolint:staticcheck // Using Speech v2 API as required
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // decodeServiceAccount decodes the SERVICE_ACCOUNT environment variable (same as sandbox.go)
@@ -131,7 +132,7 @@ func NewTranscribeService(
 func (s *TranscribeService) TranscribeFromURL(ctx context.Context, audioURL string) (*TranscriptionResult, error) {
 	start := time.Now()
 
-	s.logger.WithField("audio_url", audioURL).Debug("Starting transcription from URL")
+	s.logger.WithField("audio_host", pii.URLHost(audioURL)).Debug("Starting transcription from URL")
 
 	// Apply rate limiting
 	if err := s.rateLimiter.Wait(ctx, "transcribe_service"); err != nil {
@@ -168,7 +169,7 @@ func (s *TranscribeService) TranscribeFromURL(ctx context.Context, audioURL stri
 	result.Metadata["download_duration_ms"] = time.Since(start).Milliseconds()
 
 	s.logger.WithFields(logrus.Fields{
-		"audio_url":   audioURL,
+		"audio_host":  pii.URLHost(audioURL),
 		"text_length": len(result.Text),
 		"confidence":  result.Confidence,
 		"duration_ms": time.Since(start).Milliseconds(),
