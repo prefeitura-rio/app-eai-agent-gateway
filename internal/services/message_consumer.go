@@ -10,6 +10,8 @@ import (
 	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/sirupsen/logrus"
+
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // Consumer represents a message consumer for a specific queue
@@ -209,7 +211,7 @@ func (r *RabbitMQService) processMessage(ctx context.Context, msg amqp.Delivery,
 	// Process the message
 	err := handler(msgCtx, msg)
 	if err != nil {
-		logger.WithError(err).Error("Message processing failed")
+		logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Message processing failed")
 
 		// Check if this is a retry (redelivered message)
 		if msg.Redelivered {
@@ -264,7 +266,10 @@ func (c *Consumer) processMessageWithRetry(ctx context.Context, msg amqp.Deliver
 	// Process the message
 	err := c.handler(msgCtx, msg)
 	if err != nil {
-		logger.WithError(err).WithField("retry_count", retryCount).Error("Message processing failed")
+		logger.WithFields(logrus.Fields{
+			logrus.ErrorKey: pii.ErrorSummary(err),
+			"retry_count":   retryCount,
+		}).Error("Message processing failed")
 
 		if retryCount >= maxRetries {
 			logger.WithField("max_retries", maxRetries).Error("Message exceeded maximum retries, sending to DLQ")
