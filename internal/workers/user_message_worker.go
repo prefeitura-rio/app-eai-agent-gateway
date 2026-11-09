@@ -11,6 +11,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // UserMessageWorker processes user messages and sends them to Google Agent Engine
@@ -118,7 +119,7 @@ func (w *UserMessageWorker) ProcessMessage(ctx context.Context, delivery amqp.De
 	}
 
 	procCtx.ThreadID = threadID
-	procCtx.Logger = procCtx.Logger.WithField("thread_id", threadID)
+	procCtx.Logger = procCtx.Logger.WithField("thread_id", pii.MaskPhone(threadID))
 
 	// If there's a previous_message, send it as history update first with role="ai"
 	if queueMessage.PreviousMessage != nil && *queueMessage.PreviousMessage != "" {
@@ -303,7 +304,7 @@ func (w *UserMessageWorker) processHistoryUpdate(ctx context.Context, queueMessa
 	}
 
 	procCtx.ThreadID = threadID
-	procCtx.Logger = procCtx.Logger.WithField("thread_id", threadID)
+	procCtx.Logger = procCtx.Logger.WithField("thread_id", pii.MaskPhone(threadID))
 
 	// Send history update to Google Agent Engine
 	resp, err := w.deps.AgentClient.SendHistoryUpdate(ctx, threadID, processedMessages, queueMessage.ReasoningEngineID)
@@ -330,7 +331,7 @@ func (w *UserMessageWorker) processHistoryUpdate(ctx context.Context, queueMessa
 	responseString := string(responseBytes)
 
 	procCtx.Logger.WithFields(logrus.Fields{
-		"thread_id":      threadID,
+		"thread_id":      pii.MaskPhone(threadID),
 		"messages_count": len(processedMessages),
 		"duration_ms":    time.Since(start).Milliseconds(),
 		"response":       responseString,

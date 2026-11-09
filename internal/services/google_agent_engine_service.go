@@ -21,6 +21,7 @@ import (
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // GoogleAgentEngineService implements the AgentClientInterface for Google Agent Engine
@@ -210,7 +211,7 @@ func NewGoogleAgentEngineService(
 
 // CreateThread creates a new conversation thread for a user
 func (s *GoogleAgentEngineService) CreateThread(ctx context.Context, userID string) (string, error) {
-	s.logger.WithField("user_id", userID).Debug("Creating new thread")
+	s.logger.WithField("user_id", pii.MaskPhone(userID)).Debug("Creating new thread")
 
 	// Apply rate limiting
 	if err := s.rateLimiter.Wait(ctx, "google_agent_engine"); err != nil {
@@ -242,8 +243,8 @@ func (s *GoogleAgentEngineService) CreateThread(ctx context.Context, userID stri
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"user_id":   userID,
-		"thread_id": threadID,
+		"user_id":   pii.MaskPhone(userID),
+		"thread_id": pii.MaskPhone(threadID),
 	}).Info("Thread created successfully")
 
 	return threadID, nil
@@ -267,8 +268,8 @@ func (s *GoogleAgentEngineService) GetOrCreateThread(ctx context.Context, userID
 			_ = s.redisService.SetValue(ctx, threadKey, string(updatedData), s.config.Redis.AgentIDCacheTTL)
 
 			s.logger.WithFields(logrus.Fields{
-				"user_id":   userID,
-				"thread_id": threadID,
+				"user_id":   pii.MaskPhone(userID),
+				"thread_id": pii.MaskPhone(threadID),
 			}).Debug("Using existing thread")
 
 			return threadID, nil
@@ -285,7 +286,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	start := time.Now()
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":        threadID,
+		"thread_id":        pii.MaskPhone(threadID),
 		"content_length":   len(content),
 		"custom_engine_id": reasoningEngineID != nil && *reasoningEngineID != "",
 	}).Debug("Sending message to thread")
@@ -310,7 +311,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	// Call the reasoning engine via HTTP REST API
 	responseContent, err := s.queryReasoningEngine(ctx, threadID, content, reasoningEngineID, messageType)
 	if err != nil {
-		s.logger.WithError(err).WithField("thread_id", threadID).Error("Failed to query reasoning engine")
+		s.logger.WithError(err).WithField("thread_id", pii.MaskPhone(threadID)).Error("Failed to query reasoning engine")
 
 		// Return graceful error message instead of returning error
 		// This prevents raw error propagation to the user
@@ -321,7 +322,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 
 		// Log the actual error but don't fail the request
 		s.logger.WithFields(logrus.Fields{
-			"thread_id":        threadID,
+			"thread_id":        pii.MaskPhone(threadID),
 			"error":            err.Error(),
 			"error_class":      errorClass,
 			"graceful_message": errorMsg,
@@ -347,7 +348,7 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	duration := time.Since(start)
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":       threadID,
+		"thread_id":       pii.MaskPhone(threadID),
 		"message_id":      messageID,
 		"response_length": len(responseContent),
 		"duration_ms":     duration.Milliseconds(),
@@ -555,7 +556,7 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":            threadID,
+		"thread_id":            pii.MaskPhone(threadID),
 		"message_length":       len(message),
 		"total_messages_count": len(messages),
 		"reasoning_engine_id":  engineID,
@@ -926,7 +927,7 @@ func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, thread
 	start := time.Now()
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":        threadID,
+		"thread_id":        pii.MaskPhone(threadID),
 		"messages_count":   len(messages),
 		"custom_engine_id": reasoningEngineID != nil && *reasoningEngineID != "",
 	}).Debug("Sending history update to thread")
@@ -993,7 +994,7 @@ func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, thread
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":           threadID,
+		"thread_id":           pii.MaskPhone(threadID),
 		"messages_count":      len(formattedMessages),
 		"reasoning_engine_id": engineID,
 	}).Debug("Making async_query call with type=history to reasoning engine")
@@ -1012,7 +1013,7 @@ func (s *GoogleAgentEngineService) SendHistoryUpdate(ctx context.Context, thread
 	duration := time.Since(start)
 
 	s.logger.WithFields(logrus.Fields{
-		"thread_id":     threadID,
+		"thread_id":     pii.MaskPhone(threadID),
 		"duration_ms":   duration.Milliseconds(),
 		"message_count": threadInfo.MessageCount,
 	}).Info("History update processed successfully")

@@ -10,6 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // PostgresService handles PostgreSQL operations for agent engine database
@@ -99,9 +100,9 @@ func (p *PostgresService) GetLastMessageTimestamp(ctx context.Context, threadID 
 	err := p.db.QueryRowContext(ctx, query, threadID).Scan(&timestampStr)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("no messages found for thread: %s", threadID)
+			return nil, fmt.Errorf("no messages found for thread: %s", pii.MaskPhone(threadID))
 		}
-		p.logger.WithError(err).WithField("thread_id", threadID).Error("Failed to query last message timestamp")
+		p.logger.WithError(err).WithField("thread_id", pii.MaskPhone(threadID)).Error("Failed to query last message timestamp")
 		return nil, fmt.Errorf("postgres query error: %w", err)
 	}
 
@@ -109,14 +110,14 @@ func (p *PostgresService) GetLastMessageTimestamp(ctx context.Context, threadID 
 	timestamp, err := time.Parse(time.RFC3339, timestampStr)
 	if err != nil {
 		p.logger.WithError(err).WithFields(logrus.Fields{
-			"thread_id":     threadID,
+			"thread_id":     pii.MaskPhone(threadID),
 			"timestamp_str": timestampStr,
 		}).Error("Failed to parse timestamp")
 		return nil, fmt.Errorf("invalid timestamp format: %w", err)
 	}
 
 	p.logger.WithFields(logrus.Fields{
-		"thread_id": threadID,
+		"thread_id": pii.MaskPhone(threadID),
 		"timestamp": timestamp,
 	}).Debug("Retrieved last message timestamp from postgres")
 
@@ -137,7 +138,7 @@ func (p *PostgresService) GetThreadMessageCount(ctx context.Context, threadID st
 
 	err := p.db.QueryRowContext(ctx, query, threadID).Scan(&count)
 	if err != nil {
-		p.logger.WithError(err).WithField("thread_id", threadID).Error("Failed to count thread messages")
+		p.logger.WithError(err).WithField("thread_id", pii.MaskPhone(threadID)).Error("Failed to count thread messages")
 		return 0, fmt.Errorf("postgres query error: %w", err)
 	}
 

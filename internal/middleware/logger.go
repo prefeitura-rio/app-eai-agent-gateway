@@ -1,11 +1,14 @@
 package middleware
 
 import (
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
+
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // RequestIDKey is the key used for request ID in context
@@ -17,7 +20,7 @@ func Logger(logger *logrus.Logger) gin.HandlerFunc {
 		// Create structured log entry
 		fields := logrus.Fields{
 			"method":     param.Method,
-			"path":       param.Path,
+			"path":       redactPathQuery(param.Path),
 			"status":     param.StatusCode,
 			"latency":    param.Latency.String(),
 			"client_ip":  param.ClientIP,
@@ -41,6 +44,42 @@ func Logger(logger *logrus.Logger) gin.HandlerFunc {
 
 		return "" // Return empty string since we're using structured logging
 	})
+}
+
+// phoneQueryParams are query parameters that carry the citizen's phone number
+// (e.g. GET /api/v1/message/last-activity?user_number=...).
+var phoneQueryParams = []string{"user_number"}
+
+// redactPathQuery masks the phone-number query parameters of a request path as
+// gin hands it to the log formatter (path + "?" + raw query), so the access log
+// never records the citizen's number in clear text (LGPD).
+func redactPathQuery(path string) string {
+	base, rawQuery, found := strings.Cut(path, "?")
+	if !found || rawQuery == "" {
+		return path
+	}
+
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		// Malformed query: drop it rather than risk logging the number.
+		return base + "?[query omitted]"
+	}
+
+	changed := false
+	for _, key := range phoneQueryParams {
+		vals, ok := values[key]
+		if !ok {
+			continue
+		}
+		for i, v := range vals {
+			vals[i] = pii.MaskPhone(v)
+		}
+		changed = true
+	}
+	if !changed {
+		return path
+	}
+	return base + "?" + values.Encode()
 }
 
 // RequestID adds a unique request ID to each request

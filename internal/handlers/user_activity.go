@@ -10,6 +10,7 @@ import (
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
 
@@ -59,7 +60,7 @@ func (h *UserActivityHandler) HandleLastActivity(c *gin.Context) {
 	}
 
 	logger := h.logger.WithFields(logrus.Fields{
-		"user_number": userNumber,
+		"user_number": pii.MaskPhone(userNumber),
 		"request_id":  c.GetString("request_id"),
 	})
 

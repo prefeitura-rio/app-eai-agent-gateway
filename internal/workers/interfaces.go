@@ -9,6 +9,7 @@ import (
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/config"
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/models"
+	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/pii"
 )
 
 // Worker defines the interface that all workers must implement
@@ -179,7 +180,7 @@ func NewProcessingContext(queueMessage *models.QueueMessage, logger *logrus.Logg
 	loggerEntry := logger.WithFields(logrus.Fields{
 		"message_id":     queueMessage.ID,
 		"message_type":   queueMessage.Type,
-		"user_number":    queueMessage.UserNumber,
+		"user_number":    pii.MaskPhone(queueMessage.UserNumber),
 		"agent_id":       queueMessage.AgentID,
 		"correlation_id": correlationID,
 	})
