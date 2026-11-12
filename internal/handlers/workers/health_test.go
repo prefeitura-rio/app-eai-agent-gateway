@@ -109,7 +109,7 @@ func TestWorkerHealthHandler_Health_RabbitMQUnhealthy(t *testing.T) {
 	checks := response["checks"].(map[string]interface{})
 	rabbitMQCheck := checks["rabbitmq"].(map[string]interface{})
 	assert.Equal(t, "unhealthy", rabbitMQCheck["status"])
-	assert.Equal(t, "connection refused", rabbitMQCheck["error"])
+	assert.NotContains(t, rabbitMQCheck, "error", "raw dependency error must not be exposed")
 
 	// Redis should still be healthy
 	redisCheck := checks["redis"].(map[string]interface{})
@@ -141,7 +141,7 @@ func TestWorkerHealthHandler_Health_RedisUnhealthy(t *testing.T) {
 	checks := response["checks"].(map[string]interface{})
 	redisCheck := checks["redis"].(map[string]interface{})
 	assert.Equal(t, "unhealthy", redisCheck["status"])
-	assert.Equal(t, "timeout", redisCheck["error"])
+	assert.NotContains(t, redisCheck, "error", "raw dependency error must not be exposed")
 
 	// RabbitMQ should still be healthy
 	rabbitMQCheck := checks["rabbitmq"].(map[string]interface{})

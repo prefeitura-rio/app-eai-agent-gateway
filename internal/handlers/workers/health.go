@@ -54,13 +54,13 @@ func (h *WorkerHealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err != nil {
+			// The raw error may carry internal hosts and driver details: it
+			// goes to the log only, never to this unauthenticated response.
 			checkResult["status"] = "unhealthy"
-			checkResult["error"] = err.Error()
 			status = "unhealthy"
 			httpStatus = http.StatusServiceUnavailable
-			h.logger.WithFields(logrus.Fields{
+			h.logger.WithError(err).WithFields(logrus.Fields{
 				"checker":  "rabbitmq",
-				"error":    err.Error(),
 				"duration": duration,
 			}).Error("Worker health check failed: RabbitMQ")
 		}
@@ -80,13 +80,13 @@ func (h *WorkerHealthHandler) Health(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err != nil {
+			// The raw error may carry internal hosts and driver details: it
+			// goes to the log only, never to this unauthenticated response.
 			checkResult["status"] = "unhealthy"
-			checkResult["error"] = err.Error()
 			status = "unhealthy"
 			httpStatus = http.StatusServiceUnavailable
-			h.logger.WithFields(logrus.Fields{
+			h.logger.WithError(err).WithFields(logrus.Fields{
 				"checker":  "redis",
-				"error":    err.Error(),
 				"duration": duration,
 			}).Error("Worker health check failed: Redis")
 		}
@@ -132,10 +132,15 @@ func (h *WorkerHealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err != nil {
+			// The raw error may carry internal hosts and driver details: it
+			// goes to the log only, never to this unauthenticated response.
 			checkResult["status"] = "not_ready"
-			checkResult["error"] = err.Error()
 			status = "not_ready"
 			httpStatus = http.StatusServiceUnavailable
+			h.logger.WithError(err).WithFields(logrus.Fields{
+				"checker":  "rabbitmq",
+				"duration": duration,
+			}).Error("Worker readiness check failed: RabbitMQ")
 		}
 
 		checks["rabbitmq"] = checkResult
@@ -152,10 +157,15 @@ func (h *WorkerHealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err != nil {
+			// The raw error may carry internal hosts and driver details: it
+			// goes to the log only, never to this unauthenticated response.
 			checkResult["status"] = "not_ready"
-			checkResult["error"] = err.Error()
 			status = "not_ready"
 			httpStatus = http.StatusServiceUnavailable
+			h.logger.WithError(err).WithFields(logrus.Fields{
+				"checker":  "redis",
+				"duration": duration,
+			}).Error("Worker readiness check failed: Redis")
 		}
 
 		checks["redis"] = checkResult
