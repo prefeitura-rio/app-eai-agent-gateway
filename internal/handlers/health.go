@@ -92,7 +92,7 @@ func (h *HealthHandler) Health(c *gin.Context) {
 		response := gin.H{
 			"status":     string(systemHealth.Status),
 			"timestamp":  systemHealth.Timestamp.UTC().Format(time.RFC3339),
-			"components": systemHealth.Components,
+			"components": publicComponents(systemHealth.Components),
 			"summary":    systemHealth.Summary,
 		}
 
@@ -116,13 +116,13 @@ func (h *HealthHandler) Health(c *gin.Context) {
 		}
 
 		if err != nil {
+			// The raw error may carry internal hosts and driver details: it
+			// goes to the log only, never to this unauthenticated response.
 			checkResult["status"] = "unhealthy"
-			checkResult["error"] = err.Error()
 			status = "unhealthy"
 			httpStatus = http.StatusServiceUnavailable
-			h.logger.WithFields(logrus.Fields{
+			h.logger.WithError(err).WithFields(logrus.Fields{
 				"checker":  name,
-				"error":    err.Error(),
 				"duration": duration,
 			}).Error("Health check failed")
 		}
@@ -174,7 +174,7 @@ func (h *HealthHandler) Ready(c *gin.Context) {
 		response := gin.H{
 			"status":     status,
 			"timestamp":  systemHealth.Timestamp.UTC().Format(time.RFC3339),
-			"components": systemHealth.Components,
+			"components": publicComponents(systemHealth.Components),
 			"summary":    systemHealth.Summary,
 		}
 
@@ -198,10 +198,15 @@ func (h *HealthHandler) Ready(c *gin.Context) {
 		}
 
 		if err != nil {
+			// The raw error may carry internal hosts and driver details: it
+			// goes to the log only, never to this unauthenticated response.
 			checkResult["status"] = "not_ready"
-			checkResult["error"] = err.Error()
 			status = "not_ready"
 			httpStatus = http.StatusServiceUnavailable
+			h.logger.WithError(err).WithFields(logrus.Fields{
+				"checker":  name,
+				"duration": duration,
+			}).Error("Readiness check failed")
 		}
 
 		checks[name] = checkResult
@@ -214,6 +219,30 @@ func (h *HealthHandler) Ready(c *gin.Context) {
 	}
 
 	c.JSON(httpStatus, response)
+}
+
+// publicComponent is what the unauthenticated /health and /ready endpoints
+// expose for each component: its name and status, never the error text or
+// details (internal hosts, endpoints, driver messages), which stay in the logs.
+type publicComponent struct {
+	Name        string                `json:"name"`
+	Status      services.HealthStatus `json:"status"`
+	LastChecked time.Time             `json:"last_checked"`
+	Duration    time.Duration         `json:"duration_ms"`
+}
+
+// publicComponents strips error and details from the component health results.
+func publicComponents(components map[string]services.ComponentHealth) map[string]publicComponent {
+	public := make(map[string]publicComponent, len(components))
+	for key, component := range components {
+		public[key] = publicComponent{
+			Name:        component.Name,
+			Status:      component.Status,
+			LastChecked: component.LastChecked,
+			Duration:    component.Duration,
+		}
+	}
+	return public
 }
 
 // Live handles the /live endpoint (liveness probe)
