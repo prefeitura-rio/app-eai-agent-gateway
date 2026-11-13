@@ -356,8 +356,13 @@ func setDefaults() {
 	viper.SetDefault("GOOGLE_API_MAX_BACKOFF_SECONDS", 300)
 	viper.SetDefault("GOOGLE_API_MIN_BACKOFF_SECONDS", 1)
 
-	// Google Agent Engine (very large timeout for complex reasoning tasks - 30 minutes)
-	viper.SetDefault("GOOGLE_AGENT_ENGINE_REQUEST_TIMEOUT", "1800s")
+	// Google Agent Engine (#R4). Era 1800s (30 min): um engine preso segurava a
+	// goroutine/worker por até 30 min (é o httpClient.Timeout E o deadline do poll).
+	// 120s cobre com folga o pior turno legítimo (~50s: N+1 chamadas de LLM + tools,
+	// com o SGRC já limitado a 20s pelo #R2) e mata o hang. Fica acima do poll de
+	// 110s da casca Mule (o Mule é quem "dá o veredito" de UX no timeout do turno),
+	// e muito abaixo dos 30 min. Tunável no Infisical sem redeploy.
+	viper.SetDefault("GOOGLE_AGENT_ENGINE_REQUEST_TIMEOUT", "120s")
 	viper.SetDefault("GOOGLE_AGENT_ENGINE_MAX_MESSAGE_LENGTH", 32000)
 	viper.SetDefault("GOOGLE_AGENT_ENGINE_MAX_RETRIES", 3)
 	viper.SetDefault("GOOGLE_AGENT_ENGINE_RETRY_BACKOFF", "1s")
