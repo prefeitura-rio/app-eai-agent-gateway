@@ -175,3 +175,48 @@ func TestClassifyEngineError(t *testing.T) {
 		})
 	}
 }
+
+func TestIsPreExecutionRetriable(t *testing.T) {
+	tests := []struct {
+		name   string
+		errStr string
+		want   bool
+	}{
+		// SEGURO: a operação async nunca começou no engine.
+		{"connection refused", "failed to make request: dial tcp: connect: connection refused", true},
+		{"503 status", "non-2xx response: 503 - service unavailable", true},
+		{"unavailable word", "rpc error: code = Unavailable desc = the service is currently unavailable", true},
+
+		// INSEGURO: pode ter executado (criado chamado) → nunca re-tentar.
+		{"plain timeout", "request timeout", false},
+		{"timed out", "polling timed out after 30s", false},
+		{"deadline exceeded", "context deadline exceeded", false},
+		{"context canceled", "context canceled", false},
+		{"500 whose body says unavailable is still unsafe", "non-2xx response: 500 - backend reported unavailable", false},
+		{"502 bad gateway", "non-2xx response: 502 - bad gateway", false},
+		{"504 gateway timeout", "non-2xx response: 504 - gateway timeout", false},
+
+		// CRÍTICO: exclusão tem prioridade — "unavailable"/"503" + sinal inseguro → false.
+		{"503 but also timed out", "non-2xx response: 503 - upstream timed out", false},
+		{"unavailable but deadline", "unavailable: context deadline exceeded", false},
+		{"504 response whose body mentions unavailable", "non-2xx response: 504 - upstream service unavailable", false},
+
+		// Status casado na forma canônica: um ID com 503 (não "response: 503") e
+		// sem sinal transitório real NÃO deve ser re-tentado (mesmo guard do "429").
+		{"503 in engine id is not retriable", "non-2xx response: 500 - boom referencing 503 elsewhere", false},
+
+		// Fora do conjunto seguro → false (não re-tenta).
+		{"500 internal", "non-2xx response: 500 - internal server error", false},
+		{"rate limit", "rate limit exceeded: quota", false},
+		{"thread not found", "thread not found: abc", false},
+		{"empty", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPreExecutionRetriable(tt.errStr); got != tt.want {
+				t.Errorf("isPreExecutionRetriable(%q) = %v, want %v", tt.errStr, got, tt.want)
+			}
+		})
+	}
+}
