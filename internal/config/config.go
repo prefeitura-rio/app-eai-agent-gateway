@@ -340,7 +340,11 @@ func setDefaults() {
 	viper.SetDefault("AGENT_ID_CACHE_TTL", "86400s")
 
 	// Redis Connection Pool
-	viper.SetDefault("REDIS_POOL_SIZE", 20)
+	// 50 (era 20): com ~100 consumers/pod (MAX_PARALLEL) um pool de 20 esgota sob carga
+	// e causa "context deadline exceeded" no Redis — inclusive na leitura do callback URL,
+	// fazendo a resposta morrer em silêncio (incidente 2026-06-02). Ver
+	// docs/propostas/plano-resiliencia-sobrecarga-2026-06-02.md (no repo study-sf).
+	viper.SetDefault("REDIS_POOL_SIZE", 50)
 	viper.SetDefault("REDIS_MIN_IDLE_CONNECTIONS", 5)
 	viper.SetDefault("REDIS_MAX_IDLE_CONNECTIONS", 10)
 	viper.SetDefault("REDIS_CONNECTION_MAX_IDLE_TIME", 300) // 5 minutes
