@@ -16,7 +16,7 @@ func TestValidateCallbackURLDoesNotLeakRawURL(t *testing.T) {
 	// ecoaria a string de entrada inteira se fosse embrulhado com %w.
 	malformed := "https://" + host + "/notify?phone=" + phone + "\x7f"
 
-	err := validateCallbackURL(malformed)
+	err := validateCallbackURL(malformed, nil)
 	if err == nil {
 		t.Fatal("esperava que validateCallbackURL rejeitasse a URL malformada")
 	}

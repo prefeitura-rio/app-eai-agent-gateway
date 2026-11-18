@@ -210,6 +210,10 @@ type SecurityConfig struct {
 	StrictMode          bool   `mapstructure:"SECURITY_STRICT_MODE"`
 }
 
+// CallbackConfig configura o envio de callbacks. CALLBACK_ALLOWED_DOMAIN
+// restringe o host da callback_url: um domínio ou lista separada por vírgulas,
+// cada um liberando o próprio domínio e os subdomínios; vazio libera qualquer
+// domínio público (ver internal/callbackguard).
 type CallbackConfig struct {
 	Enabled       bool   `mapstructure:"CALLBACK_ENABLED"`
 	Timeout       int    `mapstructure:"CALLBACK_TIMEOUT"`
