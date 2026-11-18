@@ -354,7 +354,6 @@ app-eai-agent-gateway/
 │   │   ├── structured_logger.go     # Logging service
 │   │   ├── temp_file_manager.go     # File handling
 │   │   ├── transcribe_service.go    # Audio transcription
-│   │   ├── validation_service.go    # Input validation
 │   │   ├── worker_manager_service.go # Worker lifecycle
 │   │   └── worker_metrics_service.go # Worker metrics
 │   └── 📁 workers/                  # Worker implementations
