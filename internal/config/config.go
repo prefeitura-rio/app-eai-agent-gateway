@@ -241,6 +241,11 @@ type GovBrConfig struct {
 	// ResumeWebhookURL é o destino do POST de auto-resume. Vazio → loopback
 	// in-pod (http://localhost:<SERVER_PORT>/api/v1/message/webhook/user).
 	ResumeWebhookURL string `mapstructure:"GOVBR_RESUME_WEBHOOK_URL"`
+	// InitiateAuthToken é o token exigido em POST /api/v1/auth/govbr/initiate, no
+	// header X-Govbr-Initiate-Token (o Authorization já é o token da mesh do Istio).
+	// Separado do CALLBACK_AUTH_TOKEN (outbound). Vazio → a rota não exige token
+	// (só a mesh protege); configure-o.
+	InitiateAuthToken string `mapstructure:"GOVBR_INITIATE_AUTH_TOKEN"`
 }
 
 func (g GovBrConfig) AuthEndpoint() string {
@@ -623,6 +628,7 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("GOVBR_REDIS_URL")
 	_ = viper.BindEnv("GOVBR_AUTO_RESUME_ENABLED")
 	_ = viper.BindEnv("GOVBR_RESUME_WEBHOOK_URL")
+	_ = viper.BindEnv("GOVBR_INITIATE_AUTH_TOKEN")
 
 	// Data Relay
 	_ = viper.BindEnv("DATA_RELAY_ENABLED")

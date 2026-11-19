@@ -79,6 +79,10 @@ func NewGovBrCallbackHandler(
 	redisService RedisServiceInterface,
 	govbrRedisService RedisServiceInterface,
 ) *GovBrCallbackHandler {
+	if config.GovBr.InitiateAuthToken == "" {
+		logger.Warn("GOVBR_INITIATE_AUTH_TOKEN is not set: POST /api/v1/auth/govbr/initiate accepts calls without a per-call token")
+	}
+
 	return &GovBrCallbackHandler{
 		logger:            logger,
 		config:            config,
@@ -166,8 +170,8 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		return
 	}
 
-	if authState.State != "pending" {
-		if authState.State == "completed" {
+	if authState.State != govBrStatePending {
+		if authState.State == govBrStateCompleted {
 			logger.Debug("User clicked auth link again - checking if token still valid")
 
 			tokenStillValid := h.isTokenValid(ctx, authState.UserNumber)
@@ -186,6 +190,17 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 			c.HTML(http.StatusBadRequest, "govbr_auth_error.html", gin.H{
 				"error":       "token_expired",
 				"description": "Sua sessão expirou. Por favor, solicite um novo link de autenticação no WhatsApp.",
+				"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
+			})
+			return
+		}
+
+		if authState.State == govBrStateAwaitingConfirmation {
+			logger.Info("Callback reused while awaiting phone number confirmation")
+			c.HTML(http.StatusBadRequest, "govbr_auth_error.html", gin.H{
+				"error": "awaiting_confirmation",
+				"description": "Esta autenticação aguarda a confirmação do número na página aberta anteriormente. " +
+					"Se você a fechou, solicite um novo link de autenticação no WhatsApp.",
 				"ttl_minutes": h.config.GovBr.AuthStateTTL / 60,
 			})
 			return
@@ -232,9 +247,14 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		logger.WithError(err).Warn("Gov.br user info is incomplete")
 	}
 
-	// 6. Store tokens and user info in Redis with appropriate TTL
-	if err := h.storeTokens(ctx, authState.UserNumber, tokenResp, authState.ServiceContext, userInfo); err != nil {
-		logger.WithError(err).Error("Failed to store tokens in Redis")
+	// 6. Hold the tokens until the citizen confirms the WhatsApp number they
+	// will be bound to (DEV-187). Whoever called /initiate chose user_number;
+	// only the person who just logged in can confirm it, through the
+	// single-use token rendered in this page. Nothing is written to
+	// govbr_token:<phone> and no auto-resume fires before that.
+	confirmToken, err := h.createPendingConfirmation(ctx, authID, authState, tokenResp, userInfo)
+	if err != nil {
+		logger.WithError(err).Error("Failed to store pending Gov.br confirmation")
 		c.HTML(http.StatusInternalServerError, "govbr_auth_error.html", gin.H{
 			"error":       "storage_error",
 			"description": "Erro ao armazenar credenciais",
@@ -243,28 +263,19 @@ func (h *GovBrCallbackHandler) HandleCallback(c *gin.Context) {
 		return
 	}
 
-	// 7. Update auth state to "completed"
-	authState.State = "completed"
-	updatedStateJSON, _ := json.Marshal(authState)
-	// Keep state for a bit longer for audit/debugging
-	h.redisService.Set(ctx, redisKey, string(updatedStateJSON), 5*time.Minute)
+	// 7. Update auth state to "awaiting_confirmation"
+	authState.State = govBrStateAwaitingConfirmation
+	h.saveAuthState(ctx, authID, authState, h.confirmationTTL())
 
-	logger.Info("Gov.br authentication completed successfully")
+	logger.Info("Gov.br login completed; awaiting phone number confirmation")
 
-	// 7b. Auto-resume: re-injeta a solicitação original no pipeline inbound para
-	// o cidadão NÃO precisar mandar "ok". Best-effort — nunca falha o callback;
-	// se falhar, o cidadão ainda pode mandar uma mensagem (fallback manual).
-	// Em goroutine (contexto próprio dentro) pra não atrasar a página de sucesso
-	// se o inbound/RabbitMQ estiver lento.
-	go h.triggerAutoResume(authID, authState.UserNumber, authState.ServiceContext)
-
-	// 8. Render success page
-	serviceContext := authState.ServiceContext
-	serviceName := formatServiceName(serviceContext)
-
-	c.HTML(http.StatusOK, "govbr_auth_success.html", gin.H{
-		"user_number": maskPhoneNumber(authState.UserNumber),
-		"service":     serviceName,
+	// 8. Render the confirmation page (it carries a single-use secret: no cache)
+	c.Header("Cache-Control", "no-store")
+	c.HTML(http.StatusOK, "govbr_auth_confirm.html", gin.H{
+		"user_number":   maskPhoneForConfirmation(authState.UserNumber),
+		"service":       formatServiceName(authState.ServiceContext),
+		"confirm_token": confirmToken,
+		"ttl_minutes":   int(h.confirmationTTL() / time.Minute),
 	})
 }
 

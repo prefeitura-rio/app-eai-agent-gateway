@@ -214,6 +214,8 @@ func (s *Server) setupRoutes() {
 		govbr := auth.Group("/govbr")
 		{
 			govbr.GET("/callback", s.govBrCallbackHandler.HandleCallback)
+			// Citizen confirms the phone number shown by the callback page (DEV-187)
+			govbr.POST("/confirm", s.govBrCallbackHandler.HandleConfirm)
 		}
 	}
 	s.registerGovBrRedirectCallbackAlias()
@@ -275,6 +277,10 @@ func (s *Server) registerGovBrRedirectCallbackAlias() {
 
 	if strings.HasSuffix(callbackPath, "/auth/govbr/callback") {
 		s.router.GET(callbackPath, s.govBrCallbackHandler.HandleCallback)
+		// The confirmation form posts to the sibling path "confirm", relative to
+		// the callback URL, so the alias needs its confirm route too.
+		confirmPath := strings.TrimSuffix(callbackPath, "/callback") + "/confirm"
+		s.router.POST(confirmPath, s.govBrCallbackHandler.HandleConfirm)
 		s.logger.WithField("path", callbackPath).Info("Registered Gov.br callback alias from redirect URI")
 	}
 }
