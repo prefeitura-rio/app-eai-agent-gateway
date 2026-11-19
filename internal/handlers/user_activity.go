@@ -2,7 +2,9 @@ package handlers
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,6 +24,11 @@ type UserActivityHandler struct {
 	postgresService *services.PostgresService
 }
 
+// LastActivityTokenHeader carries the dedicated secret that, once
+// LAST_ACTIVITY_AUTH_TOKEN is configured, is required to query a user's last
+// activity. It is separate from Authorization, which the Istio mesh consumes.
+const LastActivityTokenHeader = "X-Last-Activity-Token"
+
 // NewUserActivityHandler creates a new user activity handler
 func NewUserActivityHandler(
 	logger *logrus.Logger,
@@ -29,6 +36,9 @@ func NewUserActivityHandler(
 	redisService RedisServiceInterface,
 	postgresService *services.PostgresService,
 ) *UserActivityHandler {
+	if config != nil && strings.TrimSpace(config.Security.LastActivityAuthToken) == "" {
+		logger.Warn("LAST_ACTIVITY_AUTH_TOKEN is not set: GET /api/v1/message/last-activity has no caller authentication")
+	}
 	return &UserActivityHandler{
 		logger:          logger,
 		config:          config,
@@ -43,13 +53,25 @@ func NewUserActivityHandler(
 //	@Description	Returns the timestamp when the user last sent a message (cached in Redis, fallback to PostgreSQL)
 //	@Tags			User Activity
 //	@Produce		json
-//	@Param			user_number	query		string								true	"User phone number (thread ID)"
-//	@Success		200			{object}	models.UserLastActivityResponse		"Last activity timestamp found"
-//	@Failure		400			{object}	map[string]interface{}				"Invalid request"
-//	@Failure		404			{object}	map[string]interface{}				"No message history found"
-//	@Failure		500			{object}	map[string]interface{}				"Internal server error"
+//	@Param			X-Last-Activity-Token	header		string								false	"Dedicated secret; required when LAST_ACTIVITY_AUTH_TOKEN is configured"
+//	@Param			user_number				query		string								true	"User phone number (thread ID)"
+//	@Success		200						{object}	models.UserLastActivityResponse		"Last activity timestamp found"
+//	@Failure		400						{object}	map[string]interface{}				"Invalid request"
+//	@Failure		401						{object}	map[string]interface{}				"Missing or invalid X-Last-Activity-Token"
+//	@Failure		404						{object}	map[string]interface{}				"No message history found"
+//	@Failure		500						{object}	map[string]interface{}				"Internal server error"
 //	@Router			/api/v1/message/last-activity [get]
 func (h *UserActivityHandler) HandleLastActivity(c *gin.Context) {
+	if !h.callerAuthorized(c) {
+		h.logger.WithField("request_id", c.GetString("request_id")).
+			Warn("Rejected last activity request: missing or invalid " + LastActivityTokenHeader)
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "Unauthorized",
+			"message": "missing or invalid " + LastActivityTokenHeader + " header",
+		})
+		return
+	}
+
 	userNumber := c.Query("user_number")
 	if userNumber == "" {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -128,4 +150,23 @@ func (h *UserActivityHandler) HandleLastActivity(c *gin.Context) {
 		Cached:               cached,
 		TTLSeconds:           ttlSeconds,
 	})
+}
+
+// callerAuthorized reports whether the request may read a user's last
+// activity. With LAST_ACTIVITY_AUTH_TOKEN unset every caller is allowed
+// (behaviour before DEV-237); once set, the X-Last-Activity-Token header must
+// match it, compared in constant time.
+func (h *UserActivityHandler) callerAuthorized(c *gin.Context) bool {
+	if h.config == nil {
+		return true
+	}
+	expected := strings.TrimSpace(h.config.Security.LastActivityAuthToken)
+	if expected == "" {
+		return true
+	}
+	provided := c.GetHeader(LastActivityTokenHeader)
+	if provided == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
 }

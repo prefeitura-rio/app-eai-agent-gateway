@@ -208,6 +208,11 @@ type SecurityConfig struct {
 	AllowedDomains      string `mapstructure:"SECURITY_ALLOWED_DOMAINS"`
 	BlockedDomains      string `mapstructure:"SECURITY_BLOCKED_DOMAINS"`
 	StrictMode          bool   `mapstructure:"SECURITY_STRICT_MODE"`
+
+	// LastActivityAuthToken, quando definido, passa a ser exigido no header
+	// X-Last-Activity-Token de GET /api/v1/message/last-activity. Vazio mantém
+	// a rota sem autenticação própria (compatível com o chamador atual).
+	LastActivityAuthToken string `mapstructure:"LAST_ACTIVITY_AUTH_TOKEN"`
 }
 
 // CallbackConfig configura o envio de callbacks. CALLBACK_ALLOWED_DOMAIN
@@ -602,6 +607,7 @@ func bindEnvironmentVariables() {
 	_ = viper.BindEnv("MAX_AGENT_ID_LENGTH")
 	_ = viper.BindEnv("ENABLE_CONTENT_FILTER")
 	_ = viper.BindEnv("SECURITY_STRICT_MODE")
+	_ = viper.BindEnv("LAST_ACTIVITY_AUTH_TOKEN")
 
 	// Callback
 	_ = viper.BindEnv("CALLBACK_ENABLED")
