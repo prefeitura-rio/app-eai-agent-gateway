@@ -93,6 +93,12 @@ const docTemplate = `{
                 "parameters": [
                     {
                         "type": "string",
+                        "description": "Dedicated secret; required when LAST_ACTIVITY_AUTH_TOKEN is configured",
+                        "name": "X-Last-Activity-Token",
+                        "in": "header"
+                    },
+                    {
+                        "type": "string",
                         "description": "User phone number (thread ID)",
                         "name": "user_number",
                         "in": "query",
@@ -108,6 +114,13 @@ const docTemplate = `{
                     },
                     "400": {
                         "description": "Invalid request",
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": true
+                        }
+                    },
+                    "401": {
+                        "description": "Missing or invalid X-Last-Activity-Token",
                         "schema": {
                             "type": "object",
                             "additionalProperties": true

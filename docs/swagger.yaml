@@ -237,6 +237,11 @@ paths:
       description: Returns the timestamp when the user last sent a message (cached
         in Redis, fallback to PostgreSQL)
       parameters:
+      - description: Dedicated secret; required when LAST_ACTIVITY_AUTH_TOKEN is
+          configured
+        in: header
+        name: X-Last-Activity-Token
+        type: string
       - description: User phone number (thread ID)
         in: query
         name: user_number
@@ -251,6 +256,11 @@ paths:
             $ref: '#/definitions/github_com_prefeitura-rio_app-eai-agent-gateway_internal_models.UserLastActivityResponse'
         "400":
           description: Invalid request
+          schema:
+            additionalProperties: true
+            type: object
+        "401":
+          description: Missing or invalid X-Last-Activity-Token
           schema:
             additionalProperties: true
             type: object
