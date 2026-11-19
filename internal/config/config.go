@@ -241,9 +241,10 @@ type GovBrConfig struct {
 	// ResumeWebhookURL é o destino do POST de auto-resume. Vazio → loopback
 	// in-pod (http://localhost:<SERVER_PORT>/api/v1/message/webhook/user).
 	ResumeWebhookURL string `mapstructure:"GOVBR_RESUME_WEBHOOK_URL"`
-	// InitiateAuthToken é o Bearer token exigido em POST /api/v1/auth/govbr/initiate
-	// (Authorization: Bearer <token>). Separado do CALLBACK_AUTH_TOKEN (outbound).
-	// Vazio → a rota não exige token (só a mesh protege); configure-o.
+	// InitiateAuthToken é o token exigido em POST /api/v1/auth/govbr/initiate, no
+	// header X-Govbr-Initiate-Token (o Authorization já é o token da mesh do Istio).
+	// Separado do CALLBACK_AUTH_TOKEN (outbound). Vazio → a rota não exige token
+	// (só a mesh protege); configure-o.
 	InitiateAuthToken string `mapstructure:"GOVBR_INITIATE_AUTH_TOKEN"`
 }
 

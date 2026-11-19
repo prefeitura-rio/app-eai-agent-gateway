@@ -29,33 +29,33 @@ type govBrInitiateResponse struct {
 	ExpiresIn int    `json:"expires_in"`
 }
 
-// initiateAuthorized checks the per-call Bearer token of POST /initiate.
+// govBrInitiateTokenHeader carries the per-call token of POST /initiate.
+// It is not Authorization: the Istio AuthorizationPolicy of the workload
+// already requires the mesh Bearer token in that header on every route, so a
+// dedicated token has to travel in a header of its own.
+const govBrInitiateTokenHeader = "X-Govbr-Initiate-Token"
+
+// initiateAuthorized checks the per-call token of POST /initiate.
 //
 // With GOVBR_INITIATE_AUTH_TOKEN unset the route keeps working without it
-// (only the mesh protects it); once set, the exact header
-// "Authorization: Bearer <token>" is required. The comparison runs in
-// constant time so the token cannot be guessed byte by byte.
-func (h *GovBrCallbackHandler) initiateAuthorized(authHeader string) bool {
+// (only the mesh protects it); once set, the header
+// "X-Govbr-Initiate-Token: <token>" must match exactly. The comparison runs
+// in constant time so the token cannot be guessed byte by byte.
+func (h *GovBrCallbackHandler) initiateAuthorized(provided string) bool {
 	expectedToken := h.config.GovBr.InitiateAuthToken
 	if expectedToken == "" {
 		return true
 	}
 
-	const bearerPrefix = "Bearer "
-	if !strings.HasPrefix(authHeader, bearerPrefix) {
-		return false
-	}
-	provided := strings.TrimPrefix(authHeader, bearerPrefix)
-
 	return subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) == 1
 }
 
 func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
-	if !h.initiateAuthorized(c.GetHeader("Authorization")) {
-		h.logger.WithField("handler", "govbr_initiate").Warn("Rejected Gov.br initiate: missing or invalid Authorization header")
+	if !h.initiateAuthorized(c.GetHeader(govBrInitiateTokenHeader)) {
+		h.logger.WithField("handler", "govbr_initiate").Warn("Rejected Gov.br initiate: missing or invalid " + govBrInitiateTokenHeader + " header")
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":   "unauthorized",
-			"message": "Missing or invalid Authorization header",
+			"message": "Missing or invalid " + govBrInitiateTokenHeader + " header",
 		})
 		return
 	}

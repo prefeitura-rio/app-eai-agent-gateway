@@ -197,12 +197,15 @@ func newGovBrFlow(t *testing.T, initiateToken string) *govBrFlow {
 	return f
 }
 
-func (f *govBrFlow) initiate(authHeader string, userNumber string) *httptest.ResponseRecorder {
+// initiate calls /initiate as the in-cluster caller does: the mesh token in
+// Authorization and the dedicated token, when given, in X-Govbr-Initiate-Token.
+func (f *govBrFlow) initiate(initiateToken string, userNumber string) *httptest.ResponseRecorder {
 	body, _ := json.Marshal(map[string]string{"user_number": userNumber, "service_context": testServiceContext})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/govbr/initiate", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	if authHeader != "" {
-		req.Header.Set("Authorization", authHeader)
+	req.Header.Set("Authorization", "Bearer mesh-token-synthetic")
+	if initiateToken != "" {
+		req.Header.Set(govBrInitiateTokenHeader, initiateToken)
 	}
 	rec := httptest.NewRecorder()
 	f.router.ServeHTTP(rec, req)
@@ -212,7 +215,7 @@ func (f *govBrFlow) initiate(authHeader string, userNumber string) *httptest.Res
 // startAuth runs a successful /initiate and returns the OAuth state.
 func (f *govBrFlow) startAuth() string {
 	f.t.Helper()
-	rec := f.initiate("Bearer "+testInitiateToken, testVictimNumber)
+	rec := f.initiate(testInitiateToken, testVictimNumber)
 	if rec.Code != http.StatusOK {
 		f.t.Fatalf("initiate: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -285,19 +288,30 @@ func confirmTokenFrom(t *testing.T, page string) string {
 func TestHandleInitiate_RequiresTokenWhenConfigured(t *testing.T) {
 	f := newGovBrFlow(t, testInitiateToken)
 
-	for name, header := range map[string]string{
-		"missing":      "",
-		"wrong":        "Bearer not-the-token",
-		"prefix only":  "Bearer ",
-		"token suffix": "Bearer " + testInitiateToken + "x",
-		"no scheme":    testInitiateToken,
-		"basic scheme": "Basic " + testInitiateToken,
+	for name, token := range map[string]string{
+		"missing":       "",
+		"wrong":         "not-the-token",
+		"token suffix":  testInitiateToken + "x",
+		"token prefix":  testInitiateToken[:len(testInitiateToken)-1],
+		"bearer scheme": "Bearer " + testInitiateToken,
 	} {
-		rec := f.initiate(header, testVictimNumber)
+		rec := f.initiate(token, testVictimNumber)
 		if rec.Code != http.StatusUnauthorized {
-			t.Fatalf("%s Authorization: expected 401, got %d", name, rec.Code)
+			t.Fatalf("%s %s: expected 401, got %d", name, govBrInitiateTokenHeader, rec.Code)
 		}
 	}
+
+	// The dedicated token in Authorization (where the mesh token goes) is not accepted.
+	body, _ := json.Marshal(map[string]string{"user_number": testVictimNumber, "service_context": testServiceContext})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/govbr/initiate", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+testInitiateToken)
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("token only in Authorization: expected 401, got %d", rec.Code)
+	}
+
 	if keys := f.mainRedis.keysWithPrefix("govbr_auth"); len(keys) != 0 {
 		t.Fatalf("unauthorized initiate must not touch Redis, found %v", keys)
 	}
