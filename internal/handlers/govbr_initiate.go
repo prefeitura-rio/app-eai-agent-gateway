@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -28,7 +29,37 @@ type govBrInitiateResponse struct {
 	ExpiresIn int    `json:"expires_in"`
 }
 
+// initiateAuthorized checks the per-call Bearer token of POST /initiate.
+//
+// With GOVBR_INITIATE_AUTH_TOKEN unset the route keeps working without it
+// (only the mesh protects it); once set, the exact header
+// "Authorization: Bearer <token>" is required. The comparison runs in
+// constant time so the token cannot be guessed byte by byte.
+func (h *GovBrCallbackHandler) initiateAuthorized(authHeader string) bool {
+	expectedToken := h.config.GovBr.InitiateAuthToken
+	if expectedToken == "" {
+		return true
+	}
+
+	const bearerPrefix = "Bearer "
+	if !strings.HasPrefix(authHeader, bearerPrefix) {
+		return false
+	}
+	provided := strings.TrimPrefix(authHeader, bearerPrefix)
+
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expectedToken)) == 1
+}
+
 func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
+	if !h.initiateAuthorized(c.GetHeader("Authorization")) {
+		h.logger.WithField("handler", "govbr_initiate").Warn("Rejected Gov.br initiate: missing or invalid Authorization header")
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":   "unauthorized",
+			"message": "Missing or invalid Authorization header",
+		})
+		return
+	}
+
 	var req govBrInitiateRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
@@ -99,7 +130,7 @@ func (h *GovBrCallbackHandler) HandleInitiate(c *gin.Context) {
 		CodeVerifier:   codeVerifier,
 		ServiceContext: req.ServiceContext,
 		CreatedAt:      time.Now().UTC().Format(time.RFC3339),
-		State:          "pending",
+		State:          govBrStatePending,
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)

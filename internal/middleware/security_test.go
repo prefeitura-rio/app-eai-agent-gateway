@@ -24,8 +24,9 @@ func TestSecurityHeadersAllowsGovBrCallbackInlineStyles(t *testing.T) {
 
 	// Pin the full policy: a regression in any directive (dropping
 	// default-src 'none', img-src data: for the favicon, the inline-style
-	// allowance, or the anti-clickjacking guards) must fail the test.
-	const wantCSP = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	// allowance, the same-origin-only form target of the phone number
+	// confirmation, or the anti-clickjacking guards) must fail the test.
+	const wantCSP = "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 	if got := rec.Header().Get("Content-Security-Policy"); got != wantCSP {
 		t.Fatalf("expected gov.br callback CSP %q, got %q", wantCSP, got)
 	}

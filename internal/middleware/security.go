@@ -31,8 +31,10 @@ func SecurityHeaders() gin.HandlerFunc {
 		} else if strings.HasPrefix(path, "/auth/govbr/") {
 			// Gov.br callback renders first-party HTML templates with inline CSS.
 			// Keep fetches locked down while allowing the template stylesheet.
+			// form-action 'self': the callback page posts the phone number
+			// confirmation to /auth/govbr/confirm (DEV-187), never elsewhere.
 			c.Header("X-Frame-Options", "DENY")
-			c.Header("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+			c.Header("Content-Security-Policy", "default-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		} else {
 			// Strict CSP for API endpoints
 			c.Header("X-Frame-Options", "DENY")
