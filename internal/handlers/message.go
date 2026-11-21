@@ -489,7 +489,8 @@ func (h *MessageHandler) HandleMessageResponse(c *gin.Context) {
 		// Try to get error details from Redis (could be stored by worker)
 		errorKey := "task:error:" + req.MessageID
 		if errorMsg, err := h.redisService.Get(ctxTimeout, errorKey); err == nil {
-			response.Error = &errorMsg
+			summary := pii.SummarizeErrorText(errorMsg)
+			response.Error = &summary
 		}
 	}
 
@@ -582,7 +583,8 @@ func (h *MessageHandler) HandleDebugTaskStatus(c *gin.Context) {
 	}
 
 	if errorMsg, err := h.redisService.Get(ctx, "task:error:"+messageID); err == nil {
-		debugInfo.LastError = &errorMsg
+		summary := pii.SummarizeErrorText(errorMsg)
+		debugInfo.LastError = &summary
 	}
 
 	if createdAt, err := h.redisService.Get(ctx, "task:created:"+messageID); err == nil {

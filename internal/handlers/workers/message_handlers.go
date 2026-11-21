@@ -21,6 +21,19 @@ import (
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
 
+// taskErrorStore is the part of RedisService that storeTaskError needs.
+type taskErrorStore interface {
+	Set(ctx context.Context, key string, value string, ttl time.Duration) error
+}
+
+// storeTaskError records why a task failed under task:error:<id>. The value is
+// returned by /message/response and /message/debug/task-status, so it is the
+// summary (HTTP status, Google status enum, URL host only), never the raw error,
+// which may carry the Agent Engine body or the citizen's media URL.
+func storeTaskError(ctx context.Context, store taskErrorStore, messageID string, err error, ttl time.Duration) error {
+	return store.Set(ctx, "task:error:"+messageID, pii.ErrorSummary(err), ttl)
+}
+
 // MessageHandlerDependencies contains dependencies needed for message processing
 type MessageHandlerDependencies struct {
 	Logger             *logrus.Logger
@@ -178,8 +191,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 			logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Failed to process user message")
 
 			// Store error in Redis
-			errorKey := "task:error:" + queueMsg.ID
-			if redisErr := deps.RedisService.Set(ctx, errorKey, err.Error(), deps.Config.Redis.TaskStatusTTL); redisErr != nil {
+			if redisErr := storeTaskError(ctx, deps.RedisService, queueMsg.ID, err, deps.Config.Redis.TaskStatusTTL); redisErr != nil {
 				logger.WithError(redisErr).Error("Failed to store error in Redis")
 			}
 

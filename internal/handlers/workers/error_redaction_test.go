@@ -1,9 +1,11 @@
 package workers
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 
@@ -83,5 +85,54 @@ func TestErrorSummaryKeepsRetryClassification(t *testing.T) {
 	}
 	if got := classifyTranscriptionError(transcriptionErr); got != "network_error" {
 		t.Fatalf("classifyTranscriptionError() = %q, want network_error", got)
+	}
+}
+
+type recordingTaskErrorStore struct {
+	key, value string
+	ttl        time.Duration
+}
+
+func (s *recordingTaskErrorStore) Set(_ context.Context, key string, value string, ttl time.Duration) error {
+	s.key, s.value, s.ttl = key, value, ttl
+	return nil
+}
+
+// TestStoreTaskError_StoresSummaryNotRawError prova que o worker grava em
+// task:error o resumo do erro (DEV-453): esse valor volta ao chamador em
+// /message/response e /message/debug/task-status.
+func TestStoreTaskError_StoresSummaryNotRawError(t *testing.T) {
+	body := fmt.Sprintf(`{"error":{"code":400,"message":"Error Details: %s","status":"FAILED_PRECONDITION"}}`, redactionCitizenText)
+	cases := map[string]struct {
+		err  error
+		want string
+	}{
+		"agent engine body": {
+			err:  fmt.Errorf("failed to get AI response: %w", fmt.Errorf("non-2xx response: %d - %s", 400, body)),
+			want: "failed to get AI response: non-2xx response: 400 (FAILED_PRECONDITION)",
+		},
+		"media url": {
+			err:  fmt.Errorf("audio transcription failed: %w", fmt.Errorf("Get %q: dial tcp: connection refused", redactionAudioURL)),
+			want: `audio transcription failed: Get "https://cdn.example.invalid/[omitido]": dial tcp: connection refused`,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := &recordingTaskErrorStore{}
+			if err := storeTaskError(context.Background(), store, "msg-1", tc.err, time.Minute); err != nil {
+				t.Fatalf("storeTaskError: %v", err)
+			}
+			if store.key != "task:error:msg-1" || store.ttl != time.Minute {
+				t.Fatalf("chave/ttl inesperados: %q %v", store.key, store.ttl)
+			}
+			if store.value != tc.want {
+				t.Fatalf("valor gravado = %q, esperado %q", store.value, tc.want)
+			}
+			for _, f := range []string{redactionCitizenText, "000.000.000-00", "Error Details", redactionAudioURL, "5521999990000", "SEGREDO123", "/whatsapp/"} {
+				if strings.Contains(store.value, f) {
+					t.Fatalf("task:error vazou %q: %q", f, store.value)
+				}
+			}
+		})
 	}
 }

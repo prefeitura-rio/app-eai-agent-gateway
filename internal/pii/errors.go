@@ -52,8 +52,15 @@ func ErrorSummary(err error) string {
 	if err == nil {
 		return ""
 	}
+	return SummarizeErrorText(err.Error())
+}
 
-	summary := err.Error()
+// SummarizeErrorText aplica a regra de ErrorSummary a um texto de erro já
+// guardado (por exemplo, o valor de task:error no Redis gravado antes desta
+// regra existir), para que nada que volte na API carregue o corpo de uma
+// resposta remota nem uma URL completa.
+func SummarizeErrorText(text string) string {
+	summary := text
 	for _, pattern := range remotePayloadPatterns {
 		loc := pattern.FindStringSubmatchIndex(summary)
 		if loc == nil {
