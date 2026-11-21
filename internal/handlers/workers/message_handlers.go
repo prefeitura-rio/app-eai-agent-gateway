@@ -552,54 +552,11 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	// Parse Google's raw JSON response immediately after getting it from Google Agent Engine
 	logger.WithField("raw_response_length", len(agentResponse.Content)).Debug("Processing Google Agent Engine response")
 
-	// Clean the JSON string first to handle newlines, whitespace, and BOM issues
-	cleanedResponse := strings.TrimSpace(agentResponse.Content)
-	cleanedBytes := []byte(cleanedResponse)
-
-	// Strip BOM if present (fixes "invalid character 'â'" errors)
-	cleanedBytes, hadBOM := stripBOM(cleanedBytes)
-	if hadBOM {
-		logger.WithField("bom_type", "detected").Debug("Stripped BOM from Google Agent Engine response")
-	}
-
-	cleanedResponse = string(cleanedBytes)
-	cleanedResponse = strings.ReplaceAll(cleanedResponse, "\n", "")
-	cleanedResponse = strings.ReplaceAll(cleanedResponse, "\r", "")
-
-	var parsedResponse map[string]interface{}
-	if err := json.Unmarshal([]byte(cleanedResponse), &parsedResponse); err != nil {
-		// Response might be a plain text error message (e.g., timeout graceful error)
-		// Convert it to the expected JSON structure
-		// Get preview of response (first 100 chars or full string if shorter)
-		previewLen := 100
-		if len(cleanedResponse) < previewLen {
-			previewLen = len(cleanedResponse)
-		}
-
-		logger.WithFields(logrus.Fields{
-			"error":            err.Error(),
-			"response_length":  len(cleanedResponse),
-			"response_preview": cleanedResponse[:previewLen],
-		}).Warn("Response is not valid JSON, treating as plain text error message")
-
-		// Create a simple message structure with the error text
-		parsedResponse = map[string]interface{}{
-			"output": map[string]interface{}{
-				"messages": []interface{}{
-					map[string]interface{}{
-						"type":    "ai",
-						"content": cleanedResponse,
-						"id":      fmt.Sprintf("error-%d", time.Now().UnixNano()),
-					},
-				},
-			},
-		}
-
-		if deps.OTelWorkerWrapper != nil && responseSpan != nil {
-			responseSpan.SetAttributes(
-				attribute.String("response.result", "plain_text_fallback"),
-				attribute.String("response.type", "error_message"))
-		}
+	parsedResponse, plainText := parseAgentEngineContent(logger, agentResponse.Content)
+	if plainText && deps.OTelWorkerWrapper != nil && responseSpan != nil {
+		responseSpan.SetAttributes(
+			attribute.String("response.result", "plain_text_fallback"),
+			attribute.String("response.type", "error_message"))
 	}
 
 	// Extract the 'output' field which contains the messages
@@ -676,6 +633,52 @@ func processUserMessage(ctx context.Context, msg *models.QueueMessage, deps *Mes
 	}).Info("Successfully processed user message with full transformation pipeline")
 
 	return processedResponse, nil
+}
+
+// parseAgentEngineContent turns the raw content returned by the Agent Engine
+// into the response map: it trims whitespace, strips a BOM and line breaks and
+// decodes the JSON. Content that is not JSON (e.g. the graceful timeout message)
+// is wrapped as a single AI message and plainText is true.
+//
+// The content may repeat the citizen's conversation, so the log carries only
+// metadata (length, JSON error kind), never the text itself (DEV-721).
+func parseAgentEngineContent(logger *logrus.Entry, content string) (parsed map[string]interface{}, plainText bool) {
+	// Clean the JSON string first to handle newlines, whitespace, and BOM issues
+	cleanedBytes := []byte(strings.TrimSpace(content))
+
+	// Strip BOM if present (fixes "invalid character 'â'" errors)
+	cleanedBytes, hadBOM := stripBOM(cleanedBytes)
+	if hadBOM {
+		logger.WithField("bom_type", "detected").Debug("Stripped BOM from Google Agent Engine response")
+	}
+
+	cleanedResponse := string(cleanedBytes)
+	cleanedResponse = strings.ReplaceAll(cleanedResponse, "\n", "")
+	cleanedResponse = strings.ReplaceAll(cleanedResponse, "\r", "")
+
+	err := json.Unmarshal([]byte(cleanedResponse), &parsed)
+	if err == nil {
+		return parsed, false
+	}
+
+	// Response might be a plain text error message (e.g., timeout graceful error)
+	// Convert it to the expected JSON structure
+	logger.WithFields(logrus.Fields{
+		"error_type":      pii.JSONErrorKind(err),
+		"response_length": len(cleanedResponse),
+	}).Warn("Response is not valid JSON, treating as plain text error message")
+
+	return map[string]interface{}{
+		"output": map[string]interface{}{
+			"messages": []interface{}{
+				map[string]interface{}{
+					"type":    "ai",
+					"content": cleanedResponse,
+					"id":      fmt.Sprintf("error-%d", time.Now().UnixNano()),
+				},
+			},
+		},
+	}, true
 }
 
 // transformGoogleAgentMessages transforms Google Agent Engine messages to Python API format

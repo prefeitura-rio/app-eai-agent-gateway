@@ -336,3 +336,51 @@ func TestConsumerLogs_OmitResponseBody(t *testing.T) {
 		})
 	}
 }
+
+// TestQueryReasoningEngineDirectResponseLog_OmitsContent prova que a resposta
+// direta do Agent Engine (sem operação para acompanhar) não vai ao log, nem em
+// nível Debug: só a quantidade de campos e o tamanho (DEV-721). O conteúdo
+// continua chegando ao chamador.
+func TestQueryReasoningEngineDirectResponseLog_OmitsContent(t *testing.T) {
+	body := fmt.Sprintf(`{"output":"Resposta do agente: %s","extra":{"history":"%s"}}`, redactionCitizenText, redactionMediaURL)
+
+	logger, hook := logtest.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+
+	svc := newStubAgentEngineService(http.StatusOK, body)
+	svc.logger = logger
+	svc.rateLimiter = allowRateLimiter{}
+	svc.redisService = threadRedisStub{}
+	svc.tokenSource = oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token-falso"})
+	svc.config.GoogleAgentEngine.ReasoningEngineID = "123"
+
+	resp, err := svc.SendMessage(context.Background(), "thread-teste", "ola", nil, nil)
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if resp == nil || resp.Content != "Resposta do agente: "+redactionCitizenText {
+		t.Fatalf("o conteúdo deve chegar ao chamador: %+v", resp)
+	}
+
+	found := false
+	entries := make([]logrus.Entry, 0, len(hook.AllEntries()))
+	for _, e := range hook.AllEntries() {
+		entries = append(entries, *e)
+		if e.Message == "No operation returned, checking for direct response" {
+			found = true
+			if got := e.Data["response_fields"]; got != 2 {
+				t.Fatalf("response_fields = %v, esperado 2", got)
+			}
+			if got, ok := e.Data["response_size"].(int); !ok || got <= 0 {
+				t.Fatalf("response_size = %v, esperado inteiro positivo", e.Data["response_size"])
+			}
+			if _, ok := e.Data["response"]; ok {
+				t.Fatalf("o campo response não deve ser logado")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("log Debug da resposta direta ausente")
+	}
+	assertLogsOmit(t, entries, redactionCitizenText, "000.000.000-00", "Rua Ficticia", "Resposta do agente", redactionMediaURL, "SEGREDO123")
+}
