@@ -9,34 +9,41 @@ import (
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
 
+// unmatchedEndpoint is the endpoint label of a request that matched no route.
+// The raw path is never used as a label: any client can send arbitrary paths,
+// which would create an unbounded number of series.
+const unmatchedEndpoint = "unmatched"
+
 // MetricsMiddleware provides HTTP request metrics collection
 func MetricsMiddleware(metricsService *services.PrometheusMetricsService) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 
-		// Extract endpoint path and method
+		// Extract endpoint route template and method
 		method := c.Request.Method
 		endpoint := c.FullPath()
 		if endpoint == "" {
-			endpoint = c.Request.URL.Path
+			endpoint = unmatchedEndpoint
 		}
 
-		// Increment in-flight requests
+		// Increment in-flight requests; the decrement is deferred so that it
+		// also runs when a later handler panics.
 		metricsService.IncrementHTTPInFlight(method, endpoint)
+		defer metricsService.DecrementHTTPInFlight(method, endpoint)
 
 		// Process request
 		c.Next()
 
-		// Calculate duration and response size
+		// Calculate duration and response size (Size is -1 when nothing was written)
 		duration := time.Since(start)
 		statusCode := strconv.Itoa(c.Writer.Status())
 		responseSize := int64(c.Writer.Size())
+		if responseSize < 0 {
+			responseSize = 0
+		}
 
 		// Record metrics
 		metricsService.RecordHTTPRequest(method, endpoint, statusCode, duration, responseSize)
-
-		// Decrement in-flight requests
-		metricsService.DecrementHTTPInFlight(method, endpoint)
 	}
 }
 

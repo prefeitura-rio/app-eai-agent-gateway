@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
 	swaggerFiles "github.com/swaggo/files"
@@ -32,8 +33,12 @@ type Server struct {
 	redisService         *services.RedisService
 	rabbitMQService      *services.RabbitMQService
 	postgresService      *services.PostgresService
-	otelService          *services.OTelService // Optional OTel service
+	otelService          *services.OTelService              // Optional OTel service
+	metricsService       *services.PrometheusMetricsService // HTTP metrics; nil when metrics are disabled
 }
+
+// metricsNamespace is the Prometheus namespace of the gateway's own metrics.
+const metricsNamespace = "eai_gateway"
 
 // NewServer creates a new HTTP server
 func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.OTelService) (*Server, error) {
@@ -117,6 +122,12 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 	server.healthHandler.AddChecker("rabbitmq", rabbitMQService)
 	server.healthHandler.AddChecker("postgres", postgresService)
 
+	// HTTP metrics, exposed on the metrics endpoint
+	server.metricsService, err = newMetricsService(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	server.setupMiddleware()
 	server.setupRoutes()
 	server.setupHTTPServer()
@@ -128,6 +139,12 @@ func NewServer(cfg *config.Config, logger *logrus.Logger, otelService *services.
 func (s *Server) setupMiddleware() {
 	// Request ID middleware (must be first)
 	s.router.Use(middleware.RequestID())
+
+	// HTTP metrics middleware (before Recovery, so a recovered panic is
+	// recorded with the status Recovery writes)
+	if s.metricsService != nil {
+		s.router.Use(middleware.MetricsMiddleware(s.metricsService))
+	}
 
 	// Recovery middleware
 	s.router.Use(middleware.Recovery(s.logger))
@@ -171,7 +188,7 @@ func (s *Server) setupRoutes() {
 
 	// Metrics endpoint (if enabled)
 	if s.config.Observability.MetricsEnabled {
-		s.router.GET(s.config.Observability.MetricsPath, gin.WrapH(promhttp.Handler()))
+		s.router.GET(s.config.Observability.MetricsPath, gin.WrapH(metricsHandler(s.metricsService)))
 	}
 
 	// Swagger documentation endpoint
@@ -283,6 +300,33 @@ func (s *Server) registerGovBrRedirectCallbackAlias() {
 		s.router.POST(confirmPath, s.govBrCallbackHandler.HandleConfirm)
 		s.logger.WithField("path", callbackPath).Info("Registered Gov.br callback alias from redirect URI")
 	}
+}
+
+// newMetricsService creates the HTTP metrics service, or returns nil when
+// metrics are disabled.
+func newMetricsService(cfg *config.Config) (*services.PrometheusMetricsService, error) {
+	if !cfg.Observability.MetricsEnabled {
+		return nil, nil
+	}
+	metricsService, err := services.NewPrometheusMetricsService(services.PrometheusConfig{Namespace: metricsNamespace})
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Prometheus metrics service: %w", err)
+	}
+	return metricsService, nil
+}
+
+// metricsHandler serves the global Prometheus registry (Go and process
+// collectors and the package-level metrics) together with the registry of the
+// HTTP metrics service, when there is one.
+func metricsHandler(metricsService *services.PrometheusMetricsService) http.Handler {
+	if metricsService == nil {
+		return promhttp.Handler()
+	}
+	gatherers := prometheus.Gatherers{prometheus.DefaultGatherer, metricsService.GetPrometheusRegistry()}
+	return promhttp.InstrumentMetricHandler(
+		prometheus.DefaultRegisterer,
+		promhttp.HandlerFor(gatherers, promhttp.HandlerOpts{}),
+	)
 }
 
 // setupHTTPServer configures the HTTP server
