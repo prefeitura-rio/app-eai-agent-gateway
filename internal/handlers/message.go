@@ -360,10 +360,12 @@ func (h *MessageHandler) HandleHistoryUpdateWebhook(c *gin.Context) {
 
 	threadID, err := h.googleAgentService.GetOrCreateThread(ctxTimeout, req.UserNumber)
 	if err != nil {
-		logger.WithError(err).Error("Failed to get or create thread")
+		// O erro do Agent Engine embute o corpo remoto, que pode repetir a
+		// conversa do cidadão: só o resumo vai ao log e nada dele à resposta.
+		logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Failed to get or create thread")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to get or create thread",
-			"message": err.Error(),
+			"message": "Failed to get or create conversation thread",
 		})
 		return
 	}
@@ -375,18 +377,33 @@ func (h *MessageHandler) HandleHistoryUpdateWebhook(c *gin.Context) {
 	// Pass custom reasoning_engine_id if provided in the request
 	resp, err := h.googleAgentService.SendHistoryUpdate(ctxTimeout, threadID, req.Messages, req.ReasoningEngineID)
 	if err != nil {
-		logger.WithError(err).Error("Failed to send history update")
+		logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Failed to send history update")
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to update history",
-			"message": err.Error(),
+			"message": "Failed to send history update to the agent engine",
 		})
 		return
 	}
 
-	logger.WithField("response", resp).Info("History update processed successfully")
+	// A resposta do Agent Engine pode repetir o histórico do cidadão: o log
+	// leva só a quantidade de campos e o tamanho.
+	logger.WithFields(historyResponseLogFields(resp)).Info("History update processed successfully")
 
 	// Return the response directly from Google Agent Engine
 	c.JSON(http.StatusOK, resp)
+}
+
+// historyResponseLogFields descreve a resposta do Agent Engine sem o conteúdo:
+// quantidade de campos e tamanho do JSON em bytes (-1 se não serializa).
+func historyResponseLogFields(resp map[string]interface{}) logrus.Fields {
+	size := -1
+	if encoded, err := json.Marshal(resp); err == nil {
+		size = len(encoded)
+	}
+	return logrus.Fields{
+		"response_fields": len(resp),
+		"response_size":   size,
+	}
 }
 
 // HandleMessageResponse handles polling for message processing results
