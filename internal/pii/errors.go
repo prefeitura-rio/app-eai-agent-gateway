@@ -1,6 +1,9 @@
 package pii
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/url"
 	"regexp"
 	"strings"
@@ -102,6 +105,30 @@ func URLHost(raw string) string {
 		return unknownURLHost
 	}
 	return parsed.Host
+}
+
+// JSONErrorKind classifica um erro de decodificação JSON num enum curto,
+// seguro para log: "syntax", "type_mismatch", "unexpected_end" ou "other"
+// ("" para nil). A mensagem do erro em si não vai ao log porque a de sintaxe
+// cita um caractere do texto e a de tipo, o valor e o campo.
+func JSONErrorKind(err error) string {
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		return "unexpected_end"
+	case errors.As(err, &syntaxErr):
+		if syntaxErr.Error() == "unexpected end of JSON input" {
+			return "unexpected_end"
+		}
+		return "syntax"
+	case errors.As(err, &typeErr):
+		return "type_mismatch"
+	default:
+		return "other"
+	}
 }
 
 // schemeOf devolve o esquema de uma URL que url.Parse recusou.

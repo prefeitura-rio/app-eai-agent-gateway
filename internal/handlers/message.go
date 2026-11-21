@@ -468,9 +468,10 @@ func (h *MessageHandler) HandleMessageResponse(c *gin.Context) {
 			// The result is already processed by the worker and contains the final ProcessedMessageData
 			var processedData models.ProcessedMessageData
 			if err := json.Unmarshal([]byte(result), &processedData); err != nil {
+				// The result carries the agent's answer, which may repeat the
+				// citizen's conversation: log only metadata (DEV-721).
 				logger.WithFields(logrus.Fields{
-					"error":         err.Error(),
-					"raw_result":    result,
+					"error_type":    pii.JSONErrorKind(err),
 					"result_length": len(result),
 				}).Error("Failed to parse processed result from worker")
 				c.JSON(http.StatusInternalServerError, gin.H{

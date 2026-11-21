@@ -1,6 +1,7 @@
 package pii
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -156,5 +157,31 @@ func TestSummarizeErrorText_MatchesErrorSummary(t *testing.T) {
 				t.Fatalf("resumo vazou %q: %q", f, got)
 			}
 		}
+	}
+}
+
+func TestJSONErrorKind(t *testing.T) {
+	var target map[string]interface{}
+	decode := func(text string) error { return json.Unmarshal([]byte(text), &target) }
+
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "nil", err: nil, want: ""},
+		{name: "texto puro", err: decode("meu CPF e 000.000.000-00"), want: "syntax"},
+		{name: "vazio", err: decode(""), want: "unexpected_end"},
+		{name: "truncado", err: decode(`{"a":"000.000.000-00`), want: "unexpected_end"},
+		{name: "tipo diferente", err: decode(`["000.000.000-00"]`), want: "type_mismatch"},
+		{name: "embrulhado", err: fmt.Errorf("parse: %w", decode("x")), want: "syntax"},
+		{name: "outro", err: errors.New("boom"), want: "other"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := JSONErrorKind(tt.err); got != tt.want {
+				t.Fatalf("JSONErrorKind() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

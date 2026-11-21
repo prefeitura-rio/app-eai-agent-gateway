@@ -576,9 +576,13 @@ func (s *GoogleAgentEngineService) queryReasoningEngine(ctx context.Context, thr
 		if response, ok := resp["response"]; ok {
 			return s.extractContentFromResponse(response)
 		}
-		// Log the response for debugging
+		// The response may repeat the citizen's conversation: log only its
+		// shape, never its content (DEV-721).
 		respBytes, _ := json.Marshal(resp)
-		s.logger.WithField("response", string(respBytes)).Debug("No operation returned, checking for direct response")
+		s.logger.WithFields(logrus.Fields{
+			"response_fields": len(resp),
+			"response_size":   len(respBytes),
+		}).Debug("No operation returned, checking for direct response")
 		return s.extractContentFromResponse(resp)
 	}
 
