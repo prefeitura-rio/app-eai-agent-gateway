@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/sirupsen/logrus"
@@ -345,8 +346,9 @@ func (s *GoogleAgentEngineService) SendMessage(ctx context.Context, threadID str
 	updatedData, _ := json.Marshal(threadInfo)
 	_ = s.redisService.SetValue(ctx, threadKey, string(updatedData), s.config.Redis.AgentIDCacheTTL)
 
-	// Generate response message ID
-	messageID := fmt.Sprintf("msg_%s_%d", threadID, time.Now().UnixNano())
+	// Generate response message ID. Sem o thread ID: ele é o telefone do
+	// cidadão, e o id vai para logs e para o resultado da tarefa (DEV-731).
+	messageID := "msg_" + uuid.NewString()
 
 	duration := time.Since(start)
 

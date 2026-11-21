@@ -384,3 +384,70 @@ func TestQueryReasoningEngineDirectResponseLog_OmitsContent(t *testing.T) {
 	}
 	assertLogsOmit(t, entries, redactionCitizenText, "000.000.000-00", "Rua Ficticia", "Resposta do agente", redactionMediaURL, "SEGREDO123")
 }
+
+// TestSendMessageMessageID_OmitsPhone prova que o message_id gerado pelo
+// SendMessage não carrega o thread ID, que é o telefone do cidadão: nem o log
+// Info "Message processed successfully", nem AgentResponse.MessageID (que segue
+// para os logs do formatador e do worker e para o resultado da tarefa), nem os
+// logs do formatador com essa resposta (DEV-731).
+func TestSendMessageMessageID_OmitsPhone(t *testing.T) {
+	const phone = "5521900000000" // sintético
+
+	logger, hook := logtest.NewNullLogger()
+	logger.SetLevel(logrus.DebugLevel)
+
+	svc := newStubAgentEngineService(http.StatusOK, `{"output":"ok"}`)
+	svc.logger = logger
+	svc.rateLimiter = allowRateLimiter{}
+	svc.redisService = threadRedisStub{}
+	svc.tokenSource = oauth2.StaticTokenSource(&oauth2.Token{AccessToken: "token-falso"})
+	svc.config.GoogleAgentEngine.ReasoningEngineID = "123"
+
+	first, err := svc.SendMessage(context.Background(), phone, "ola", nil, nil)
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	second, err := svc.SendMessage(context.Background(), phone, "ola", nil, nil)
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+
+	for _, resp := range []string{first.MessageID, second.MessageID} {
+		if !strings.HasPrefix(resp, "msg_") || len(resp) <= len("msg_") {
+			t.Fatalf("MessageID = %q, esperado prefixo msg_ seguido de um id", resp)
+		}
+		if strings.Contains(resp, phone) {
+			t.Fatalf("MessageID %q carrega o telefone", resp)
+		}
+	}
+	if first.MessageID == second.MessageID {
+		t.Fatalf("MessageID repetido entre chamadas: %q", first.MessageID)
+	}
+	if first.ThreadID != phone {
+		t.Fatalf("ThreadID = %q, esperado o thread original", first.ThreadID)
+	}
+
+	formatter := &MessageFormatterService{config: &config.Config{}, logger: logger}
+	if _, err := formatter.FormatForWhatsApp(context.Background(), first); err != nil {
+		t.Fatalf("FormatForWhatsApp: %v", err)
+	}
+
+	found := 0
+	entries := make([]logrus.Entry, 0, len(hook.AllEntries()))
+	for _, e := range hook.AllEntries() {
+		entries = append(entries, *e)
+		if e.Message == "Message processed successfully" {
+			found++
+			if got := e.Data["thread_id"]; got != pii.MaskPhone(phone) {
+				t.Fatalf("thread_id = %v, esperado mascarado", got)
+			}
+			if got, ok := e.Data["message_id"].(string); !ok || !strings.HasPrefix(got, "msg_") {
+				t.Fatalf("message_id = %v, esperado msg_<id>", e.Data["message_id"])
+			}
+		}
+	}
+	if found != 2 {
+		t.Fatalf("esperados 2 logs Message processed successfully, vieram %d", found)
+	}
+	assertLogsOmit(t, entries, phone)
+}
