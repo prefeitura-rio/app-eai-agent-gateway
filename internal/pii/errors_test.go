@@ -131,3 +131,30 @@ func TestURLHost(t *testing.T) {
 		})
 	}
 }
+
+// TestSummarizeErrorText_MatchesErrorSummary garante que o texto já guardado
+// (task:error gravado antes de DEV-453) recebe a mesma redação do erro vivo, e
+// que resumir duas vezes não muda o resultado.
+func TestSummarizeErrorText_MatchesErrorSummary(t *testing.T) {
+	googleBody := fmt.Sprintf(`{"error":{"code":400,"message":"Error Details: %s","status":"FAILED_PRECONDITION"}}`, citizenText)
+	for _, raw := range []string{
+		"failed to post query: non-2xx response: 400 - " + googleBody,
+		fmt.Sprintf("failed to download file: Get %q: dial tcp: connection refused", mediaURL),
+		"failed to parse response (raw: " + citizenText + ")",
+		"I couldn't process your audio message. Please try recording it again or send a text message.",
+		strings.Repeat("x", maxErrorSummaryRunes*2),
+	} {
+		got := SummarizeErrorText(raw)
+		if want := ErrorSummary(errors.New(raw)); got != want {
+			t.Fatalf("SummarizeErrorText(%q) = %q, ErrorSummary = %q", raw, got, want)
+		}
+		if again := SummarizeErrorText(got); again != got {
+			t.Fatalf("resumo não é idempotente: %q -> %q", got, again)
+		}
+		for _, f := range []string{citizenText, "000.000.000-00", mediaURL, "5521999990000", "SEGREDO123"} {
+			if strings.Contains(got, f) {
+				t.Fatalf("resumo vazou %q: %q", f, got)
+			}
+		}
+	}
+}
