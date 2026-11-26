@@ -45,6 +45,45 @@ type MessageHandlerDependencies struct {
 	CallbackService    *services.CallbackService              // Optional callback service
 	OTelWorkerWrapper  *middleware.OTelWorkerWrapper          // Optional OTel wrapper
 	TracePropagator    *middleware.TraceCorrelationPropagator // Optional trace propagator
+	WorkerMetrics      *middleware.WorkerMetricsWrapper       // Optional Prometheus worker metrics
+}
+
+// Labels of the worker_* series of the user message handler.
+const (
+	userMessageWorkerType  = "user_message_worker"
+	processUserMessageTask = "process_user_message"
+	retriableErrorReason   = "retriable_error"
+)
+
+// runUserMessageTask runs the task of a user message, counted and timed in the
+// worker_* series by its real outcome when metrics is not nil: a permanent
+// failure still counts as a failure, though its delivery is acknowledged.
+func runUserMessageTask(metrics *middleware.WorkerMetricsWrapper, task func() error) error {
+	if metrics == nil {
+		return task()
+	}
+	return metrics.WrapWorkerTask(userMessageWorkerType, processUserMessageTask, task)
+}
+
+// recordUserMessageRetry counts, when metrics is not nil, a retriable failure
+// that the consumer publishes again for a retry.
+func recordUserMessageRetry(metrics *middleware.WorkerMetricsWrapper, delivery amqp.Delivery, maxRetries int) {
+	if metrics != nil && willBeRetried(delivery, maxRetries) {
+		metrics.RecordWorkerRetry(userMessageWorkerType, processUserMessageTask, retriableErrorReason)
+	}
+}
+
+// willBeRetried reports whether the consumer publishes a delivery whose
+// handler failed again for a retry, instead of sending it to the dead letter
+// queue: it mirrors the x-retry-count check of Consumer.processMessageWithRetry.
+func willBeRetried(delivery amqp.Delivery, maxRetries int) bool {
+	retryCount := int64(0)
+	if delivery.Headers != nil {
+		if count, ok := delivery.Headers["x-retry-count"].(int64); ok {
+			retryCount = count
+		}
+	}
+	return retryCount < int64(maxRetries)
 }
 
 // TranscribeServiceInterface defines audio transcription operations
@@ -159,9 +198,16 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 		var response string
 		var err error
 
-		if deps.OTelWorkerWrapper != nil {
+		runTask := func() error {
+			if deps.OTelWorkerWrapper == nil {
+				// Process without tracing
+				var taskErr error
+				response, taskErr = processUserMessage(ctx, &queueMsg, deps)
+				return taskErr
+			}
+
 			// Wrap with OpenTelemetry tracing
-			err = deps.OTelWorkerWrapper.WrapWorkerTask(ctx, "user_message_worker", "process_user_message", func(tracedCtx context.Context) error {
+			return deps.OTelWorkerWrapper.WrapWorkerTask(ctx, userMessageWorkerType, processUserMessageTask, func(tracedCtx context.Context) error {
 				// Detect message type early for tracing attributes
 				isAudio := isAudioURL(queueMsg.Message)
 
@@ -179,13 +225,13 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 					)
 				}
 
-				response, err = processUserMessage(tracedCtx, &queueMsg, deps)
-				return err
+				var taskErr error
+				response, taskErr = processUserMessage(tracedCtx, &queueMsg, deps)
+				return taskErr
 			})
-		} else {
-			// Process without tracing
-			response, err = processUserMessage(ctx, &queueMsg, deps)
 		}
+
+		err = runUserMessageTask(deps.WorkerMetrics, runTask)
 
 		if err != nil {
 			logger.WithField(logrus.ErrorKey, pii.ErrorSummary(err)).Error("Failed to process user message")
@@ -204,6 +250,7 @@ func CreateUserMessageHandler(deps *MessageHandlerDependencies) func(context.Con
 					"error_type":    "retriable",
 					"error_message": pii.ErrorSummary(err),
 				}).Warn("Error is retriable, will be retried by RabbitMQ")
+				recordUserMessageRetry(deps.WorkerMetrics, delivery, deps.Config.RabbitMQ.MaxRetries)
 				// Update task status to processing (keep it processing for retry)
 				if statusErr := deps.RedisService.SetTaskStatus(ctx, queueMsg.ID, string(models.TaskStatusProcessing), deps.Config.Redis.TaskStatusTTL); statusErr != nil {
 					logger.WithError(statusErr).Error("Failed to update task status to processing for retry")

@@ -32,16 +32,6 @@ type PrometheusMetricsService struct {
 	queueProcessingTime *prometheus.HistogramVec
 	queueMessages       *prometheus.CounterVec
 
-	// Cache metrics
-	cacheOperations *prometheus.CounterVec
-	cacheHitRatio   *prometheus.GaugeVec
-	cacheDuration   *prometheus.HistogramVec
-
-	// External API metrics
-	externalAPICalls    *prometheus.CounterVec
-	externalAPIDuration *prometheus.HistogramVec
-	externalAPIErrors   *prometheus.CounterVec
-
 	mu sync.RWMutex
 }
 
@@ -185,70 +175,6 @@ func (ms *PrometheusMetricsService) initPrometheusMetrics(namespace, subsystem s
 		[]string{"queue_name", "queue_type", "status"},
 	)
 
-	// Cache metrics
-	ms.cacheOperations = factory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "cache_operations_total",
-			Help:      "Total number of cache operations",
-		},
-		[]string{"operation", "status"},
-	)
-
-	ms.cacheHitRatio = factory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "cache_hit_ratio",
-			Help:      "Cache hit ratio (0.0 to 1.0)",
-		},
-		[]string{"cache_type"},
-	)
-
-	ms.cacheDuration = factory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "cache_operation_duration_seconds",
-			Help:      "Cache operation duration in seconds",
-			Buckets:   prometheus.DefBuckets,
-		},
-		[]string{"operation", "status"},
-	)
-
-	// External API metrics
-	ms.externalAPICalls = factory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "external_api_calls_total",
-			Help:      "Total number of external API calls",
-		},
-		[]string{"service", "endpoint", "method", "status_code"},
-	)
-
-	ms.externalAPIDuration = factory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "external_api_duration_seconds",
-			Help:      "External API call duration in seconds",
-			Buckets:   prometheus.DefBuckets,
-		},
-		[]string{"service", "endpoint", "method", "status_code"},
-	)
-
-	ms.externalAPIErrors = factory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "external_api_errors_total",
-			Help:      "Total number of external API errors",
-		},
-		[]string{"service", "endpoint", "method", "error_type"},
-	)
-
 	return nil
 }
 
@@ -368,53 +294,5 @@ func (ms *PrometheusMetricsService) RecordQueueProcessing(queueName, queueType, 
 	}
 	if ms.queueProcessingTime != nil {
 		ms.queueProcessingTime.WithLabelValues(queueName, queueType, status).Observe(durationSeconds)
-	}
-}
-
-// Cache Metrics Methods
-
-// RecordCacheOperation records cache operation metrics
-func (ms *PrometheusMetricsService) RecordCacheOperation(operation, status string, duration time.Duration) {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-
-	durationSeconds := duration.Seconds()
-
-	if ms.cacheOperations != nil {
-		ms.cacheOperations.WithLabelValues(operation, status).Inc()
-	}
-	if ms.cacheDuration != nil {
-		ms.cacheDuration.WithLabelValues(operation, status).Observe(durationSeconds)
-	}
-}
-
-// SetCacheHitRatio sets the cache hit ratio
-func (ms *PrometheusMetricsService) SetCacheHitRatio(cacheType string, ratio float64) {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-
-	if ms.cacheHitRatio != nil {
-		ms.cacheHitRatio.WithLabelValues(cacheType).Set(ratio)
-	}
-}
-
-// External API Metrics Methods
-
-// RecordExternalAPICall records external API call metrics
-func (ms *PrometheusMetricsService) RecordExternalAPICall(service, endpoint, method, statusCode string, duration time.Duration, err error) {
-	ms.mu.RLock()
-	defer ms.mu.RUnlock()
-
-	durationSeconds := duration.Seconds()
-
-	if ms.externalAPICalls != nil {
-		ms.externalAPICalls.WithLabelValues(service, endpoint, method, statusCode).Inc()
-	}
-	if ms.externalAPIDuration != nil {
-		ms.externalAPIDuration.WithLabelValues(service, endpoint, method, statusCode).Observe(durationSeconds)
-	}
-	if ms.externalAPIErrors != nil && err != nil {
-		errorType := "error"
-		ms.externalAPIErrors.WithLabelValues(service, endpoint, method, errorType).Inc()
 	}
 }

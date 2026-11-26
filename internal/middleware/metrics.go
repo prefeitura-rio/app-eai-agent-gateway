@@ -1,10 +1,12 @@
 package middleware
 
 import (
+	"context"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	amqp "github.com/rabbitmq/amqp091-go"
 
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
@@ -63,8 +65,10 @@ func NewWorkerMetricsWrapper(metricsService *services.PrometheusMetricsService) 
 func (w *WorkerMetricsWrapper) WrapWorkerTask(workerType, taskType string, taskFunc func() error) error {
 	start := time.Now()
 
-	// Increment in-flight tasks
+	// Increment in-flight tasks; the decrement is deferred so that it also
+	// runs when the task panics.
 	w.metricsService.IncrementWorkerInFlight(workerType, taskType)
+	defer w.metricsService.DecrementWorkerInFlight(workerType, taskType)
 
 	// Execute task
 	err := taskFunc()
@@ -78,9 +82,6 @@ func (w *WorkerMetricsWrapper) WrapWorkerTask(workerType, taskType string, taskF
 
 	// Record metrics
 	w.metricsService.RecordWorkerTask(workerType, taskType, status, duration)
-
-	// Decrement in-flight tasks
-	w.metricsService.DecrementWorkerInFlight(workerType, taskType)
 
 	return err
 }
@@ -124,62 +125,58 @@ func (q *QueueMetricsWrapper) WrapQueueProcessing(queueName, queueType string, p
 	return err
 }
 
-// CacheMetricsWrapper provides a wrapper for cache operation metrics
-type CacheMetricsWrapper struct {
-	metricsService *services.PrometheusMetricsService
-}
-
-// NewCacheMetricsWrapper creates a new cache metrics wrapper
-func NewCacheMetricsWrapper(metricsService *services.PrometheusMetricsService) *CacheMetricsWrapper {
-	return &CacheMetricsWrapper{
-		metricsService: metricsService,
+// WrapMessageHandler instruments a RabbitMQ message handler: each delivery it
+// handles is counted in queue_messages_total and timed in
+// queue_processing_time_seconds. The status follows what the handler returned
+// to the consumer: "success" when the delivery is acknowledged, "failure" when
+// it goes back to RabbitMQ for a retry or to the dead letter queue.
+func (q *QueueMetricsWrapper) WrapMessageHandler(queueName, queueType string, handler services.MessageHandler) services.MessageHandler {
+	return func(ctx context.Context, delivery amqp.Delivery) error {
+		return q.WrapQueueProcessing(queueName, queueType, func() error {
+			return handler(ctx, delivery)
+		})
 	}
 }
 
-// WrapCacheOperation wraps a cache operation with metrics
-func (c *CacheMetricsWrapper) WrapCacheOperation(operation string, operationFunc func() error) error {
-	start := time.Now()
+// QueueDepthSource reports how many messages are ready in a queue.
+type QueueDepthSource interface {
+	QueueDepth(queueName string) (int, error)
+}
 
-	err := operationFunc()
+// QueueDepthTarget is a queue whose depth is collected, with the queue_type
+// label of its queue_depth series.
+type QueueDepthTarget struct {
+	Name string
+	Type string
+}
 
-	duration := time.Since(start)
-	status := "success"
-	if err != nil {
-		status = "error"
+// CollectQueueDepth sets queue_depth for each target right away and then on
+// every interval, until ctx is done. A queue whose depth cannot be read keeps
+// its last value, and the error is passed to onError when it is not nil.
+func (q *QueueMetricsWrapper) CollectQueueDepth(ctx context.Context, source QueueDepthSource, interval time.Duration, targets []QueueDepthTarget, onError func(target QueueDepthTarget, err error)) {
+	collect := func() {
+		for _, target := range targets {
+			depth, err := source.QueueDepth(target.Name)
+			if err != nil {
+				if onError != nil {
+					onError(target, err)
+				}
+				continue
+			}
+			q.UpdateQueueDepth(target.Name, target.Type, int64(depth))
+		}
 	}
 
-	c.metricsService.RecordCacheOperation(operation, status, duration)
+	collect()
 
-	return err
-}
-
-// UpdateCacheHitRatio updates the cache hit ratio metric
-func (c *CacheMetricsWrapper) UpdateCacheHitRatio(cacheType string, ratio float64) {
-	c.metricsService.SetCacheHitRatio(cacheType, ratio)
-}
-
-// ExternalAPIMetricsWrapper provides a wrapper for external API call metrics
-type ExternalAPIMetricsWrapper struct {
-	metricsService *services.PrometheusMetricsService
-}
-
-// NewExternalAPIMetricsWrapper creates a new external API metrics wrapper
-func NewExternalAPIMetricsWrapper(metricsService *services.PrometheusMetricsService) *ExternalAPIMetricsWrapper {
-	return &ExternalAPIMetricsWrapper{
-		metricsService: metricsService,
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			collect()
+		}
 	}
-}
-
-// WrapAPICall wraps an external API call with metrics collection
-func (e *ExternalAPIMetricsWrapper) WrapAPICall(service, endpoint, method string, apiFunc func() (int, error)) error {
-	start := time.Now()
-
-	statusCode, err := apiFunc()
-
-	duration := time.Since(start)
-	statusCodeStr := strconv.Itoa(statusCode)
-
-	e.metricsService.RecordExternalAPICall(service, endpoint, method, statusCodeStr, duration, err)
-
-	return err
 }

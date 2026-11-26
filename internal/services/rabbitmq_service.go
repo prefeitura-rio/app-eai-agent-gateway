@@ -549,6 +549,33 @@ func (r *RabbitMQService) GetQueueInfo(queueName string) (amqp.Queue, error) {
 	return r.channel.QueueDeclarePassive(queueName, true, false, false, false, nil)
 }
 
+// QueueDepth returns how many messages are ready in a queue. It inspects the
+// queue on a short-lived channel of its own: the shared channel is not safe
+// for concurrent use with the publishes and consumers, and a passive declare
+// of a missing queue closes the channel it runs on.
+func (r *RabbitMQService) QueueDepth(queueName string) (int, error) {
+	r.mutex.RLock()
+	connection := r.connection
+	connected := r.isConnected
+	r.mutex.RUnlock()
+
+	if !connected || connection == nil || connection.IsClosed() {
+		return 0, fmt.Errorf("RabbitMQ connection is not available")
+	}
+
+	channel, err := connection.Channel()
+	if err != nil {
+		return 0, fmt.Errorf("failed to open channel to inspect queue %s: %w", queueName, err)
+	}
+	defer func() { _ = channel.Close() }()
+
+	queue, err := channel.QueueDeclarePassive(queueName, true, false, false, false, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to inspect queue %s: %w", queueName, err)
+	}
+	return queue.Messages, nil
+}
+
 // Close gracefully closes the RabbitMQ connection
 func (r *RabbitMQService) Close() error {
 	r.mutex.Lock()
