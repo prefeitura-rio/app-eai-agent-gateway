@@ -17,6 +17,14 @@ import (
 	"github.com/prefeitura-rio/app-eai-agent-gateway/internal/services"
 )
 
+// metricsNamespace is the Prometheus namespace of the worker's metrics, the
+// same as the gateway's.
+const metricsNamespace = "eai_gateway"
+
+// queueDepthInterval is how often the depth of the consumed queue and of its
+// dead letter queue is read for the queue_depth series.
+const queueDepthInterval = 15 * time.Second
+
 func main() {
 	// Load configuration
 	cfg, err := config.Load()
@@ -68,6 +76,23 @@ func main() {
 		}
 	} else {
 		log.Info("OpenTelemetry disabled or collector URL not set for worker, continuing without tracing")
+	}
+
+	// Initialize Prometheus metrics if enabled (worker_* and queue_* series,
+	// served on the metrics path of the health server)
+	var metricsService *services.PrometheusMetricsService
+	var workerMetrics *middleware.WorkerMetricsWrapper
+	var queueMetrics *middleware.QueueMetricsWrapper
+	if cfg.Observability.MetricsEnabled {
+		metricsService, err = services.NewPrometheusMetricsService(services.PrometheusConfig{Namespace: metricsNamespace})
+		if err != nil {
+			log.WithError(err).Fatal("Failed to initialize Prometheus metrics service")
+		}
+		workerMetrics = middleware.NewWorkerMetricsWrapper(metricsService)
+		queueMetrics = middleware.NewQueueMetricsWrapper(metricsService)
+		log.WithField("path", cfg.Observability.MetricsPath).Info("Prometheus metrics enabled for worker")
+	} else {
+		log.Info("Prometheus metrics disabled for worker")
 	}
 
 	// Initialize Redis service
@@ -152,10 +177,15 @@ func main() {
 			}
 			return nil
 		}(), // Optional trace propagator for distributed tracing
+		WorkerMetrics: workerMetrics, // Optional Prometheus worker metrics
 	}
 
-	// Create message handler
-	userMessageHandler := workerhandlers.CreateUserMessageHandler(handlerDeps)
+	// Create message handler, counted and timed per delivery when metrics are enabled
+	queueName := cfg.RabbitMQ.UserMessagesQueue
+	var userMessageHandler services.MessageHandler = workerhandlers.CreateUserMessageHandler(handlerDeps)
+	if queueMetrics != nil {
+		userMessageHandler = queueMetrics.WrapMessageHandler(queueName, "main", userMessageHandler)
+	}
 
 	// Add user message consumer with configurable concurrency
 	concurrency := cfg.RabbitMQ.MaxParallel
@@ -167,8 +197,21 @@ func main() {
 	}
 
 	log.WithField("concurrency", concurrency).Info("Setting up user message consumer")
-	if err := consumerManager.AddConsumer(ctx, rabbitMQService, cfg.RabbitMQ.UserMessagesQueue, concurrency, userMessageHandler); err != nil {
+	if err := consumerManager.AddConsumer(ctx, rabbitMQService, queueName, concurrency, userMessageHandler); err != nil {
 		log.WithError(err).Fatal("Failed to add user message consumer")
+	}
+
+	// Collect the depth of the consumed queue and of its dead letter queue
+	metricsCtx, stopMetrics := context.WithCancel(context.Background())
+	defer stopMetrics()
+	if queueMetrics != nil {
+		targets := []middleware.QueueDepthTarget{
+			{Name: queueName, Type: "main"},
+			{Name: queueName + "_dlq", Type: "dlq"},
+		}
+		go queueMetrics.CollectQueueDepth(metricsCtx, rabbitMQService, queueDepthInterval, targets, func(target middleware.QueueDepthTarget, err error) {
+			log.WithError(err).WithField("queue", target.Name).Debug("Failed to read queue depth")
+		})
 	}
 
 	log.Info("Worker started successfully - consuming messages from RabbitMQ")
@@ -176,11 +219,8 @@ func main() {
 	// Set up health check HTTP server
 	healthHandler := workerhandlers.NewWorkerHealthHandler(rabbitMQService, redisService, log)
 
-	// Create HTTP mux for health endpoints
-	mux := http.NewServeMux()
-	mux.HandleFunc("/health", healthHandler.Health)
-	mux.HandleFunc("/ready", healthHandler.Ready)
-	mux.HandleFunc("/live", healthHandler.Live)
+	// Create HTTP mux for health endpoints and, when enabled, metrics
+	mux := workerhandlers.NewHealthMux(healthHandler, metricsService, cfg.Observability.MetricsPath)
 
 	// Get health check port from config or use default
 	healthPort := cfg.Server.HealthPort
@@ -210,6 +250,9 @@ func main() {
 	<-quit
 
 	log.Info("Shutting down worker...")
+
+	// Stop collecting queue depth
+	stopMetrics()
 
 	// Give the worker 30 seconds to gracefully shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

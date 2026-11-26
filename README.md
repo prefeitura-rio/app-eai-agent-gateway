@@ -717,23 +717,23 @@ Kubernetes liveness probe.
 ```http
 GET /metrics
 ```
-Prometheus metrics endpoint.
+Prometheus metrics endpoint (only with `METRICS_ENABLED`, on `METRICS_PATH`). The gateway serves the HTTP series on its API port; the worker serves the worker and queue series on its health port (`WORKER_HEALTH_PORT`, 8081).
 
 **Key Metrics:**
 ```
-# Message processing
-http_requests_total{method="POST",endpoint="/webhook/user",status="200"} 1500
-message_processing_duration_seconds{type="audio"} 2.5
-message_queue_depth{queue="user_messages"} 8
+# Gateway (API port)
+eai_gateway_http_requests_total{method="POST",endpoint="/api/v1/message/webhook/user",status_code="201"} 1500
+eai_gateway_http_request_duration_seconds_bucket{...}
 
-# External services  
-external_api_calls_total{service="google_speech",status="success"} 450
-external_api_response_time_seconds{service="google_agent_engine"} 1.2
-
-# System health
-redis_connections_active 7
-rabbitmq_connection_status{status="connected"} 1
-worker_pool_utilization_ratio 0.75
+# Worker (health port)
+eai_gateway_worker_tasks_total{worker_type="user_message_worker",task_type="process_user_message",status="success"} 1450
+eai_gateway_worker_task_duration_seconds_bucket{...}
+eai_gateway_worker_tasks_in_flight{worker_type="user_message_worker",task_type="process_user_message"} 3
+eai_gateway_worker_retry_attempts_total{worker_type="user_message_worker",task_type="process_user_message",retry_reason="retriable_error"} 12
+eai_gateway_queue_messages_total{queue_name="user_messages",queue_type="main",status="success"} 1480
+eai_gateway_queue_processing_time_seconds_bucket{...}
+eai_gateway_queue_depth{queue_name="user_messages",queue_type="main"} 8
+eai_gateway_queue_depth{queue_name="user_messages_dlq",queue_type="dlq"} 0
 ```
 
 ### Authentication
@@ -1602,8 +1602,8 @@ histogram_quantile(0.95, message_processing_duration_seconds)
 sum(rate(message_queue_depth[1m])) by (queue)
 
 # Error Rates
-rate(message_processing_errors_total[5m]) / rate(message_processing_total[5m])
-rate(external_api_errors_total{service="google_agent_engine"}[5m])
+sum(rate(eai_gateway_worker_tasks_total{status="failure"}[5m])) / sum(rate(eai_gateway_worker_tasks_total[5m]))
+max(eai_gateway_queue_depth{queue_type="dlq"})
 
 # Throughput Metrics  
 sum(rate(message_processing_total[1m])) by (message_type)
