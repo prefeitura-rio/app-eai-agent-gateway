@@ -16,6 +16,7 @@ var KnownMessageTypesList = []string{
 	"audio",
 	"image",
 	"video",
+	"document",
 	"location",
 	"interactive",
 	"unsupported",
