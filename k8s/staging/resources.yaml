@@ -119,6 +119,10 @@ spec:
     metadata:
       labels:
         app: eai-agent-gateway-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: "/metrics"
     spec:
       automountServiceAccountToken: false
       securityContext:
